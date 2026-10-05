@@ -35,15 +35,20 @@
           </div>
         </div>
 
-        <el-skeleton v-if="loading" :rows="6" animated class="skeleton" />
+        <!-- 图表容器常驻 DOM（避免在 0 宽容器上初始化 ECharts），加载/空态用覆盖层 -->
+        <div class="chart-box">
+          <div ref="chartEl" class="chart"></div>
 
-        <div v-else-if="!stats.length" class="empty-map">
-          <el-empty description="暂无数据（该年份数据集没有院校省份信息）" />
+          <div v-if="loading" class="chart-overlay">
+            <el-skeleton :rows="6" animated class="skeleton" />
+          </div>
+
+          <div v-else-if="!stats.length" class="chart-overlay">
+            <el-empty description="暂无数据（该年份数据集没有院校省份信息）" />
+          </div>
         </div>
 
-        <div v-show="!loading && stats.length" ref="chartEl" class="chart"></div>
-
-        <p v-if="!loading && stats.length" class="legend">
+        <p class="legend">
           颜色越深，代表该省高校在河南投放的专业越多（点击省份可查看该省院校）
         </p>
       </div>
@@ -67,7 +72,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
 import { majorCountByProvince } from '@/api/recommend'
@@ -174,8 +179,8 @@ function buildOption(): echarts.EChartsOption {
   }
 }
 
-async function render() {
-  if (!chartEl.value) return
+function ensureChart() {
+  if (!chartEl.value) return null
   if (!chart.value) {
     chart.value = echarts.init(chartEl.value)
     // 点击省份 → 跳转「查大学/专业」并带上该省份作为筛选条件
@@ -194,7 +199,14 @@ async function render() {
       })
     })
   }
-  chart.value.setOption(buildOption(), true)
+  return chart.value
+}
+
+async function render() {
+  const inst = ensureChart()
+  if (!inst) return
+  inst.setOption(buildOption(), true)
+  inst.resize()
 }
 
 async function load() {
@@ -208,11 +220,13 @@ async function load() {
       batch: batch.value
     })
     stats.value = res.data || []
-    await render()
   } catch {
     stats.value = []
   } finally {
     loading.value = false
+    // 等覆盖层移除、容器恢复可见后再渲染，保证拿到正确宽高
+    await nextTick()
+    await render()
   }
 }
 
@@ -220,18 +234,22 @@ function onResize() {
   chart.value?.resize()
 }
 
+let resizeObserver: ResizeObserver | null = null
+
 onMounted(async () => {
   await load()
   window.addEventListener('resize', onResize)
-})
-
-// 卡片宽度变化时（如窗口断点切换）也要重绘
-watch(stats, () => {
-  if (!loading.value) render()
+  // 容器尺寸变化（不限于窗口 resize）时也自适应
+  if (chartEl.value && 'ResizeObserver' in window) {
+    resizeObserver = new ResizeObserver(() => chart.value?.resize())
+    resizeObserver.observe(chartEl.value)
+  }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   chart.value?.dispose()
   chart.value = null
 })
@@ -284,15 +302,26 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 6px;
 }
-.chart {
-  height: 460px;
+.chart-box {
+  position: relative;
+  height: 480px;
   width: 100%;
 }
-.skeleton {
-  padding: 20px 0;
+.chart {
+  height: 100%;
+  width: 100%;
 }
-.empty-map {
-  padding: 30px 0;
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+}
+.skeleton {
+  width: 100%;
+  padding: 20px;
 }
 .legend {
   margin: 6px 0 0;
@@ -310,8 +339,8 @@ onBeforeUnmount(() => {
   .grid {
     grid-template-columns: 1fr;
   }
-  .chart {
-    height: 360px;
+  .chart-box {
+    height: 380px;
   }
 }
 </style>
