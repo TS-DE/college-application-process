@@ -99,3 +99,9 @@ if os.path.isdir(DIST_DIR):
         raise HTTPException(status_code=404, detail="前端未构建")
 
     app.mount("/assets", StaticFiles(directory=os.path.join(DIST_DIR, "assets")), name="assets")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)
