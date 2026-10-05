@@ -1,0 +1,28 @@
+# ---- Web ----
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+
+# ---- DB ----
+sqlalchemy>=2.0
+pymysql>=1.1
+
+# ---- 数据校验 / 配置 ----
+pydantic>=2.6
+python-dotenv>=1.0
+
+# ---- 鉴权 ----
+python-jose[cryptography]>=3.3
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1          # passlib 1.7.4 与 bcrypt>=4.1 不兼容，需锁定
+
+# ---- RAG ----
+chromadb>=0.5
+requests>=2.31
+pypdf>=4.2
+python-docx>=1.1
+# 可选：离线 sentence-transformers 嵌入（当前默认走 Ollama embedding）
+# sentence-transformers>=2.7
+
+# ---- 数据导入阶段需要（可选）----
+pandas>=2.0

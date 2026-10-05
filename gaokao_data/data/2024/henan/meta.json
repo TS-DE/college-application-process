@@ -1,0 +1,353 @@
+{
+  "exam_overview": {
+    "categories": [
+      {
+        "name": "理科",
+        "total_candidates": 573517,
+        "max_score": 709,
+        "batch_lines": [
+          {
+            "batch": "专科批",
+            "score": 185
+          },
+          {
+            "batch": "本科一批",
+            "score": 511
+          },
+          {
+            "batch": "本科二批",
+            "score": 396
+          }
+        ]
+      },
+      {
+        "name": "文科",
+        "total_candidates": 358962,
+        "max_score": 671,
+        "batch_lines": [
+          {
+            "batch": "专科批",
+            "score": 185
+          },
+          {
+            "batch": "本科一批",
+            "score": 521
+          },
+          {
+            "batch": "本科二批",
+            "score": 428
+          }
+        ]
+      }
+    ],
+    "total_candidates": 932479
+  },
+  "university_stats": {
+    "total": 2237,
+    "is_985": 38,
+    "is_211": 110,
+    "public": 0,
+    "private": 0,
+    "other": 2237,
+    "by_province": {}
+  },
+  "enrollment_stats": {
+    "total_plan": 0,
+    "university_count": 2237,
+    "major_count": 0,
+    "has_plan_count": false,
+    "by_batch": {},
+    "by_category": {},
+    "top_universities": [
+      {
+        "name": "七台河职业学院",
+        "major_count": 0
+      },
+      {
+        "name": "三亚中瑞酒店管理职业学院",
+        "major_count": 0
+      },
+      {
+        "name": "三亚城市职业学院",
+        "major_count": 0
+      },
+      {
+        "name": "三亚学院",
+        "major_count": 0
+      },
+      {
+        "name": "三亚理工职业学院",
+        "major_count": 0
+      },
+      {
+        "name": "三亚航空旅游职业学院",
+        "major_count": 0
+      },
+      {
+        "name": "三峡大学",
+        "major_count": 0
+      },
+      {
+        "name": "三峡大学科技学院",
+        "major_count": 0
+      },
+      {
+        "name": "三峡旅游职业技术学院",
+        "major_count": 0
+      },
+      {
+        "name": "三峡电力职业学院",
+        "major_count": 0
+      }
+    ]
+  },
+  "top_majors": [],
+  "score_distribution": [
+    {
+      "category": "理科",
+      "points": [
+        {
+          "score": 709,
+          "segment_count": 10,
+          "cumulative_count": 10
+        },
+        {
+          "score": 679,
+          "segment_count": 35,
+          "cumulative_count": 608
+        },
+        {
+          "score": 649,
+          "segment_count": 171,
+          "cumulative_count": 3955
+        },
+        {
+          "score": 619,
+          "segment_count": 421,
+          "cumulative_count": 13028
+        },
+        {
+          "score": 589,
+          "segment_count": 793,
+          "cumulative_count": 31680
+        },
+        {
+          "score": 559,
+          "segment_count": 1194,
+          "cumulative_count": 61939
+        },
+        {
+          "score": 529,
+          "segment_count": 1474,
+          "cumulative_count": 102211
+        },
+        {
+          "score": 499,
+          "segment_count": 1655,
+          "cumulative_count": 149493
+        },
+        {
+          "score": 469,
+          "segment_count": 1811,
+          "cumulative_count": 200513
+        },
+        {
+          "score": 439,
+          "segment_count": 1827,
+          "cumulative_count": 253700
+        },
+        {
+          "score": 409,
+          "segment_count": 1735,
+          "cumulative_count": 307060
+        },
+        {
+          "score": 379,
+          "segment_count": 1592,
+          "cumulative_count": 358004
+        },
+        {
+          "score": 349,
+          "segment_count": 1494,
+          "cumulative_count": 404491
+        },
+        {
+          "score": 319,
+          "segment_count": 1275,
+          "cumulative_count": 446076
+        },
+        {
+          "score": 289,
+          "segment_count": 1073,
+          "cumulative_count": 481202
+        },
+        {
+          "score": 259,
+          "segment_count": 909,
+          "cumulative_count": 510265
+        },
+        {
+          "score": 229,
+          "segment_count": 744,
+          "cumulative_count": 534127
+        },
+        {
+          "score": 199,
+          "segment_count": 534,
+          "cumulative_count": 552860
+        },
+        {
+          "score": 169,
+          "segment_count": 317,
+          "cumulative_count": 565534
+        },
+        {
+          "score": 139,
+          "segment_count": 117,
+          "cumulative_count": 571699
+        },
+        {
+          "score": 109,
+          "segment_count": 24,
+          "cumulative_count": 573343
+        }
+      ]
+    },
+    {
+      "category": "文科",
+      "points": [
+        {
+          "score": 671,
+          "segment_count": 12,
+          "cumulative_count": 12
+        },
+        {
+          "score": 643,
+          "segment_count": 9,
+          "cumulative_count": 151
+        },
+        {
+          "score": 615,
+          "segment_count": 29,
+          "cumulative_count": 916
+        },
+        {
+          "score": 587,
+          "segment_count": 136,
+          "cumulative_count": 3514
+        },
+        {
+          "score": 559,
+          "segment_count": 292,
+          "cumulative_count": 9687
+        },
+        {
+          "score": 531,
+          "segment_count": 463,
+          "cumulative_count": 20613
+        },
+        {
+          "score": 503,
+          "segment_count": 618,
+          "cumulative_count": 36361
+        },
+        {
+          "score": 475,
+          "segment_count": 819,
+          "cumulative_count": 56502
+        },
+        {
+          "score": 447,
+          "segment_count": 887,
+          "cumulative_count": 80118
+        },
+        {
+          "score": 419,
+          "segment_count": 965,
+          "cumulative_count": 106137
+        },
+        {
+          "score": 391,
+          "segment_count": 1114,
+          "cumulative_count": 135035
+        },
+        {
+          "score": 363,
+          "segment_count": 1219,
+          "cumulative_count": 166696
+        },
+        {
+          "score": 335,
+          "segment_count": 1237,
+          "cumulative_count": 200717
+        },
+        {
+          "score": 307,
+          "segment_count": 1264,
+          "cumulative_count": 236020
+        },
+        {
+          "score": 279,
+          "segment_count": 1269,
+          "cumulative_count": 270820
+        },
+        {
+          "score": 251,
+          "segment_count": 1063,
+          "cumulative_count": 302622
+        },
+        {
+          "score": 223,
+          "segment_count": 808,
+          "cumulative_count": 328423
+        },
+        {
+          "score": 195,
+          "segment_count": 504,
+          "cumulative_count": 345807
+        },
+        {
+          "score": 167,
+          "segment_count": 173,
+          "cumulative_count": 354483
+        },
+        {
+          "score": 139,
+          "segment_count": 54,
+          "cumulative_count": 357685
+        },
+        {
+          "score": 111,
+          "segment_count": 27,
+          "cumulative_count": 358732
+        }
+      ]
+    }
+  ],
+  "admission_bands": [
+    {
+      "batch": "专科",
+      "count": 1309,
+      "min_score": 165,
+      "max_score": 455,
+      "median_score": 271,
+      "by_category": []
+    },
+    {
+      "batch": "本一",
+      "count": 827,
+      "min_score": 475,
+      "max_score": 692,
+      "median_score": 559,
+      "by_category": []
+    },
+    {
+      "batch": "本二",
+      "count": 1169,
+      "min_score": 376,
+      "max_score": 565,
+      "median_score": 454,
+      "by_category": []
+    }
+  ]
+}
