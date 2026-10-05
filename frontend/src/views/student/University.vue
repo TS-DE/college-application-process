@@ -4,6 +4,16 @@
 
     <el-card shadow="never">
       <el-form :inline="true" :model="query" class="filters">
+        <el-form-item label="省份">
+          <el-select
+            v-model="query.school_province"
+            placeholder="院校所在省份"
+            clearable
+            style="width: 140px"
+          >
+            <el-option v-for="p in provinceOptions" :key="p" :label="p" :value="p" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="科类">
           <el-select v-model="query.category" style="width: 130px">
             <el-option label="物理类" value="物理类" />
@@ -70,10 +80,14 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
-import { listMajors, listUniversities } from '@/api/recommend'
+import { onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { majorCountByProvince, listMajors, listUniversities } from '@/api/recommend'
+
+const route = useRoute()
 
 const query = reactive({
+  school_province: '' as string,
   category: '物理类',
   batch: '本科批',
   keyword: '',
@@ -85,19 +99,32 @@ const query = reactive({
 const rows = ref<any[]>([])
 const total = ref(0)
 const loading = ref(false)
+const provinceOptions = ref<string[]>([])
 
 const drawer = ref(false)
 const current = ref<any>(null)
 const majors = ref<any[]>([])
 const majorLoading = ref(false)
 
+async function loadProvinceOptions() {
+  try {
+    const res = await majorCountByProvince({ province: '河南', year: 2025, category: '物理类', batch: '本科批' })
+    provinceOptions.value = (res.data || []).map((d) => d.province)
+  } catch {
+    provinceOptions.value = []
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     const res = await listUniversities({
+      province: '河南',
+      year: 2025,
       category: query.category,
       batch: query.batch,
       keyword: query.keyword || undefined,
+      school_province: query.school_province || undefined,
       rank: query.rank || undefined,
       page: query.page,
       page_size: query.page_size
@@ -125,7 +152,26 @@ async function openMajors(row: any) {
   }
 }
 
-load()
+// 支持从首页地图跳转：/university?province=浙江 / ?school_province=浙江
+function applyRouteQuery() {
+  const q = route.query
+  const province = (q.school_province || q.province) as string | undefined
+  if (province) query.school_province = province
+  if (q.category) query.category = String(q.category)
+  if (q.batch) query.batch = String(q.batch)
+}
+
+onMounted(async () => {
+  applyRouteQuery()
+  await loadProvinceOptions()
+  await load()
+})
+
+watch(() => route.fullPath, async () => {
+  applyRouteQuery()
+  query.page = 1
+  await load()
+})
 </script>
 
 <style scoped>

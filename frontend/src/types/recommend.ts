@@ -20,6 +20,24 @@ export interface RecommendItem {
   is_double_first_class?: boolean
 }
 
+export interface ProvinceMajorStat {
+  province: string
+  university_count: number
+  major_count: number
+}
+
+export interface ProvinceMajorStatsResult {
+  code: number
+  msg: string
+  province: string
+  year: number
+  category: string
+  batch: string
+  total_major: number
+  total_university: number
+  data: ProvinceMajorStat[]
+}
+
 export interface RecommendResult {
   chong: RecommendItem[]
   wen: RecommendItem[]

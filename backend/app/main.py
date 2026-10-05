@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import settings
 from app.database import TableNotFound, ensure_indexes
-from app.routers import ai, auth, knowledge, meta, recommend, student, university
+from app.routers import ai, auth, knowledge, meta, recommend, stats, student, university
 
 app = FastAPI(
     title="高考志愿填报系统",
@@ -34,6 +34,8 @@ app.include_router(recommend.router)
 app.include_router(university.router)
 app.include_router(meta.router)
 app.include_router(ai.router)
+# 统计（首页地图）
+app.include_router(stats.router)
 # 鉴权与知识库（RAG）
 app.include_router(auth.router)
 app.include_router(knowledge.router)
@@ -87,18 +89,19 @@ FRONTEND_DIR = os.path.join(
 DIST_DIR = os.path.join(FRONTEND_DIR, "dist")
 
 if os.path.isdir(DIST_DIR):
-    from fastapi.staticfiles import StaticFiles
-
     INDEX_FILE = os.path.join(DIST_DIR, "index.html")
 
     @app.get("/{full_path:path}")
     def _spa_fallback(full_path: str):  # noqa: ANN001
-        """Vue history 模式回退：/admin/knowledge 等前端路由交给前端处理。"""
+        """Vue history 模式回退：/admin/knowledge 等前端路由交给前端处理；
+        同时提供 dist 下的静态文件（如 /china.json）。"""
+        if full_path:
+            target = os.path.normpath(os.path.join(DIST_DIR, full_path))
+            if target.startswith(os.path.abspath(DIST_DIR)) and os.path.isfile(target):
+                return FileResponse(target)
         if os.path.exists(INDEX_FILE):
             return FileResponse(INDEX_FILE)
         raise HTTPException(status_code=404, detail="前端未构建")
-
-    app.mount("/assets", StaticFiles(directory=os.path.join(DIST_DIR, "assets")), name="assets")
 
 
 if __name__ == "__main__":

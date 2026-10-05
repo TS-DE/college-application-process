@@ -1,5 +1,5 @@
 import { http } from './request'
-import type { RecommendResult } from '@/types/recommend'
+import type { ProvinceMajorStatsResult, RecommendResult } from '@/types/recommend'
 
 export interface RecommendPayload {
   province: string
@@ -42,6 +42,16 @@ export function controlLines(province: string, year: number, category: string) {
     min_line: number | null
     full_score: number
   }>({ url: '/meta/control-lines', params: { province, year, category } })
+}
+
+/** 各省高校在河南投放的专业数量（首页中国地图） */
+export function majorCountByProvince(params: {
+  province?: string
+  year?: number
+  category?: string
+  batch?: string
+}) {
+  return http<ProvinceMajorStatsResult>({ url: '/stats/major-count-by-province', params })
 }
 
 export function listUniversities(params: Record<string, any>) {

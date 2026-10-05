@@ -238,6 +238,11 @@ netstat -ano | findstr :8000
 taskkill /PID <PID> /F
 ```
 
+**首页中国地图**（`/api/stats/major-count-by-province`）：
+按 `school_province` 聚合 `major_admission` 表，返回各省「在河南投放的专业数 + 涉及院校数」；
+前端 ECharts 中国地图（GeoJSON 取自阿里云 DataV，已本地化为 `frontend/public/china.json`）紫色渐变着色，
+点击省份跳转「查大学 / 专业」并自动带上省份筛选。
+
 ---
 
 ## 四、接口清单
@@ -245,6 +250,7 @@ taskkill /PID <PID> /F
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 服务 + 数据库 + Ollama + RAG 状态 |
+| GET | `/api/stats/major-count-by-province` | 各省高校在豫招生专业数量（首页地图） |
 | POST | `/api/student/profile` | 保存考生信息并返回换算位次 |
 | GET | `/api/score-to-rank` | 分数 → 位次（查一分一段表） |
 | GET | `/api/rank-to-score` | 位次 → 分数 |
