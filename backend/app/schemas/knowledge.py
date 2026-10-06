@@ -31,6 +31,10 @@ class ChunkHit(BaseModel):
     text: str
     metadata: dict = {}
     distance: Optional[float] = None
+    # 混合检索新增字段：便于对比两路召回效果（纯向量检索时均为 None）
+    rrf_score: Optional[float] = None
+    dense_rank: Optional[int] = None
+    bm25_rank: Optional[int] = None
 
 
 class SearchOut(BaseModel):

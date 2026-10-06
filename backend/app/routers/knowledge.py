@@ -28,8 +28,9 @@ from app.utils.file_utils import (
     file_type_of,
     is_allowed,
     save_upload_file,
-    split_text,
 )
+# 切片改用 rag_service 的「递归分块」（RecursiveCharacterTextSplitter）
+from app.services.rag_service import split_text
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -181,7 +182,15 @@ def search_knowledge(
     return SearchOut(
         query=query,
         data=[
-            ChunkHit(text=h["text"], metadata=h.get("metadata", {}), distance=h.get("distance"))
+            ChunkHit(
+                text=h["text"],
+                metadata=h.get("metadata", {}),
+                distance=h.get("distance"),
+                # 混合检索融合信息：便于前端/排查时对比两路召回
+                rrf_score=h.get("rrf_score"),
+                dense_rank=h.get("dense_rank"),
+                bm25_rank=h.get("bm25_rank"),
+            )
             for h in hits
         ],
     )

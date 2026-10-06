@@ -21,6 +21,11 @@ chromadb>=0.5
 requests>=2.31
 pypdf>=4.2
 python-docx>=1.1
+# 递归分块
+langchain-text-splitters>=0.3
+# 混合检索：稀疏路（BM25）+ 中文分词
+rank-bm25>=0.2.2
+jieba>=0.42.1
 # 可选：离线 sentence-transformers 嵌入（当前默认走 Ollama embedding）
 # sentence-transformers>=2.7
 
