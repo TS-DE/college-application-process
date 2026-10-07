@@ -20,8 +20,8 @@ from app.services.ai_service import ask
 
 # 有学费信息的上下文（数字必须来自这里）
 CONTEXT_WITH_TUITION = (
-    "[河南招生计划2025.txt] 郑州大学 计算机科学与技术专业，2025年在河南本科批物理类招生120人，"
-    "学制4年，学费标准为5700元/学年，选科要求首选物理、再选化学。"
+    "[河南招生计划2025.txt] 福州大学至诚学院 计算机科学与技术专业，2025年在河南本科批物理类招生60人，"
+    "学制4年，学费标准为23000元/年，选科要求首选物理、再选化学。"
 )
 
 # 完全没有学费信息的上下文
@@ -41,28 +41,37 @@ def main() -> None:
     print("=" * 78)
     print("【1】Query 意图路由（ROUTER_PROMPT, temperature=0.0, max_tokens=5）")
     print("=" * 78)
-    for q, expect in [("婚假几天", False), ("今天天气怎么样", False),
-                      ("河南本科批志愿怎么填报", True), ("郑州大学计算机专业学费多少", True)]:
+    for q, expect in [
+        ("婚假几天", False),
+        ("今天天气怎么样", False),
+        # v2.3.1 修正的两个场景（v2.3.0 会因关键词太窄被误拦截）
+        ("2025河南在福建招生的院校", True),
+        ("福州大学至诚学院计算机专业学费", True),
+        ("河南本科批志愿怎么填报", True),
+        ("郑州大学计算机专业学费多少", True),
+    ]:
         passed = rag_service.route_query(q)
         check(f"route_query({q}) 期望 {'放行' if expect else '拦截'}", passed is expect,
               f"实际 {'放行' if passed else '拦截'}")
 
     print()
     print("=" * 78)
-    print("【2】防幻觉生成：上下文【有】学费（temperature=0.1, top_p=0.1）")
+    print("【2】防幻觉生成：上下文【有】学费（temperature=0.1, top_p=0.3）")
     print("=" * 78)
-    ans = rag_service.generate_answer("郑州大学计算机科学与技术专业学费是多少？", CONTEXT_WITH_TUITION)
+    ans = rag_service.generate_answer("福州大学至诚学院计算机科学与技术专业学费是多少？", CONTEXT_WITH_TUITION)
     print("  回答：", (ans or "").replace("\n", " ")[:160])
-    check("回答中出现上下文里的真实学费 5700", bool(ans) and "5700" in ans)
+    # v2.3.1 关注点：上下文有 23000 时模型必须敢生成，而不是套用拒答话术
+    check("回答中出现上下文里的真实学费 23000", bool(ans) and "23000" in ans)
+    check("没有误触发拒答话术", bool(ans) and REFUSAL not in ans)
 
     print()
     print("=" * 78)
-    print("【3】防幻觉生成：上下文【无】学费 → 必须拒答")
+    print("【3】防幻觉生成：上下文【无】学费 → 拒答/引导，且不编造数字")
     print("=" * 78)
-    ans2 = rag_service.generate_answer("郑州大学计算机科学与技术专业学费是多少？", CONTEXT_NO_TUITION)
+    ans2 = rag_service.generate_answer("福州大学至诚学院计算机科学与技术专业学费是多少？", CONTEXT_NO_TUITION)
     print("  回答：", (ans2 or "").replace("\n", " ")[:160])
-    check("按话术拒答（含「未查询到具体信息」）", bool(ans2) and REFUSAL in ans2)
-    check("没有编造数字", bool(ans2) and "5700" not in ans2 and "6000" not in ans2)
+    check("按话术引导（含「未查询到具体信息」）", bool(ans2) and REFUSAL in ans2)
+    check("没有编造数字", bool(ans2) and "23000" not in ans2 and "6000" not in ans2)
 
     print()
     print("=" * 78)
