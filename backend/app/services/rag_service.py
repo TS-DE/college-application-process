@@ -29,6 +29,29 @@ CHILD_CHUNK_OVERLAP = 20    # 子块重叠
 # docstore 文件：父块原文按 parent_id 存这里，向量库只存子块（见 put_parents 注释）
 PARENT_STORE_FILE = "parent_store.json"
 
+# ---------------- v2.4.0 多路召回（Multi-Query Recall） ----------------
+# 把复杂问题拆成 3-4 条聚焦的子查询，分别走混合检索，再按 RRF 累加融合
+MULTI_QUERY_PROMPT = """你是一个高考志愿填报系统的查询改写专家。
+请把用户的复杂问题拆解成 3-4 条**更聚焦**的子查询，用于分别检索知识库。
+
+【拆解要求】：
+1. 每条子查询聚焦一个语义单元：学校、专业、年份、省份、学费、位次、分数线、选科、批次。
+2. 必须保留问题里的关键实体（学校名、专业名、年份、省份），不要凭空添加信息。
+3. 每条子查询不超过 20 个字，是可以直接拿去检索的短语，不要写完整问句。
+4. 子查询之间尽量不重复，覆盖问题的不同侧面。
+
+【输出格式】（严格 JSON，不要输出任何其他文字）：
+{{"queries": ["子查询1", "子查询2", "子查询3"]}}
+
+【用户问题】：
+{query}
+
+【JSON输出】："""
+
+# 子查询长度上限：Prompt 要求 ≤20 字，但小模型常写到 22-25 字，
+# 解析时放宽到 30 字，超过的丢弃（避免把整段问题当子查询用）
+MAX_SUB_QUERY_LEN = 30
+
 # ---------------- Chroma 客户端（延迟初始化，避免导入即失败） ----------------
 
 _client = None
@@ -601,22 +624,186 @@ class HybridRetrieval:
         }
 
 
-def search(query: str, top_k: int = 5) -> List[Dict]:
-    """语义 + 关键词混合检索（RRF 融合）；命中子块后回填父块。"""
+def decompose_query(query: str, max_queries: int = 0) -> List[str]:
+    """Query 分解：把复杂问题拆成 3-4 条聚焦的子查询（MULTI_QUERY_PROMPT）。
+
+    处理链路：LLM 生成 JSON → 解析 → 去重 → 过滤空值/超长 → 保留原始 Query → 限条数
+    参数：temperature=0.0（要确定性），num_predict=120
+
+    **降级**：AI 关闭 / LLM 超时 / JSON 解析失败 → 返回 [原始 Query]，
+    由调用方按单路检索处理，链路不中断。
+    """
+    from app.services.ai_service import ai_enabled, ask
+
+    limit = max_queries or settings.MULTI_QUERY_MAX
+    original = (query or "").strip()
+    if not original:
+        return []
+
+    if not ai_enabled() or not settings.MULTI_QUERY_ENABLED:
+        return [original]
+
+    raw = ask(
+        MULTI_QUERY_PROMPT.format(query=original),
+        temperature=0.0,   # 查询改写要稳定、可复现
+        top_p=1.0,
+        num_predict=120,
+        timeout=20,
+    )
+    if not raw:
+        return [original]
+
+    # ---- JSON 解析：容错「模型多说了几句话」的情况 ----
+    subs: List[str] = []
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start >= 0 and end > start:
+            data = json.loads(raw[start : end + 1])
+            if isinstance(data, dict):
+                subs = [str(x).strip() for x in (data.get("queries") or [])]
+            elif isinstance(data, list):
+                subs = [str(x).strip() for x in data]
+    except Exception:  # noqa: BLE001 解析失败 → 降级
+        subs = []
+
+    # ---- 清洗：去空值、去超长（> MAX_SUB_QUERY_LEN 字）、去重 ----
+    cleaned: List[str] = []
+    seen: set = set()
+    for s in subs:
+        if not s or len(s) > MAX_SUB_QUERY_LEN:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    if not cleaned:
+        return [original]
+
+    # ---- 保留原始 Query 放首位，再限条数 ----
+    merged = [original] + [s for s in cleaned if s != original]
+    return merged[:limit]
+
+
+def multi_route_search(query: str, top_k: int = 5, candidate_n: int = 0) -> List[Dict]:
+    """多路召回：每条子查询独立走「向量 + BM25」混合检索，再跨路 RRF 累加。
+
+    融合方式：把「子查询 × 检索路」看成多条独立的排名列表
+      （如 4 条子查询 → 4 条稠密列表 + 4 条 BM25 列表 = 8 条），
+      对候选文档逐条累加 1/(k + rank)，k=60。
+    这样被多条子查询同时命中的文档会显著胜出（多面证据 > 单面证据）。
+
+    **降级**：任一子查询检索异常都跳过该路；全部失败返回 []，由 search() 回落单路。
+    """
+    col = _get_collection()
+    if col is None:
+        return []
+
+    queries = decompose_query(query)
+    n = candidate_n or settings.MULTI_QUERY_CANDIDATE_N
+    retriever = HybridRetrieval(col, k=RRF_K, top_k=top_k, candidate_n=n)
+    corpus = retriever._load_corpus()  # noqa: SLF001 复用同一份语料快照（BM25 索引）
+    if not corpus:
+        return []
+
+    # doc_id -> 累加的 RRF 分数
+    scores: Dict[int, float] = {}
+    best_distance: Dict[int, Optional[float]] = {}
+    best_dense_rank: Dict[int, int] = {}
+    best_bm25_rank: Dict[int, int] = {}
+    matched: Dict[int, List[str]] = {}
+
+    for q in queries:
+        routes: List[tuple] = []
+        try:
+            routes.append(("dense", retriever.dense_search(q)))
+            routes.append(("bm25", retriever.bm25_search(q)))
+        except Exception:  # noqa: BLE001 单条子查询失败不影响其他路
+            continue
+
+        for route_name, ranking in routes:
+            if not ranking:
+                continue
+            for rank, h in enumerate(ranking, start=1):
+                idx = h["index"]
+                scores[idx] = scores.get(idx, 0.0) + 1.0 / (RRF_K + rank)
+
+                if route_name == "dense":
+                    if idx not in best_dense_rank or rank < best_dense_rank[idx]:
+                        best_dense_rank[idx] = rank
+                        best_distance[idx] = h.get("distance")
+                else:
+                    if idx not in best_bm25_rank or rank < best_bm25_rank[idx]:
+                        best_bm25_rank[idx] = rank
+
+                if q not in matched.setdefault(idx, []):
+                    matched[idx].append(q)
+
+    if not scores:
+        return []
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [
+        {
+            "text": corpus[idx]["text"],
+            "metadata": corpus[idx]["metadata"],
+            "distance": best_distance.get(idx),
+            "rrf_score": score,
+            "dense_rank": best_dense_rank.get(idx),
+            "bm25_rank": best_bm25_rank.get(idx),
+            "matched_queries": matched.get(idx, []),
+            "recall_mode": "multi_route",
+        }
+        for idx, score in ranked[:top_k]
+    ]
+
+
+def rerank(query: str, hits: List[Dict]) -> List[Dict]:
+    """Rerank 精排钩子（v2.4.0 预留）。
+
+    当前没有可用的 Rerank 模型（settings.RERANK_MODEL 为空）→ 直接原样返回，
+    保证链路不中断；后续接入 BGE-Reranker / Cross-Encoder 后在此实现二次排序。
+    """
+    if not hits or not settings.RERANK_MODEL:
+        return hits
+    # TODO(v2.4.x)：接入 Rerank 模型后按 (query, text) 相关性重排
+    return hits
+
+
+def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dict]:
+    """完整检索流程：多路召回 → RRF 融合 → Rerank 精排 → 父子块回填。
+
+    1. 多路召回：multi_route_search()（Query 分解 + 每条子查询混合检索 + 跨路 RRF）
+    2. 单路兜底：多路召回无结果时回落 HybridRetrieval.search()
+    3. Rerank：rerank()（模型可用时才生效，当前为 no-op）
+    4. 父子块回填：_expand_to_parents() 把命中子块换成父块上下文
+    """
     col = _get_collection()
     if col is None:
         return _keyword_fallback(query, top_k)
 
-    try:
-        retriever = HybridRetrieval(col, k=RRF_K, top_k=top_k)
-        results = retriever.search(query, top_k)
-    except Exception:  # noqa: BLE001 混合检索异常时退回纯向量 / 关键词
-        results = []
+    results: List[Dict] = []
 
+    # ① 多路召回
+    if use_multi_route and settings.MULTI_QUERY_ENABLED:
+        try:
+            results = multi_route_search(query, top_k)
+        except Exception:  # noqa: BLE001 多路召回异常 → 回落单路
+            results = []
+
+    # ② 单路混合检索兜底
+    if not results:
+        try:
+            results = HybridRetrieval(col, k=RRF_K, top_k=top_k).search(query, top_k)
+        except Exception:  # noqa: BLE001
+            results = []
+
+    # ③ Rerank 精排（模型未接入时为 no-op）
     if results:
-        # 子块命中 → 回填父块作为上下文（父块缺失时自动降级为子块）
+        results = rerank(query, results)
+        # ④ 子块命中 → 回填父块（父块缺失时自动降级为子块）
         return _expand_to_parents(results)
-    # 兜底：Chroma 有数据但两路都没命中，用老的关键词打分
+
+    # 兜底：Chroma 有数据但都没命中，用老的关键词打分
     return _expand_to_parents(_keyword_fallback(query, top_k))
 
 

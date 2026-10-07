@@ -8,8 +8,152 @@
 | **v2.1.0** | 2026-10-06 | **递归分块** `RecursiveCharacterTextSplitter`（500 / 50） | **混合检索**：稠密 + 稀疏 → **RRF 融合 k=60** | 500 字块（语义完整） | ✅ Advanced RAG |
 | **v2.2.0** | 2026-10-07 | **父子块**：父块 500 字；子块 120 字（重叠 20） | 混合检索，**只索引子块**；子块命中 → 回填父块 | **父块**（500 字） | ✅ 已发布 |
 | **v2.3.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 已发布 |
-| **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 本次热修复 |
-| **v2.4.0** | 计划中 | 父子块 + Rerank 重排 | 混合检索 + **BGE-Reranker 二次排序** + Text-to-SQL 落地 | 父块（经重排筛选） | 🔜 计划 |
+| **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
+| **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 本次发布 |
+| **v2.5.0** | 计划中 | 父子块 + 语义/标题感知切分 | 多路召回 + **BGE-Reranker 落地** + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.4.0] - 2026-10-08 · 多路召回（Multi-Query Recall）：Query 分解 + 跨路 RRF 融合
+
+> 主题：把「一条 Query 走一次混合检索」升级为「一条复杂 Query 拆成多条子查询、各走一次混合检索、再跨路 RRF 累加」，
+> 解决复合问题（同时问学校 + 学费 + 位次）召回不全的问题。
+
+---
+
+### 一、原有技术（v2.3.1）及缺陷
+
+| 环节 | v2.3.1 的技术 | 存在的缺陷 |
+|---|---|---|
+| Query 处理 | 用户原始问题**原样**送入混合检索 | ① 复合问题（「XX学校XX专业2025年学费和位次」）语义被平均，各侧面都召回不准；<br>② 一次 embedding 只能表达一个语义方向，多实体问题顾此失彼 |
+| 召回路径 | 单条 Query → 稠密 + 稀疏 → 一条 RRF 融合链 | ① 只有 2 条排名列表参与融合，证据单薄；<br>② 只覆盖问题最突出的那一面，其他侧面掉出 Top-K |
+| 精排 | 无 | RRF 之后直接取 Top-K，没有二次排序环节 |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. Query 分解（MULTI_QUERY_PROMPT + decompose_query）
+
+| 项 | 内容 |
+|---|---|
+| 技术 | 用 LLM 把复杂问题拆成 3-4 条聚焦子查询，覆盖「学校 / 专业 / 年份 / 省份 / 学费 / 位次 / 分数线 / 选科 / 批次」不同语义单元，保留关键实体 |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `MULTI_QUERY_PROMPT`、`decompose_query()`、`MAX_SUB_QUERY_LEN` |
+| 参数 | **temperature=0.0**（要稳定可复现），`num_predict=120` |
+| 输出格式 | 严格 JSON：`{"queries": ["子查询1", ...]}` |
+| 完整处理链 | LLM 生成 → JSON 容错解析（截取 `{...}`）→ 去空值 → 去超长（>30 字）→ 去重 → **原始 Query 置顶** → 限条数（默认 4，含原始 Query） |
+| **降级** | AI 关闭 / 开关关闭 / LLM 超时 / JSON 解析失败 / 清洗后为空 → 返回 `[原始 Query]`，按单路检索处理 |
+
+#### 2. 多路召回（multi_route_search）
+
+| 项 | 内容 |
+|---|---|
+| 技术 | 每条子查询**独立**走「稠密(Chroma ANN) + 稀疏(BM25)」两路，共 `2 × 子查询数` 条排名列表；按 doc_id 合并去重，**跨路累加** RRF：`score += 1/(60 + rank)` |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `multi_route_search()` |
+| 返回 | Top-K 候选池，附带 `rrf_score` / `dense_rank` / `bm25_rank` / `matched_queries`（命中它的子查询）/ `recall_mode="multi_route"` |
+| **降级** | 单条子查询检索异常跳过该路；全部失败返回 `[]`，由 `search()` 回落单路混合检索 |
+
+#### 3. Rerank 精排钩子
+
+| 项 | 内容 |
+|---|---|
+| 技术 | `rerank(query, hits)`：预留 BGE-Reranker / Cross-Encoder 二次排序入口 |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `rerank()` |
+| 当前行为 | `settings.RERANK_MODEL` 为空 → **no-op 原样返回**（不中断链路）；接入模型后在此实现重排 |
+
+#### 4. search() 串联完整流程
+
+| 项 | 内容 |
+|---|---|
+| 代码位置 | **`backend/app/services/rag_service.py`** → `search(query, top_k, use_multi_route=True)` |
+| 流程 | ① 多路召回 `multi_route_search()` → ② 空结果回落 `HybridRetrieval.search()` 单路 → ③ `rerank()` 精排 → ④ `_expand_to_parents()` 父子块回填 → ⑤ 关键词兜底 |
+
+#### 5. 配置项（`backend/app/config.py` + `.env`）
+
+```python
+MULTI_QUERY_ENABLED       = 1      # 多路召回总开关
+MULTI_QUERY_MAX           = 4      # 子查询条数上限（含原始 Query）
+MULTI_QUERY_CANDIDATE_N   = 20     # 每条子查询每路召回候选数
+RERANK_MODEL              = ""     # 留空表示不启用 Rerank（当前）
+```
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_multi_query.py
+```
+
+实测输出（复杂问题：「2025年河南考生报福州大学至诚学院计算机专业，学费和位次大概多少？」）：
+
+```
+【1】Query 分解（MULTI_QUERY_PROMPT, temperature=0.0）
+    1. 2025年河南考生报福州大学至诚学院计算机专业，学费和位次大概多少？  (原始 Query)
+    2. 2025年河南福州大学至诚学院计算机专业学费
+    3. 2025年河南福州大学至诚学院计算机专业位次
+    4. 2025年河南福州大学至诚学院计算机专业分数线
+  [通过] 原始 Query 保留 + 子查询非空且 ≤30 字
+
+【2】降级验证：开关关闭时返回 [原始 Query]   [通过]
+
+【3】单路检索 vs 多路召回（Top-3）
+  -- 单路（v2.3.x）--   RRF 0.03279 / 0.03175 / 0.03175
+  -- 多路召回（v2.4.0）-- RRF 0.13088 / 0.12827 / 0.12751（8 条排名列表累加）
+  单路覆盖侧面数：3/3    多路覆盖侧面数：3/3   [通过]
+
+【4】完整流程 search()：多路 → RRF → Rerank → 父块回填
+  1. [parent] file_9101_parent_2 77 字 | 福州大学至诚学院2025年在河南…（位次）
+  2. [parent] file_9101_parent_0 60 字 | …独立学院，位于福建省福州市…（学校）
+  3. [parent] file_9101_parent_1 52 字 | …学费标准为23000元/年（学费）
+  [通过] 返回父块上下文（小块命中、大块生成）
+```
+
+> 关键对照：**同一 Top-3，多路召回的 RRF 分数从 0.032 量级提升到 0.13 量级**（4 条子查询 × 2 条路 = 8 条排名列表累加），
+> 被多条子查询共同命中的文档显著胜出。
+
+#### 2. 接口端到端验证
+
+```bash
+POST /api/knowledge/upload            # 上传含 学校/学费/位次 三个侧面的资料
+GET  /api/knowledge/search?query=2025年河南考生报福州大学至诚学院计算机专业，学费和位次大概多少？&top_k=3
+POST /api/ai/chat {"question":"…","use_rag":true,"top_k":3}
+```
+
+实测：
+
+```
+upload 200 子块 2
+  1 parent | RRF 0.1304 | 福州大学至诚学院是独立学院，位于福建省福州市，2025年在河南本科批…
+  2 parent | RRF 0.1258 | …
+chat rag+llm | …学费标准为23000元/年，投档最低分458分，对应位次…
+```
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python smoke_rag.py              # 登录 → 上传 → 检索 → RAG 问答 → 删除：全链路通过
+python smoke_test.py             # 志愿推荐等 14 个业务接口：全部 200
+python test_anti_hallucination.py # 路由 + 防幻觉用例：全部通过
+python test_parent_child.py       # 父子块用例：全部通过
+python test_hybrid_search.py      # 混合检索对比用例：全部通过
+```
+
+---
+
+### 四、后续演进方向（v2.5.0）
+
+| 方向 | 说明 |
+|---|---|
+| **Rerank 落地** | 接入 BGE-Reranker / Cross-Encoder，在 `rerank()` 中实现二次排序（当前为 no-op） |
+| 子查询并行化 | 多条子查询的 embedding 与检索改为并发，降低多路召回的时延 |
+| 子查询去重优化 | 语义相近的子查询合并，避免同一语义被重复加权 |
+| Text-to-SQL 落地 | 把 `extract_sql_filters()` 的条件真正接到 MySQL |
+| BM25 索引持久化 | 语料到十万级时改为 pickle 持久化 + 增量更新 |
 
 ---
 

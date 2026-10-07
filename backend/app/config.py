@@ -92,6 +92,15 @@ class Settings:
     CHUNK_SIZE: int = int(_env("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(_env("CHUNK_OVERLAP", "50"))
 
+    # ---------------- v2.4.0 多路召回（Multi-Query Recall） ----------------
+    MULTI_QUERY_ENABLED: bool = _env("MULTI_QUERY_ENABLED", "1") not in {"0", "false", "False"}
+    # 子查询条数上限（含原始 Query）
+    MULTI_QUERY_MAX: int = int(_env("MULTI_QUERY_MAX", "4"))
+    # 每条子查询在稠密/稀疏路各召回多少候选
+    MULTI_QUERY_CANDIDATE_N: int = int(_env("MULTI_QUERY_CANDIDATE_N", "20"))
+    # Rerank 精排（当前无可用模型，留空即跳过；接入 BGE-Reranker 后填写模型名）
+    RERANK_MODEL: str = _env("RERANK_MODEL", "")
+
     @property
     def DATABASE_URL(self) -> str:
         pwd = quote_plus(self.DB_PASSWORD)
