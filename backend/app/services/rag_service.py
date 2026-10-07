@@ -639,3 +639,143 @@ def _keyword_fallback(query: str, top_k: int) -> List[Dict]:
             scored.append({"text": doc, "metadata": meta or {}, "distance": float(-score)})
     scored.sort(key=lambda x: x["distance"])
     return scored[:top_k]
+
+
+# ---------------- v2.3.0：Query 路由 + 防幻觉 Prompt ----------------
+
+# 1) 路由拦截提示词：在 RAG 检索之前单独调用一次 LLM 做二分类
+#    参数：temperature=0.0（要确定性），max_tokens=5（只要 YES / NO）
+ROUTER_PROMPT = """你是一个高考志愿填报系统的意图分类器。
+你的唯一任务是判断用户的问题是否与【高考志愿、院校报考、专业选择、分数线、学费、位次】相关。
+
+【严格规则】：
+1. 如果问题与高考志愿完全无关（例如：婚假、天气、编程、闲聊），只输出：NO
+2. 如果问题与高考志愿相关，只输出：YES
+3. 不要输出任何解释、标点符号或其他文字！只输出 YES 或 NO！
+
+【用户问题】：
+{query}
+
+【输出】："""
+
+# 2) 强约束防幻觉提示词：RAG 检索之后，把父块 Context 与 Query 一起交给 LLM
+#    参数：temperature=0.1，top_p=0.1（压低随机性，禁止模型用预训练常识编数字）
+ANTI_HALLUCINATION_PROMPT = """你是一个严谨的高考志愿填报助手。请严格根据【检索上下文】回答用户问题。
+
+【绝对铁律】（违反将导致系统崩溃）：
+1. 你的大脑中没有任何预训练常识，你唯一的信息来源是下方的【检索上下文】。
+2. 如果【检索上下文】中没有明确写出的数字（如学费、分数线、位次、人数），绝对禁止编造！
+3. 如果上下文中找不到对应信息，必须直接回答：“根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。”
+4. 禁止使用“通常、大概、一般来说”等模糊词汇来推测数字。
+5. 回答必须完全基于上下文，不得添加任何外部信息。
+
+【检索上下文】：
+{context}
+
+【用户问题】：
+{question}
+
+【回答】："""
+
+# 3) 结构化数据提取提示词（预留，配合 Text-to-SQL）
+#    参数：temperature=0.0（要确定性 JSON）；命中强结构化关键词时走 MySQL，不走 RAG
+SQL_EXTRACT_PROMPT = """你是一个高考数据提取器。请从用户的问题中提取以下 JSON 格式的查询条件。
+如果某个字段没有提到，值设为 null。
+
+【字段说明】：
+- school_name: 学校名称（字符串）
+- major_name: 专业名称（字符串）
+- year: 年份（整数）
+- province: 省份（字符串）
+
+【严格规则】：
+1. 只输出 JSON，不要输出任何其他文字。
+2. 不要编造不存在的字段。
+3. 如果用户问的是“学费”，请确保 school_name 和 major_name 准确提取。
+
+【用户问题】：
+{query}
+
+【JSON输出】："""
+
+# 命中这些关键词时，优先考虑走 MySQL 结构化查询而不是 RAG（v2.3.0 预留）
+STRUCTURED_KEYWORDS = ("学费", "分数线", "位次", "录取分", "招生人数", "计划数")
+
+# 路由被拦截时返回给用户的固定话术
+OFF_TOPIC_ANSWER = (
+    "抱歉，我是高考志愿填报助手，只回答与【高考志愿、院校报考、专业选择、分数线、学费、位次】"
+    "相关的问题。请换一个志愿填报相关的问题再试。"
+)
+
+
+def route_query(query: str) -> bool:
+    """Query 意图路由：返回 True 表示放行（走 RAG），False 表示拦截（无关问题）。
+
+    - 在 RAG 检索**之前**调用，避免无关问题（婚假、天气、闲聊）污染检索与生成
+    - 参数：temperature=0.0，max_tokens=5（num_predict=5）
+    - **降级**：AI 关闭 / LLM 调用失败 / 返回为空 → 默认放行，不中断链路
+    """
+    from app.services.ai_service import ai_enabled, ask
+
+    if not ai_enabled():
+        return True  # AI 未启用时不做拦截
+
+    intent = ask(
+        ROUTER_PROMPT.format(query=query),
+        temperature=0.0,   # 意图分类要确定性
+        top_p=1.0,
+        num_predict=5,     # 只要 YES / NO 两个 token
+        timeout=20,
+    )
+    if not intent:
+        return True  # LLM 不可用 → 放行，交回主流程兜底
+    return "YES" in intent.upper()
+
+
+def generate_answer(query: str, context: str) -> Optional[str]:
+    """防幻觉生成：只依据检索到的父块上下文回答，找不到就按话术拒答。
+
+    - 参数：temperature=0.1，top_p=0.1（压低采样随机性，减少小模型编造数字）
+    - 返回 None 表示生成失败，由调用方降级（回退原 chat 逻辑或提示稍后重试）
+    """
+    from app.services.ai_service import ask
+
+    prompt = ANTI_HALLUCINATION_PROMPT.format(context=context, question=query)
+    return ask(
+        prompt,
+        temperature=0.1,   # 低温度：减少自由发挥
+        top_p=0.1,         # 低 top_p：只从最高概率词里选，抑制编造
+        num_predict=400,
+    )
+
+
+def extract_sql_filters(query: str) -> Optional[Dict]:
+    """结构化条件提取（v2.3.0 预留，配合 Text-to-SQL 走 MySQL）。
+
+    - 参数：temperature=0.0
+    - 命中「学费/分数线/位次」等强结构化关键词时优先走 MySQL 精确查询，
+      避免 RAG 召回不到导致编造；当前仅返回解析结果，实际 SQL 查询留给后续版本接入。
+    """
+    from app.services.ai_service import ai_enabled, ask
+
+    if not ai_enabled():
+        return None
+    if not any(k in (query or "") for k in STRUCTURED_KEYWORDS):
+        return None
+
+    raw = ask(
+        SQL_EXTRACT_PROMPT.format(query=query),
+        temperature=0.0,
+        top_p=1.0,
+        num_predict=120,
+        timeout=20,
+    )
+    if not raw:
+        return None
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        return json.loads(raw[start : end + 1])
+    except Exception:  # noqa: BLE001 解析失败按未提取处理
+        return None

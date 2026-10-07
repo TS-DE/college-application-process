@@ -5,9 +5,144 @@
 | 版本 | 日期 | 分块策略 | 检索策略 | 交给 LLM 的上下文 | 状态 |
 |---|---|---|---|---|---|
 | **v2.0.0** | 2026-10-05 | 定长分块（500 字硬切，重叠 50） | 纯稠密向量检索（Chroma Top-K） | 500 字块（可能被切断） | ✅ Naive RAG 基线（补写） |
-| **v2.1.0** | 2026-10-06 | **递归分块** `RecursiveCharacterTextSplitter`（500 / 50，分隔符 段落→换行→句号→逗号） | **混合检索**：稠密(Chroma ANN) + 稀疏(BM25+jieba) → **RRF 融合 k=60** | 500 字块（语义完整） | ✅ Advanced RAG（混合检索） |
-| **v2.2.0** | 2026-10-07 | **父子块**：父块 = 递归分块 500 字；子块 = 父块内再切 120 字（重叠 20） | 沿用 v2.1.0 混合检索，**只索引子块**；子块命中 → 回填父块 docstore | **父块**（500 字，小块命中、大块生成） | ✅ 本次发布 |
-| **v2.3.0** | 计划中 | 父子块 + 语义/标题感知切分 | 混合检索 + **Rerank 重排**（Cross-Encoder / BGE-Reranker）+ 查询改写 | 父块（经重排筛选） | 🔜 计划 |
+| **v2.1.0** | 2026-10-06 | **递归分块** `RecursiveCharacterTextSplitter`（500 / 50） | **混合检索**：稠密 + 稀疏 → **RRF 融合 k=60** | 500 字块（语义完整） | ✅ Advanced RAG |
+| **v2.2.0** | 2026-10-07 | **父子块**：父块 500 字；子块 120 字（重叠 20） | 混合检索，**只索引子块**；子块命中 → 回填父块 | **父块**（500 字） | ✅ 已发布 |
+| **v2.3.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 本次发布 |
+| **v2.4.0** | 计划中 | 父子块 + Rerank 重排 | 混合检索 + **BGE-Reranker 二次排序** + Text-to-SQL 落地 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.3.0] - 2026-10-08 · Query 路由与防幻觉 Prompt：解决无关问答与学费幻觉
+
+> 主题：在 v2.2.0 父子块基础上，增加 Query 意图路由与生成侧强约束，解决「婚假乱答」与「学费编造」两大幻觉问题。
+
+---
+
+### 一、原有技术（v2.2.0）及缺陷
+
+| 环节 | v2.2.0 的技术 | 存在的缺陷 |
+|---|---|---|
+| Query 处理 | 所有问题直接进入 RAG 检索 | ① 无关问题（如「婚假几天」）强行检索知识库，LLM 生成无关回答；<br>② 没有意图分类，浪费检索资源 |
+| 生成约束 | 通用 Prompt「请根据上下文回答」 | ① Qwen3-1.7B 参数量小，指令遵循能力弱；<br>② 上下文中找不到数字时，模型调用预训练常识编造（实测把学费编造成 8000 元/年）；<br>③ 没有拒答机制 |
+| 结构化数据 | 学费、分数线等也走 RAG | ① 强结构化数据走 RAG 容易召回失败；<br>② 应优先走 MySQL 查询 |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. Query 路由与意图分类
+
+| 项 | 内容 |
+|---|---|
+| 技术 | 在 RAG 检索前，单独调用 LLM 做二分类（YES/NO） |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `ROUTER_PROMPT`、`route_query()`、`OFF_TOPIC_ANSWER` |
+| 调用位置 | **`backend/app/routers/ai.py`** → `/api/ai/chat` 入口处（`use_rag=true` 时先路由再检索） |
+| 参数 | **temperature=0.0**，**max_tokens=5**（`num_predict=5`） |
+| 降级策略 | LLM 调用失败 / AI 关闭 / 返回为空 → 默认**放行**（走 RAG），不中断链路 |
+
+#### 2. 防幻觉 Prompt 强约束
+
+| 项 | 内容 |
+|---|---|
+| 技术 | Prompt 中加入「绝对铁律」：唯一信息源是检索上下文、禁止编造数字、找不到就拒答 |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `ANTI_HALLUCINATION_PROMPT`、`generate_answer()` |
+| 调用位置 | **`backend/app/routers/ai.py`** → 命中资料后调用；未命中资料时在通用 Prompt 后追加拒答指令 |
+| 参数 | **temperature=0.1**，**top_p=0.1** |
+| 拒答话术 | “根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。” |
+| 返回值 | `source="router_blocked"`（拦截）/ `"rag+llm"`（正常），并新增 `context_level` 标明父块/子块 |
+
+#### 3. 结构化数据提取（预留）
+
+| 项 | 内容 |
+|---|---|
+| 技术 | Query 含「学费/分数线/位次」等强结构化关键词时，用 LLM 提取 JSON 条件，后续走 MySQL |
+| 代码位置 | **`backend/app/services/rag_service.py`** → `SQL_EXTRACT_PROMPT`、`extract_sql_filters()`、`STRUCTURED_KEYWORDS` |
+| 参数 | **temperature=0.0** |
+| 状态 | 已能正确提取 JSON，实际 Text-to-SQL 查询留到 v2.4.0 落地 |
+
+#### 4. 配套改动
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/services/ai_service.py` | `ask()` 增加 `temperature` / `top_p` 可选参数（默认 0.3 / 0.85），支持按场景指定采样策略 |
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_anti_hallucination.py
+```
+
+实测输出：
+
+```
+【1】Query 意图路由（ROUTER_PROMPT, temperature=0.0, max_tokens=5）
+  [通过] route_query(婚假几天)              期望 拦截 → 实际 拦截
+  [通过] route_query(今天天气怎么样)        期望 拦截 → 实际 拦截
+  [通过] route_query(河南本科批志愿怎么填报) 期望 放行 → 实际 放行
+  [通过] route_query(郑州大学计算机专业学费多少) 期望 放行 → 实际 放行
+
+【2】上下文【有】学费（temperature=0.1, top_p=0.1）
+  回答：…学费标准为5700元/学年。
+  [通过] 回答中出现上下文里的真实学费 5700
+
+【3】上下文【无】学费 → 必须拒答
+  回答：根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。
+  [通过] 按话术拒答   [通过] 没有编造数字
+
+【4】对照：v2.2.0 通用 Prompt（temperature=0.3, top_p=0.85）
+  回答：郑州大学计算机科学与技术专业学费一般为**8000元/年**…
+  [通过] v2.2.0 会编造数字（说明改造必要性）
+
+【5】结构化提取预留（SQL_EXTRACT_PROMPT, temperature=0.0）
+  {'school_name': '郑州大学', 'major_name': '计算机科学与技术', 'year': 2025, 'province': '河南省'}
+```
+
+> 关键对照：同一问题「学费多少」，v2.2.0 编造 **8000 元/年**，v2.3.0 有资料时给 **5700 元/学年**（真实值）、无资料时拒答。
+
+#### 2. 接口端到端验证
+
+```bash
+POST /api/ai/chat {"question":"婚假几天","use_rag":true}
+POST /api/knowledge/upload            # 上传含学费的招生资料
+POST /api/ai/chat {"question":"郑州大学计算机科学与技术专业学费是多少？","use_rag":true,"top_k":3}
+```
+
+实测：
+
+```
+health 200
+婚假几天 -> 200 router_blocked | 抱歉，我是高考志愿填报助手，只回答与【高考志愿…】相关的问题
+upload 200 子块 1
+学费提问 -> rag+llm parent | 根据现有资料，郑州大学计算机科学与技术专业2025年在河南本科批物理类招生的学费标准为5700元/学年。
+sources ['河南招生计划2025.txt']
+```
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python smoke_rag.py    # 登录 → 上传 → 检索 → RAG 问答 → 删除：全链路通过
+                       # chat 仍返回 source=rag+llm + sources（相关问题正常放行）
+python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
+```
+
+---
+
+### 四、后续演进方向（v2.4.0）
+
+| 方向 | 说明 |
+|---|---|
+| **Rerank 重排** | 在 RRF 之后接入 BGE-Reranker 二次排序 |
+| 查询改写 | 多轮对话时先让 Qwen3 改写查询再做检索 |
+| **Text-to-SQL 落地** | 把 `extract_sql_filters()` 提取的条件真正接到 MySQL（学费/分数线/位次走结构化查询） |
+| 表格结构化处理 | 将分数线表格转为自然语言三元组后再切块 |
+| BM25 索引持久化 | 语料到十万级时改为 pickle 持久化 + 增量更新 |
+| docstore 入 MySQL | 父块量大时把 JSON docstore 换成 `knowledge_parent_chunks` 表 |
 
 ---
 

@@ -46,8 +46,19 @@ def _strip_think(text: str) -> str:
     return text.strip().strip("`").strip()
 
 
-def ask(prompt: str, timeout: Optional[float] = None, num_predict: int = 256) -> Optional[str]:
-    """调用 Ollama /api/generate，失败返回 None。"""
+def ask(
+    prompt: str,
+    timeout: Optional[float] = None,
+    num_predict: int = 256,
+    temperature: float = 0.3,
+    top_p: float = 0.85,
+) -> Optional[str]:
+    """调用 Ollama /api/generate，失败返回 None。
+
+    v2.3.0 起支持按场景指定采样参数：
+      - 意图路由：temperature=0.0（要确定性二分类）
+      - 防幻觉生成：temperature=0.1, top_p=0.1（压低随机性，减少编造）
+    """
     if not settings.AI_ENABLED:
         return None
     payload = {
@@ -55,7 +66,11 @@ def ask(prompt: str, timeout: Optional[float] = None, num_predict: int = 256) ->
         "prompt": prompt,
         "stream": False,
         "think": False,
-        "options": {"temperature": 0.3, "top_p": 0.85, "num_predict": num_predict},
+        "options": {
+            "temperature": temperature,
+            "top_p": top_p,
+            "num_predict": num_predict,
+        },
     }
     try:
         resp = requests.post(
