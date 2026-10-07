@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Dict, List, Optional
@@ -19,6 +20,14 @@ from app.config import settings
 
 # RRF 融合常数：k=60（消除前几名排名的剧烈波动，见 HybridRetrieval.rrf 注释）
 RRF_K = 60
+
+# ---------------- 父子块（Parent-Child Chunking）参数 ----------------
+# 父块：递归分块得到的 500 字块（语义完整、适合喂给 LLM 当上下文）
+# 子块：父块内部再切一次的 120 字小块（语义聚焦、适合做向量检索）
+CHILD_CHUNK_SIZE = 120      # 子块大小
+CHILD_CHUNK_OVERLAP = 20    # 子块重叠
+# docstore 文件：父块原文按 parent_id 存这里，向量库只存子块（见 put_parents 注释）
+PARENT_STORE_FILE = "parent_store.json"
 
 # ---------------- Chroma 客户端（延迟初始化，避免导入即失败） ----------------
 
@@ -160,6 +169,104 @@ def _split_text_fixed(text: str, size: int, overlap: int) -> List[str]:
     return chunks
 
 
+def split_child_text(text: str, size: int | None = None, overlap: int | None = None) -> List[str]:
+    """把「父块」再切成「子块」（默认 120 字、重叠 20 字）。
+
+    子块只用于向量检索：块越小语义越聚焦，"婚假几天"这类短查询越容易命中；
+    但子块太短不适合直接喂给 LLM（上下文不完整），所以命中的子块会再回填父块。
+    切分逻辑与父块一致（递归分块），依赖缺失时退化为定长切分。
+    """
+    size = size or CHILD_CHUNK_SIZE
+    overlap = overlap or CHILD_CHUNK_OVERLAP
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= size:
+        return [text]
+
+    try:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+    except ImportError:
+        return _split_text_fixed(text, size, overlap)
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=size,
+        chunk_overlap=overlap,
+        length_function=len,
+        is_separator_regex=False,
+        separators=SEPARATORS,
+    )
+    return [c for c in splitter.split_text(text) if c.strip()]
+
+
+# ---------------- docstore：父块原文存储 ----------------
+
+_parent_store: Dict[str, Dict] = {}      # {parent_id: {"text":..., "file_id":...}}
+_parent_store_loaded = False
+
+
+def _parent_store_path() -> str:
+    """docstore 落盘位置（与 Chroma 同目录，已在 .gitignore 中）。"""
+    os.makedirs(settings.CHROMA_DB_PATH, exist_ok=True)
+    return os.path.join(settings.CHROMA_DB_PATH, PARENT_STORE_FILE)
+
+
+def _load_parent_store() -> Dict[str, Dict]:
+    """首次访问时把父块原文从磁盘载入内存（幂等）。"""
+    global _parent_store, _parent_store_loaded
+    if _parent_store_loaded:
+        return _parent_store
+    try:
+        path = _parent_store_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                _parent_store = json.load(f)
+    except Exception:  # noqa: BLE001  docstore 损坏不阻塞检索，按空库继续
+        _parent_store = {}
+    _parent_store_loaded = True
+    return _parent_store
+
+
+def _save_parent_store() -> None:
+    """把父块原文持久化（每次写入/删除后调用）。"""
+    try:
+        with open(_parent_store_path(), "w", encoding="utf-8") as f:
+            json.dump(_parent_store, f, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def put_parents(parents: List[Dict]) -> None:
+    """批量写入父块到 docstore。
+
+    docstore 的作用：向量库只索引 120 字的子块（检索精度高），
+    父块的 500 字原文存在这里（不进向量库），检索命中子块后按 parent_id 取回，
+    把完整上下文交给 LLM —— 即「小块命中、大块生成」。
+    """
+    store = _load_parent_store()
+    for p in parents:
+        store[p["parent_id"]] = p
+    _save_parent_store()
+
+
+def get_parent(parent_id: Optional[str]) -> Optional[Dict]:
+    """按 parent_id 取回父块原文；不存在返回 None（调用方需降级返回子块）。"""
+    if not parent_id:
+        return None
+    return _load_parent_store().get(parent_id)
+
+
+def drop_parents_by_file(file_id: int) -> int:
+    """删除某个文件的全部父块（与向量库删除子块配套）。"""
+    store = _load_parent_store()
+    keys = [k for k, v in store.items() if str(v.get("file_id")) == str(file_id)]
+    for k in keys:
+        store.pop(k, None)
+    if keys:
+        _save_parent_store()
+    return len(keys)
+
+
 # ---------------- 写入 / 删除 / 检索 ----------------
 
 def add_document(doc_id: str, text: str, metadata: dict, embedding: Optional[List[float]] = None) -> bool:
@@ -175,18 +282,59 @@ def add_document(doc_id: str, text: str, metadata: dict, embedding: Optional[Lis
 
 
 def add_documents(chunks: List[str], metadata: dict, key_fmt: str = "{idx}") -> int:
-    """批量写入切片，返回成功写入数量。"""
+    """批量写入「父子块」，返回成功写入向量库的子块数量。
+
+    入参 chunks 是递归分块得到的 500 字**父块**；这里对每个父块：
+      1. 父块原文写入 docstore（只存不索引），parent_id = file_{file_id}_parent_{父块序号}
+      2. 父块内部再切成 120 字**子块**，只有子块进向量库，
+         child_id = file_{file_id}_chunk_{父块序号}_{子块序号}，
+         metadata 里带上 parent_chunk_id 用于回填
+      3. 父块本身不超过子块大小时，直接把它当作唯一子块索引（保证不漏内容）
+    返回：写入向量库的子块数量（写库时记为 chunk_count）。
+    """
+    file_id = metadata.get("file_id")
+    parents: List[Dict] = []
     ok = 0
-    for idx, chunk in enumerate(chunks):
-        doc_id = key_fmt.format(idx=idx)
-        if add_document(doc_id, chunk, {**metadata, "chunk_index": idx}):
-            ok += 1
+
+    for parent_index, parent_text in enumerate(chunks):
+        parent_text = (parent_text or "").strip()
+        if not parent_text:
+            continue
+
+        parent_id = f"file_{file_id}_parent_{parent_index}"
+        parents.append({
+            "parent_id": parent_id,
+            "text": parent_text,
+            "file_id": file_id,
+            "filename": metadata.get("filename"),
+            "chunk_index": parent_index,
+        })
+
+        # 父块 → 子块；父块本身很短时直接作为唯一子块
+        children = split_child_text(parent_text) or ([parent_text] if parent_text else [])
+        for sub_index, child_text in enumerate(children):
+            child_id = f"file_{file_id}_chunk_{parent_index}_{sub_index}"
+            if add_document(
+                child_id,
+                child_text,
+                {
+                    **metadata,
+                    "chunk_index": parent_index,   # 父块序号
+                    "sub_index": sub_index,        # 父块内的子块序号
+                    "parent_chunk_id": parent_id,  # 子块 → 父块 的关联 ID
+                    "is_child": 1,                 # 标记：向量库存的是子块
+                },
+            ):
+                ok += 1
+
+    put_parents(parents)   # 父块原文入库（docstore）
     return ok
 
 
 def delete_by_file(file_id: int) -> bool:
-    """删除某个文件在向量库中的全部切片。"""
+    """删除某个文件在向量库中的全部子块，并同步清理 docstore 里的父块。"""
     col = _get_collection()
+    drop_parents_by_file(file_id)   # 先清父块，避免留下孤儿数据
     if col is None:
         return False
     try:
@@ -194,6 +342,44 @@ def delete_by_file(file_id: int) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _expand_to_parents(hits: List[Dict]) -> List[Dict]:
+    """子块命中 → 回填父块（"小块命中、大块生成"）。
+
+    - 命中子块的 metadata 里有 parent_chunk_id，据此从 docstore 取回父块原文
+    - 取回成功：把 text 换成父块（上下文更完整），并标记 context_level="parent"
+    - **降级**：父块缺失 / 取回异常时，直接返回子块，标记 context_level="child"，链路不中断
+    - 多个子块指向同一父块时按父块去重，保留得分最高的那个
+    """
+    expanded: List[Dict] = []
+    seen_parents: set = set()
+
+    for h in hits:
+        meta = h.get("metadata") or {}
+        parent_id = meta.get("parent_chunk_id")
+        parent = get_parent(parent_id)
+
+        if parent and parent.get("text"):
+            if parent_id in seen_parents:
+                continue  # 同一父块的多个子块只保留一次
+            seen_parents.add(parent_id)
+            expanded.append({
+                **h,
+                "text": parent["text"],           # 用父块原文替换子块，交给 LLM
+                "metadata": {**meta, "chunk_index": meta.get("chunk_index")},
+                "parent_chunk_id": parent_id,
+                "context_level": "parent",
+            })
+        else:
+            # 降级：docstore 没有该父块（旧数据 / 文件被清），直接返回子块
+            expanded.append({
+                **h,
+                "parent_chunk_id": parent_id,
+                "context_level": "child",
+            })
+
+    return expanded
 
 
 class HybridRetrieval:
@@ -416,7 +602,7 @@ class HybridRetrieval:
 
 
 def search(query: str, top_k: int = 5) -> List[Dict]:
-    """语义 + 关键词混合检索（RRF 融合）；任一组件不可用时自动降级。"""
+    """语义 + 关键词混合检索（RRF 融合）；命中子块后回填父块。"""
     col = _get_collection()
     if col is None:
         return _keyword_fallback(query, top_k)
@@ -428,9 +614,10 @@ def search(query: str, top_k: int = 5) -> List[Dict]:
         results = []
 
     if results:
-        return results
+        # 子块命中 → 回填父块作为上下文（父块缺失时自动降级为子块）
+        return _expand_to_parents(results)
     # 兜底：Chroma 有数据但两路都没命中，用老的关键词打分
-    return _keyword_fallback(query, top_k)
+    return _expand_to_parents(_keyword_fallback(query, top_k))
 
 
 def _keyword_fallback(query: str, top_k: int) -> List[Dict]:

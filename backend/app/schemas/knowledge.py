@@ -35,6 +35,10 @@ class ChunkHit(BaseModel):
     rrf_score: Optional[float] = None
     dense_rank: Optional[int] = None
     bm25_rank: Optional[int] = None
+    # 父子块（v2.2.0）：命中的子块所属父块 ID；父块缺失时为 None（降级返回子块）
+    parent_chunk_id: Optional[str] = None
+    # 返回给 LLM 的上下文粒度：parent=父块（完整）/ child=子块（降级）
+    context_level: Optional[str] = None
 
 
 class SearchOut(BaseModel):
