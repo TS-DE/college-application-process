@@ -190,6 +190,9 @@ def search_knowledge(
                 rrf_score=h.get("rrf_score"),
                 dense_rank=h.get("dense_rank"),
                 bm25_rank=h.get("bm25_rank"),
+                # 父子块：命中的子块所属父块，以及返回的上下文粒度
+                parent_chunk_id=h.get("parent_chunk_id"),
+                context_level=h.get("context_level"),
             )
             for h in hits
         ],
