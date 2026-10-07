@@ -99,7 +99,8 @@ def chat(payload: dict) -> dict:
 
     # ---- v2.3.0 ② 防幻觉生成：命中资料时用强约束 Prompt（temperature=0.1, top_p=0.1）----
     if use_rag and rag_snippets:
-        answer = rag_service.generate_answer(question, rag_snippets)
+        # v2.3.1：top_p 从 0.1 放宽到 0.3，避免模型在极端保守采样下放弃生成
+        answer = rag_service.generate_answer(question, rag_snippets, temperature=0.1, top_p=0.3)
         if not answer:
             raise HTTPException(status_code=504, detail="大模型响应超时")
         return {
@@ -120,11 +121,14 @@ def chat(payload: dict) -> dict:
             "以下是知识库检索到的参考资料，优先依据它们回答；资料不足时再结合常识，并说明这是通用建议：\n"
             + rag_snippets
         )
-    if use_rag:
-        # 开启 RAG 但知识库没查到：明确按拒答话术返回，不让它自由发挥
+    if use_rag and not rag_snippets:
+        # v2.3.1 修正：不再直接拒答，而是让模型基于通用知识给方向性建议，
+        # 但明确禁止编造具体数字（学费 / 分数线 / 位次）
         prompt_parts.append(
-            "知识库中没有检索到相关资料。此时必须直接回答："
-            "“根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。”不要编造任何数字。"
+            "注意：知识库中未检索到直接相关的资料。请基于你的通用知识给出**方向性建议**"
+            "（如建议查阅学校官网、省教育考试院），"
+            "但**禁止编造具体的学费、分数线、位次数字**。"
+            "如果用户问的是具体数字，请明确说明“建议查阅官方招生简章获取准确数字”。"
         )
     prompt_parts.append(f"问题：{question}")
     prompt_parts.append("回答：")
