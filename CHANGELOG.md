@@ -9,8 +9,161 @@
 | **v2.2.0** | 2026-10-07 | **父子块**：父块 500 字；子块 120 字（重叠 20） | 混合检索，**只索引子块**；子块命中 → 回填父块 | **父块**（500 字） | ✅ 已发布 |
 | **v2.3.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 已发布 |
 | **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
-| **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 本次发布 |
-| **v2.5.0** | 计划中 | 父子块 + 语义/标题感知切分 | 多路召回 + **BGE-Reranker 落地** + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+| **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
+| **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回 + 精排） | ✅ 本次发布 |
+| **v2.5.0** | 计划中 | 父子块 + 语义/标题感知切分 | 检索前 + 多路召回 + **BGE-Reranker 落地** + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.4.1] - 2026-10-08 · 检索前预处理 + 模块化多路召回（课堂案例风格重构）
+
+> 主题：按课堂案例（01_混合检索 / 02_多路召回 / 03_多路召回的封装 / 01_查询重写 / 02_查询扩展 / 03_子查询）
+> 把「检索前」与「检索中」拆成两个独立模块，面向对象封装，并接入项目检索入口。
+
+---
+
+### 一、原有技术（v2.4.0）及缺陷
+
+| 环节 | v2.4.0 的技术 | 存在的缺陷 |
+|---|---|---|
+| 检索前 | 只有 Query 分解（MULTI_QUERY_PROMPT），逻辑写在 `rag_service.py` 内部 | ① 缺少「查询重写」「查询扩展（Step-Back）」，口语化问题召回差；<br>② 预处理与检索耦合在一个文件，无法单独复用/替换 |
+| 检索中 | 多路召回逻辑内联在 `rag_service.multi_route_search()` | ① 通道（稠密/稀疏）写死，新增数据源要改主文件（违反开闭原则）；<br>② 只有 RRF 一种融合方式；<br>③ 无法单测单个通道 |
+| LLM 通道 | 只走本地 Ollama | 未接入 DashScope（课堂案例用的百炼 OpenAI 兼容接口） |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新建 `backend/app/services/retrieval.py`（检索中，模块化）
+
+| 类 | 职责 |
+|---|---|
+| `ChannelRetriever` | 单路召回抽象基类（接口隔离 + 依赖倒置）：统一 `docs / fields / weight / texts` 与 `search()` 接口 |
+| `DenseChannel` | 稠密向量通道：Embedding + 余弦相似度；**支持传入预计算向量**（复用 Chroma 已存向量，避免每次重编码全库） |
+| `BM25Channel` | 稀疏关键词通道：jieba 分词 + BM25Okapi；小语料 IDF 为负时降级为「词命中计数」 |
+| `HybridSearch` | 单 Query 双路 RRF 融合（对应 01_混合检索.py）；对外暴露 `name / weight / search`，可作为复合通道被 MultiRecall 编排（里氏替换） |
+| `MultiRecall` | 多路召回编排：`rrf_fusion`（跨「子查询 × 通道」累加）/ `weight_fusion`（score × weight）/ `round_robin_fusion`（轮询曝光） |
+| `get_embedding_model()` | 懒加载：`EMBEDDING_MODEL_PATH` 有值时用 sentence-transformers（课堂案例方式），否则复用项目 Ollama/DashScope embedding（`ProjectEmbedding`） |
+
+设计原则落地：单一职责（每类只做一件事）、开闭（加通道不改编排）、里氏替换（HybridSearch 可当通道用）、
+接口隔离（基类只暴露 `search`）、依赖倒置（通道依赖抽象 embedding 接口）、迪米特（编排层不碰通道内部）、
+合成复用（MultiRecall 组合通道而非继承）。
+
+#### 2. 新建 `backend/app/services/query_rewrite.py`（检索前）
+
+| 类 | 职责 | 参数 |
+|---|---|---|
+| `QueryRewriter` | 查询重写：把口语化问题改写得更适合检索 | **temperature=0.0** |
+| `QueryExpander` | 查询扩展（Step-Back）：生成更宽泛的查询补充背景 | **temperature=0.1** |
+| `QueryDecomposer` | 子查询分解：复合问题拆成聚焦子问题 | **temperature=0.2** |
+| `QueryPreprocessor` | 统一入口：按需组合三步 → 输出 `QueryBundle(all_queries)`（原始 Query 置顶 + 去重 + 限条数） | `max_queries=4` |
+
+LLM 通道：统一走 DashScope OpenAI 兼容接口（`https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`），
+Key 从 `DASHSCOPE_API_KEY` 读取（`get_dashscope_key()`：环境变量优先，Windows 下补读注册表 Machine/User 作用域，
+因为服务启动后才配置的环境变量 `os.getenv` 读不到）。
+
+#### 3. 修改 `backend/app/services/rag_service.py`（对接）
+
+| 函数 | 说明 |
+|---|---|
+| `_load_corpus_docs()` | 从 Chroma 取子块语料 + **已存向量**，转成 retrieval 模块需要的 `docs` 结构 |
+| `build_multi_recall()` | 构建三通道：`DenseChannel(weight=1.0)` + `BM25Channel(weight=1.2)` + `HybridSearch(weight=1.0)` |
+| `_recall()` | 检索中执行：模块化多路召回 → 内置多路召回 → 单路混合检索（逐级回落） |
+| `_hit_from_channel()` | 把通道输出转换为项目内部 hit 结构，字段保持一致 |
+| `search()` | **① 检索前** `QueryPreprocessor.process()` → **② 检索中** 多路召回 → **③ Rerank** → **④ 父子块回填** |
+
+#### 4. 新增配置（`app/config.py`）
+
+```python
+QUERY_REWRITE_ENABLED          = 1     # 查询重写开关
+QUERY_EXPANSION_ENABLED        = 1     # 查询扩展（Step-Back）开关
+QUERY_DECOMPOSE_ENABLED        = 1     # 子查询分解开关
+QUERY_PREPROCESS_MAX           = 4     # 送检索的 Query 条数上限
+MULTI_RECALL_FUSION            = "rrf" # 融合策略：rrf / weight / round_robin
+MULTI_RECALL_TOPK_PER_CHANNEL  = 20    # 每通道每 Query 候选数
+```
+
+#### 5. 降级策略
+
+| 场景 | 处理 |
+|---|---|
+| 无 `DASHSCOPE_API_KEY` / DashScope 报错（如 403 免费额度用尽） | 自动回落**本地 Ollama** 完成重写/扩展/分解 |
+| 本地 Ollama 也不可用 | 返回原始 Query（单路检索），`bundle.source="raw"` |
+| 单个通道召回异常 | `MultiRecall` 跳过该通道，其他通道照常 |
+| 模块化多路召回整体失败 | 回落内置 `multi_route_search()` → 再回落单路 `HybridRetrieval.search()` |
+| 关闭 `MULTI_QUERY_ENABLED` | 直接走单路混合检索，链路不中断 |
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_query_preprocess_recall.py
+```
+
+实测输出（复合问题：「2025年河南考生报福州大学至诚学院计算机专业，学费和位次大概多少？」）：
+
+```
+【1】检索前
+  重写后：2025年河南考生报福州大学至诚学院计算机专业学费及位次查询
+  后退一步：2025年河南考生报考福州大学至诚学院计算机专业学费及位次情况如何？
+  子查询1：2025年河南考生报考福州大学至诚学院计算机专业是否可行？
+  子查询2：该专业2025年的学费标准是多少？
+  子查询3：该专业在2025年的招生位次大概如何？
+  最终送检索（source=ollama）：4 条（原始 Query 置顶）
+
+【2】检索中：三通道（dense, bm25, hybrid），语料 4 条，复用预计算向量：是
+  RRF / 加权 / 轮询 三种融合均正常返回 Top3
+
+【3】v2.3.1 单路 vs v2.4.1 预处理 + 多路召回
+  覆盖语义侧面数：v2.3.1 = 3/3，v2.4.1 = 3/3   [通过]
+  （v2.4.1 三条全部 context_level=parent，学费/位次/学校三个侧面都召回）
+
+【4】降级验证：关闭开关 → 仍返回 3 条 parent 结果    [通过]
+```
+
+#### 2. 接口端到端验证
+
+```bash
+POST /api/knowledge/upload     # 上传含 学校/学费/位次 三侧面的资料
+GET  /api/knowledge/search?query=…&top_k=3
+POST /api/ai/chat {"question":"…","use_rag":true,"top_k":3}
+```
+
+实测：
+
+```
+upload 200 子块 2
+  1 parent | file_30_parent_0 | 福州大学至诚学院是独立学院，位于福建省福州市，2025年在河南本…
+chat rag+llm | 2025年河南考生报福州大学至诚学院计算机专业，学费为23000元/年，对应位次约112000名。
+```
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python smoke_rag.py   # 登录 → 上传 → 检索 → RAG 问答 → 删除：全链路通过
+python smoke_test.py  # 志愿推荐等 14 个业务接口：全部 200
+```
+
+> 环境提示：本机 `DASHSCOPE_API_KEY` 存在但**免费额度已用尽**（返回 403 `AllocationQuota.FreeTierOnly`），
+> 因此预处理实际走了「DashScope 失败 → 本地 Ollama」的降级路径（实测生效）。
+> 额度恢复/充值后无需改代码，会自动切回 DashScope。
+
+---
+
+### 四、后续演进方向（v2.5.0）
+
+| 方向 | 说明 |
+|---|---|
+| **Rerank 落地** | 接入 BGE-Reranker / Cross-Encoder，在 `rerank()` 中实现二次排序（当前为 no-op） |
+| 通道扩展 | 增加「标题通道」「政策条款通道」等数据源级通道，验证开闭原则 |
+| 并行召回 | 多通道/多子查询并发执行，降低多路召回时延 |
+| 子查询去重 | 语义相近的 Query 合并，避免重复加权 |
+| Text-to-SQL 落地 | 把 `extract_sql_filters()` 的条件接到 MySQL |
 
 ---
 
