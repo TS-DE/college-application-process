@@ -364,16 +364,25 @@ taskkill /PID <PID> /F
   → Chroma PersistentClient 写入集合 gaokao_knowledge
   → MySQL 回写 chunk_count / status = 已向量化
 
-提问
-  → /api/knowledge/search 检索 top_k 片段
-  → /api/ai/chat 把片段拼进 Prompt → Qwen3 生成 → 返回 answer + sources
+提问（v2.5.0 检索链路）
+  → ① 检索前：query_rewrite.QueryPreprocessor（重写 / 扩展 / 子查询）
+  → ② 检索中：retrieval.MultiRecall（dense / bm25 / hybrid 三通道 × 多 Query，RRF 融合）
+  → ③ 检索后：reranker.Reranker 精排（CrossEncoder 或 embedding 余弦）
+  → ④ 父子块回填：子块命中 → 换成父块上下文
+  → ⑤ Modular RAG：route_strategy() 选路 → Self-RAG / Corrective RAG / 标准 RAG → 生成
+  → /api/ai/chat 返回 answer + sources + strategy + steps
 ```
 
 ### 9.2 关键文件
 
 | 文件 | 职责 |
 |---|---|
-| `backend/app/services/rag_service.py` | Chroma 客户端、embedding、切片写入、`search()`、`delete_by_file()` |
+| `backend/app/services/rag_service.py` | Chroma 客户端、embedding、切片写入、`search()`、`rerank()`、`route_strategy()`、`answer_with_strategy()`、`delete_by_file()` |
+| `backend/app/services/query_rewrite.py` | 检索前：重写 / 扩展 / 子查询分解 + DashScope↔Ollama 统一 LLM 通道 |
+| `backend/app/services/retrieval.py` | 检索中：dense / bm25 / hybrid 通道 + MultiRecall 融合（rrf / weight / round_robin） |
+| `backend/app/services/reranker.py` | 检索后：CrossEncoder / embedding 余弦 / noop 三种精排 + 失败降级 |
+| `backend/app/services/self_rag.py` | Self-RAG：是否检索 → 上下文是否有用 → 生成 → 自评不合格才反思修正 |
+| `backend/app/services/corrective_rag.py` | Corrective RAG：相关性过滤 → 不足则重写 Query 重试 |
 | `backend/app/utils/file_utils.py` | UUID 保存、文本提取、切片（500 / 50） |
 | `backend/app/routers/knowledge.py` | upload / list / detail / download / delete / search / status |
 | `backend/app/routers/auth.py` | JWT、bcrypt、`get_current_user` / `get_current_admin` |

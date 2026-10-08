@@ -10,8 +10,234 @@
 | **v2.3.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 已发布 |
 | **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
 | **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
-| **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回 + 精排） | ✅ 本次发布 |
-| **v2.5.0** | 计划中 | 父子块 + 语义/标题感知切分 | 检索前 + 多路召回 + **BGE-Reranker 落地** + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+| **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回） | ✅ 已发布 |
+| **v2.5.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 本次发布 |
+| **v2.6.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.5.0] - 2026-10-08 · 检索后优化（Re-ranking）+ 高级 RAG（Self-RAG / Corrective RAG）
+
+> 主题：把 v2.4.1 里**空转**的 `rerank()` 钩子真正落地，并按课堂案例
+> `01_检索后优化_重排序.py` / `02_self_RAG（python原生）.py` / `03_correctiveRAG（用python原生实现）.py`
+> 引入两条**高级 RAG 链路**，由 Modular RAG 路由按问题特征自动选择。
+
+---
+
+### 一、原有技术（v2.4.1）及缺陷
+
+| 环节 | v2.4.1 的技术 | 存在的缺陷 |
+|---|---|---|
+| 精排 | `rerank()` 是**空钩子**：`if not hits or not settings.RERANK_MODEL: return hits` | ① 未配置 CrossEncoder 模型时完全不生效；<br>② 排序完全由 RRF 决定，只考虑「排名」不考虑「语义贴合度」，Top-1 常不是最贴切的那条 |
+| 生成 | 检索完就把 Top-K 拼接送 LLM 一次性生成 | ① 不判断「要不要检索」「召回的文档有没有用」，噪声文档也进 Prompt；<br>② 生成后不自检，编造数字/遗漏侧面无法纠正 |
+| 纠偏 | 无 | 召回的文档**全部无关**时（Query 表述与资料用语不一致）直接拒答，不会换个说法再试一次 |
+| LLM 通道 | DashScope 默认 `qwen-plus` | 课堂案例用的 `qwen-plus` **免费额度已用尽**（403 `AllocationQuota.FreeTierOnly`），每次调用都要走一次失败的远程往返 |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新建 `backend/app/services/reranker.py`（检索后优化：重排序）
+
+两阶段检索：**第 1 阶段召回（重在全）→ 第 2 阶段精排（重在准）**。
+
+| 类 | 职责 |
+|---|---|
+| `BaseReranker` | 抽象基类（接口隔离）：只要求实现 `score(query, docs) -> List[float]` |
+| `CrossEncoderReranker` | `sentence_transformers.CrossEncoder` 逐对打分，精度最高（需 `settings.RERANK_MODEL` 指定本地模型） |
+| `EmbeddingReranker` | **无额外依赖的精排**：复用项目已有 embedding（Ollama `nomic-embed-text` / DashScope）算「问题-文档」余弦相似度 |
+| `NoopReranker` | 空实现（关闭精排时直传，保证调用方无需分支判断） |
+| `Reranker` | 门面类：按配置选择实现 + **失败降级**（合成复用 + 开闭） |
+
+优先级：`RERANK_ENABLED=0 → NoopReranker`；`RERANK_MODEL 有值且 CrossEncoder 可用 → CrossEncoderReranker`；
+否则 → `EmbeddingReranker`（默认，**本机无需装任何新模型即可生效**）。
+
+输出字段：`rerank_score`（精排分）、`reranker`（实际用的实现名），**保留原 `rrf_score`** 便于对比。
+
+#### 2. 新建 `backend/app/services/self_rag.py`（Self-RAG）
+
+Self-RAG 的核心不是「多检索几次」，而是让模型**自己判断每一步**：
+
+| 步骤 | 方法 | 作用 |
+|---|---|---|
+| ① | `should_retrieve()` | 是否真的需要检索？（避免无关问题浪费检索） |
+| ② | `is_context_useful()` | 检索到的上下文能否支撑回答？（避免拿噪声去生成） |
+| ③ | `should_continue_generate()` | 回答是否完整、准确、无幻觉？ |
+| ④ | `reflect_and_correct()` | 不合格才调：对照上下文改掉幻觉与遗漏（省一次 LLM 调用） |
+
+返回 `SelfRAGResult(answer, used_context, need_retrieve, context_useful, steps)`，`steps` 记录每一步判断便于排查与演示。
+
+#### 3. 新建 `backend/app/services/corrective_rag.py`（Corrective RAG）
+
+管的是「**召回的文档对不对**」：检索 → 逐条相关性过滤 → 一条都不相关就**重写 Query 再检索** → 仍不足才拒答。
+
+| 方法 | 作用 |
+|---|---|
+| `is_relevant(query, doc)` | 单条文档判 `RELEVANT / IRRELEVANT` |
+| `rewrite_query(query)` | 换个更贴近资料用语的说法 |
+| `run()` | 检索 → 过滤 →（不足则重写重试，`CORRECTIVE_MAX_RETRY` 次）→ 生成 |
+
+#### 4. 修改 `backend/app/services/rag_service.py`（落地 + 路由）
+
+| 函数 | 说明 |
+|---|---|
+| `rerank()` | 由「空钩子」改为真实调用 `Reranker().rerank(query, hits)`；异常时保持召回顺序，**链路不中断** |
+| `route_strategy()` | **Modular RAG 路由**：纯规则判断、零 LLM 延迟 —— 含「是不是/能不能/是否」→ `self_rag`；复合多实体或 ≥18 字 → `corrective`；其余 → `standard` |
+| `answer_with_strategy()` | Modular RAG 主流程：三条链路**共用同一个 `search()`**（检索前预处理 + 多路召回 + 精排 + 父块回填），差别只在「拿到上下文之后怎么生成」 |
+| `_sources_from_hits()` | 从命中结果提取去重后的来源文件名 |
+
+#### 5. 修改 `backend/app/routers/ai.py`（接入问答接口）
+
+`POST /api/ai/chat` 在 `use_rag=true` 且 `ADVANCED_RAG_ENABLED=1` 时走高级链路，响应新增字段：
+
+```jsonc
+{
+  "answer": "...",
+  "source": "advanced:corrective",   // 便于前端/日志区分来源
+  "strategy": "corrective",          // self_rag / corrective / standard
+  "steps": ["retrieved=3", "relevant=2", "generated"],
+  "rewritten_query": "..."           // 仅 corrective 触发重写时非空
+}
+```
+
+高级链路抛异常时 `except → pass`，**自动回落 v2.4.1 原有流程**。
+
+#### 6. 新增配置（`app/config.py`）
+
+```python
+DASHSCOPE_MODEL         = "qwen3.7-flash-2026-07-15"  # 替换额度用尽的 qwen-plus
+OLLAMA_FALLBACK_MODEL   = "qwen3:1.7b"                # 本地兜底
+RERANK_ENABLED          = 1      # 精排总开关（0 → NoopReranker）
+RERANK_MODEL            = ""     # CrossEncoder 路径；留空则用 embedding 余弦精排
+ADVANCED_RAG_ENABLED    = 1      # 高级 RAG 总开关
+ADVANCED_RAG_STRATEGY   = "auto" # auto / self_rag / corrective / standard
+CORRECTIVE_MAX_RETRY    = 1      # Corrective RAG 重写重试次数
+```
+
+同时 `query_rewrite.py` 两处加固：
+
+1. 新增 `default_chat_model()`：环境变量 → `settings.DASHSCOPE_MODEL` → 代码默认值，
+   统一模型名，避免各处散落 `qwen-plus`；
+2. `_dashscope_chat()` 补 `max_tokens=512` 与 `(连接 10s, 读 30s)` 分离超时 ——
+   思考型模型（qwen3.7-flash 会输出很长的 `reasoning_content`）原先不设上限，
+   每次都要等满读超时才降级本地，白白多花几十秒。
+
+#### 7. 降级策略
+
+| 场景 | 处理 |
+|---|---|
+| 未配置 `RERANK_MODEL`（本机现状） | 自动用 `EmbeddingReranker` 余弦精排，**无需额外模型** |
+| CrossEncoder 导入/加载失败 | 门面捕获异常 → 降级 `EmbeddingReranker` |
+| 精排过程抛异常 | 保持召回顺序，`rerank_score=None, reranker="failed"` |
+| Self-RAG / Corrective RAG 任一步异常 | `except → mode = "standard"`，走常规 RAG |
+| `ADVANCED_RAG_ENABLED=0` | `answer_with_strategy()` 强制 `standard`，接口返回不变 |
+| DashScope 403 / 无 Key | 统一回落本地 Ollama（`query_rewrite.llm_chat` 已封装） |
+| 两层 LLM 都失败 | `llm()` 返回空串，各判断做**保守处理**（"未查询到具体信息"），不抛异常 |
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_advanced_rag.py
+```
+
+实测输出（本机 Ollama 兜底，总耗时约 3 分钟）：
+
+```
+知识库：父块 4 个，子块 4 个
+
+【1】Rerank 精排：召回顺序 vs 精排后顺序
+  -- 召回 + 父块回填后（v2.4.1 终点）--
+    1. [召回分 0.1967] 福州大学至诚学院2025年在河南本科批物理类投档最低分为458分，对应全...
+    2. [召回分 0.1915] 福州大学至诚学院是经教育部批准设立的独立学院，位于福建省福州市，2025...
+    3. [召回分 0.1903] 福州大学至诚学院计算机科学与技术专业，学制4年，学费标准为23000元/...
+    4. [召回分 0.1897] 河南省2025年本科批实行平行志愿，考生可填报48个院校专业组志愿，投档...
+  -- Rerank 精排后（v2.5.0）--
+    1. [精排分 0.9234] 福州大学至诚学院2025年在河南本科批物理类投档最低分为458分，对应全...
+    2. [精排分 0.8723] 福州大学至诚学院是经教育部批准设立的独立学院，位于福建省福州市，2025...
+    3. [精排分 0.8086] 福州大学至诚学院计算机科学与技术专业，学制4年，学费标准为23000元/...
+    4. [精排分 0.8085] 河南省2025年本科批实行平行志愿，考生可填报48个院校专业组志愿，投档...
+
+  精排是否改变顺序：否（召回顺序已最优）
+  Reranker 实现：embedding
+
+【2】Modular RAG 路由
+  2025年河南考生报福州大学至诚学院计算机专业，学费和位... → corrective
+  福州大学至诚学院是不是民办本科？... → self_rag
+  河南本科批志愿怎么填报... → standard
+
+【3】v2.4.1（直接生成）vs v2.5.0（高级 RAG）
+  -- v2.4.1 --
+    根据检索上下文，福州大学至诚学院计算机专业2025年在河南本科批物理类的学费为23000元/年，对应全省位次约为112000名。
+
+  -- v2.5.0 strategy=self_rag --
+    步骤：['need_retrieve=True', 'retrieved=3', 'context_useful=True', 'generated', 'passed_check']   来源：['福大至诚招生.txt']
+    回答：根据检索上下文，福州大学至诚学院2025年在河南本科批物理类投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年。
+    耗时：26.1s
+
+  -- v2.5.0 strategy=corrective --
+    步骤：['retrieved=3', 'relevant=2', 'generated']   来源：['福大至诚招生.txt']
+    回答：…投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年，选科要求首选物理、再选化学。
+    耗时：24.0s
+
+  -- v2.5.0 strategy=standard --
+    步骤：['retrieve', 'generate']   来源：['福大至诚招生.txt']
+    回答：…投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年。
+    耗时：19.8s
+
+【4】降级验证：关闭高级 RAG 后走标准链路，链路不中断
+  策略 = standard，回答长度 = 82   [通过]
+```
+
+关键现象解读：
+
+| 现象 | 说明 |
+|---|---|
+| 精排未改变顺序 | 本用例语料只有 4 条且表述规范，RRF 的召回顺序已是最优；精排的价值在**长文档 / 多侧面**场景下把最贴切的顶上来（分数差距被拉开：0.9234 vs 0.8085） |
+| `reranker=embedding` | `RERANK_MODEL` 留空 → 自动用 `EmbeddingReranker`，**本机无需下载任何新模型** |
+| corrective 只留 2/3 条 | 「平行志愿」那条被判 `IRRELEVANT` 过滤掉，回答更聚焦（多答出「选科要求首选物理、再选化学」） |
+| self_rag 走了 5 步 | `need_retrieve → retrieved → context_useful → generated → passed_check`，自评合格后**没有**触发反思修正（省一次 LLM 调用） |
+
+#### 2. 接口端到端验证
+
+```bash
+POST /api/ai/chat {"question":"2025年河南考生报福州大学至诚学院计算机专业，学费和位次大概多少？","use_rag":true,"top_k":3}
+# → source=advanced:corrective，steps 含 retrieved / relevant / generated
+
+POST /api/ai/chat {"question":"福州大学至诚学院是不是民办本科？","use_rag":true,"top_k":3}
+# → source=advanced:self_rag，steps 含 need_retrieve / context_useful / generated
+```
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python test_multi_query.py            # v2.4.0 多路召回
+python test_query_preprocess_recall.py # v2.4.1 检索前 + 多路召回
+python smoke_rag.py                   # 登录 → 上传 → 检索 → RAG 问答 → 删除
+python smoke_test.py                  # 14 个业务接口
+```
+
+> 环境提示：
+> 1. 本机 `RERANK_MODEL` 留空，精排实际走 `EmbeddingReranker`（embedding 余弦），
+>    无需下载任何新模型；后续接入 BGE-Reranker 只需在 `.env` 填模型路径，**代码零改动**；
+> 2. 用例里把 DashScope Key 置空，**强制本地 Ollama 兜底**，避免依赖外网额度与网络抖动；
+> 3. 服务进程需要**重启**才能加载 v2.5.0 新模块（`uvicorn` 未开 `--reload`）。
+
+---
+
+### 四、后续演进方向（v2.6.0）
+
+| 方向 | 说明 |
+|---|---|
+| CrossEncoder 精排 | 下载 BGE-Reranker 到本地，配置 `RERANK_MODEL` 后自动切换，对比余弦精排的效果差异 |
+| 并行召回 | 多通道 / 多子查询并发执行，降低多路召回时延 |
+| 语义分块 | 父子块升级为语义/标题感知切分 |
+| Text-to-SQL 落地 | 把 `extract_sql_filters()` 的条件接到 MySQL |
 
 ---
 

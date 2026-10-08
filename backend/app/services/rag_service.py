@@ -811,15 +811,113 @@ def _load_corpus_docs() -> tuple:
 
 
 def rerank(query: str, hits: List[Dict]) -> List[Dict]:
-    """Rerank 精排钩子（v2.4.0 预留）。
+    """Rerank 精排（v2.5.0 落地）：对多路召回的候选做二次排序。
 
-    当前没有可用的 Rerank 模型（settings.RERANK_MODEL 为空）→ 直接原样返回，
-    保证链路不中断；后续接入 BGE-Reranker / Cross-Encoder 后在此实现二次排序。
+    实现见 app/services/reranker.py：
+      - 配置了 RERANK_MODEL 且 CrossEncoder 可用 → CrossEncoderReranker
+      - 否则 → EmbeddingReranker（复用项目 embedding 的余弦分，无需额外模型）
+      - 关闭 RERANK_ENABLED → NoopReranker（直传）
+    精排失败时保持召回顺序，链路不中断。
     """
-    if not hits or not settings.RERANK_MODEL:
+    if not hits:
         return hits
-    # TODO(v2.4.x)：接入 Rerank 模型后按 (query, text) 相关性重排
-    return hits
+    try:
+        from app.services.reranker import Reranker
+
+        return Reranker().rerank(query, hits)
+    except Exception:  # noqa: BLE001
+        return hits
+
+
+def route_strategy(query: str) -> str:
+    """Modular RAG 路由：按 Query 特征选择处理链路（不额外调用 LLM，零延迟）。
+
+      - self_rag   ：判断/确认类问题（是不是、能不能、要不要、是否…）→ 需要模型自判断
+      - corrective ：复合/多实体问题（同时问学校+专业+学费+位次，或含"多少/怎么/哪些"）
+                     → 容易召回不全，走「过滤 + 重写重试」纠偏
+      - standard   ：其余走常规 RAG（检索前预处理 + 多路召回 + 精排）
+    """
+    q = (query or "").strip()
+    if not q:
+        return "standard"
+
+    judge_words = ("是不是", "能不能", "要不要", "是否", "可否", "有没有", "对不对")
+    complex_words = ("多少", "怎么", "哪些", "分别", "以及", "和", "还是", "对比")
+
+    if any(w in q for w in judge_words):
+        return "self_rag"
+    if sum(1 for w in complex_words if w in q) >= 2 or len(q) >= 18:
+        return "corrective"
+    return "standard"
+
+
+def answer_with_strategy(query: str, top_k: int = 3, strategy: str = "auto") -> Dict:
+    """Modular RAG 主流程：按策略选择 Self-RAG / Corrective RAG / 标准 RAG。
+
+    三条链路**共用**同一个检索入口 search()（内含检索前预处理 + 多路召回 + 精排 + 父块回填），
+    差别只在"拿到上下文之后怎么生成、要不要反思/纠偏"。
+    """
+    mode = strategy if strategy != "auto" else settings.ADVANCED_RAG_STRATEGY
+    if mode == "auto":
+        mode = route_strategy(query)
+
+    def _retrieve(q: str, k: int) -> List[Dict]:
+        return search(q, top_k=k)
+
+    def _generate(q: str, context: str) -> str:
+        return generate_answer(q, context) or ""
+
+    if not settings.ADVANCED_RAG_ENABLED:
+        mode = "standard"
+
+    if mode == "self_rag":
+        try:
+            from app.services.self_rag import SelfRAG
+
+            res = SelfRAG(_retrieve, _generate, top_k=top_k).run(query)
+            return {
+                "answer": res.answer,
+                "strategy": "self_rag",
+                "steps": res.steps,
+                # 复用 Self-RAG 已检索到的 hits 取来源，避免重复检索（省一整轮预处理 + 召回）
+                "sources": _sources_from_hits(res.hits),
+            }
+        except Exception:  # noqa: BLE001 高级链路异常 → 回落标准 RAG
+            mode = "standard"
+
+    if mode == "corrective":
+        try:
+            from app.services.corrective_rag import CorrectiveRAG
+
+            res = CorrectiveRAG(_retrieve, _generate, top_k=top_k).run(query)
+            return {
+                "answer": res.answer,
+                "strategy": "corrective",
+                "steps": res.steps,
+                "rewritten_query": res.rewritten_query,
+                "sources": _sources_from_hits(res.hits),
+            }
+        except Exception:  # noqa: BLE001
+            mode = "standard"
+
+    hits = _retrieve(query, top_k)
+    context = "\n".join(h.get("text", "") for h in hits)
+    return {
+        "answer": _generate(query, context) or OFF_TOPIC_ANSWER,
+        "strategy": "standard",
+        "steps": ["retrieve", "generate"],
+        "sources": _sources_from_hits(hits),
+    }
+
+
+def _sources_from_hits(hits: List[Dict]) -> List[str]:
+    """从命中结果中提取来源文件名（去重）。"""
+    names = []
+    for h in hits:
+        name = (h.get("metadata") or {}).get("filename") or "知识库"
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dict]:
