@@ -80,6 +80,25 @@ def chat(payload: dict) -> dict:
             "sources": [],
         }
 
+    # ---- v2.5.0 ② Modular RAG：按 Query 特征走 Self-RAG / Corrective RAG / 标准 RAG ----
+    if use_rag and rag_service.settings.ADVANCED_RAG_ENABLED:
+        try:
+            adv = rag_service.answer_with_strategy(
+                question,
+                top_k=int(payload.get("top_k") or 5),
+                strategy=str(payload.get("strategy") or "auto"),
+            )
+            return {
+                "answer": adv["answer"],
+                "source": f"advanced:{adv['strategy']}",
+                "sources": adv["sources"],
+                "strategy": adv["strategy"],
+                "steps": adv["steps"],
+                "rewritten_query": adv.get("rewritten_query", ""),
+            }
+        except Exception:  # noqa: BLE001 高级链路异常 → 回落原有流程
+            pass
+
     background = payload.get("context") or ""
     sources: list[str] = []
     rag_snippets = ""

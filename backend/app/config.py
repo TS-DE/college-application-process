@@ -98,8 +98,20 @@ class Settings:
     MULTI_QUERY_MAX: int = int(_env("MULTI_QUERY_MAX", "4"))
     # 每条子查询在稠密/稀疏路各召回多少候选
     MULTI_QUERY_CANDIDATE_N: int = int(_env("MULTI_QUERY_CANDIDATE_N", "20"))
-    # Rerank 精排（当前无可用模型，留空即跳过；接入 BGE-Reranker 后填写模型名）
+    # ---------------- v2.5.0 检索后优化（Re-ranking）+ 高级 RAG ----------------
+    # DashScope 统一模型名（课堂案例里的 qwen-plus 额度用尽，改为 qwen3.7-flash）
+    DASHSCOPE_MODEL: str = _env("DASHSCOPE_MODEL", "qwen3.7-flash-2026-07-15")
+    # 本地兜底模型（Ollama）
+    OLLAMA_FALLBACK_MODEL: str = _env("OLLAMA_FALLBACK_MODEL", _env("OLLAMA_MODEL", "qwen3:1.7b"))
+    # Rerank 总开关：1=开启（默认用向量余弦精排，无需额外模型）
+    RERANK_ENABLED: bool = _env("RERANK_ENABLED", "1") not in {"0", "false", "False"}
+    # CrossEncoder 模型路径（留空则用项目 embedding 做余弦精排；配置了则优先用 CrossEncoder）
     RERANK_MODEL: str = _env("RERANK_MODEL", "")
+    # 高级 RAG 总开关与策略：auto / self_rag / corrective / standard
+    ADVANCED_RAG_ENABLED: bool = _env("ADVANCED_RAG_ENABLED", "1") not in {"0", "false", "False"}
+    ADVANCED_RAG_STRATEGY: str = _env("ADVANCED_RAG_STRATEGY", "auto")
+    # Corrective RAG 重试次数（信息不足时重写 Query 重试）
+    CORRECTIVE_MAX_RETRY: int = int(_env("CORRECTIVE_MAX_RETRY", "1"))
 
     # ---------------- v2.4.1 检索前预处理 + 模块化多路召回 ----------------
     # 检索前：查询重写 / 查询扩展 / 子查询分解 开关

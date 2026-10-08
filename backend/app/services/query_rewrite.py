@@ -27,7 +27,24 @@ import requests
 # ====================== DashScope（OpenAI 兼容）调用封装 ======================
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_CHAT_MODEL = os.getenv("DASHSCOPE_CHAT_MODEL", "qwen-plus")
+
+
+def default_chat_model() -> str:
+    """统一的 DashScope 模型名（v2.5.0 起默认 qwen3.7-flash-2026-07-15）。
+
+    优先级：环境变量 DASHSCOPE_CHAT_MODEL → config.DASHSCOPE_MODEL → 代码默认值。
+    课堂案例里的 qwen-plus 已因免费额度用尽不可用，统一改到新模型。
+    """
+    from app.config import settings
+
+    return (
+        os.getenv("DASHSCOPE_CHAT_MODEL")
+        or getattr(settings, "DASHSCOPE_MODEL", "")
+        or "qwen3.7-flash-2026-07-15"
+    )
+
+
+DEFAULT_CHAT_MODEL = "qwen3.7-flash-2026-07-15"
 
 
 def get_dashscope_key() -> str:
@@ -77,14 +94,17 @@ def _dashscope_chat(system_prompt: str, user_prompt: str, temperature: float = 0
             f"{DASHSCOPE_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json={
-                "model": model or DEFAULT_CHAT_MODEL,
+                "model": model or default_chat_model(),
                 "temperature": temperature,
+                # 思考型模型（如 qwen3.7-flash）的 reasoning_content 可能很长，
+                # 不限制会拖到读超时（30s）后再降级，白白多等一轮，这里显式封顶
+                "max_tokens": 512,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             },
-            timeout=30,
+            timeout=(10, 30),  # （连接超时，读超时）
         )
         resp.raise_for_status()
         return (resp.json()["choices"][0]["message"]["content"] or "").strip()
