@@ -757,6 +757,59 @@ def multi_route_search(query: str, top_k: int = 5, candidate_n: int = 0) -> List
     ]
 
 
+def build_multi_recall(docs: Optional[List[Dict]] = None, embeddings: Optional[List] = None) -> "MultiRecall":
+    """构建模块化多路召回（对接 app/services/retrieval.py）。
+
+    通道配置（对应课堂案例「不同数据源 = 不同通道」的思路）：
+      - dense：稠密向量通道（weight=1.0），复用 Chroma 中已存的向量，避免重复编码
+      - bm25 ：稀疏关键词通道（weight=1.2，政策条款/专业代码这类字面量更依赖它）
+      - hybrid：把「混合检索」当作一个复合通道（weight=1.0）
+    docs 为空时自动从 Chroma 载入子块语料。
+    """
+    from app.services.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
+
+    if docs is None:
+        docs, embeddings = _load_corpus_docs()
+    if not docs:
+        return MultiRecall(channels=[])
+
+    channels: List = [
+        DenseChannel("dense", docs, fields=["text"], weight=1.0, embeddings=embeddings),
+        BM25Channel("bm25", docs, fields=["text"], weight=1.2),
+        HybridSearch(docs, fields=["text"], k=RRF_K, embeddings=embeddings),
+    ]
+    return MultiRecall(channels=channels)
+
+
+def _load_corpus_docs() -> tuple:
+    """从 Chroma 取出子块语料，转成 retrieval 模块需要的结构。
+
+    返回 (docs, embeddings)：
+      docs       = [{"id": chunk_id, "text": ..., "metadata": {...}}]
+      embeddings = Chroma 中已存的向量（可直接复用，省去重新编码全库）
+    """
+    col = _get_collection()
+    if col is None:
+        return [], None
+    try:
+        data = col.get(include=["documents", "metadatas", "embeddings"])
+    except Exception:  # noqa: BLE001
+        try:
+            data = col.get(include=["documents", "metadatas"])
+        except Exception:  # noqa: BLE001
+            return [], None
+
+    ids = data.get("ids") or []
+    docs_list = data.get("documents") or []
+    metas = data.get("metadatas") or []
+    vecs = data.get("embeddings")
+    docs = [
+        {"id": i, "text": d or "", "metadata": m or {}}
+        for i, d, m in zip(ids, docs_list, metas)
+    ]
+    return docs, (vecs if vecs is not None and len(vecs) == len(docs) else None)
+
+
 def rerank(query: str, hits: List[Dict]) -> List[Dict]:
     """Rerank 精排钩子（v2.4.0 预留）。
 
@@ -770,41 +823,111 @@ def rerank(query: str, hits: List[Dict]) -> List[Dict]:
 
 
 def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dict]:
-    """完整检索流程：多路召回 → RRF 融合 → Rerank 精排 → 父子块回填。
+    """完整检索流程：检索前预处理 → 模块化多路召回 → Rerank 精排 → 父子块回填。
 
-    1. 多路召回：multi_route_search()（Query 分解 + 每条子查询混合检索 + 跨路 RRF）
-    2. 单路兜底：多路召回无结果时回落 HybridRetrieval.search()
-    3. Rerank：rerank()（模型可用时才生效，当前为 no-op）
-    4. 父子块回填：_expand_to_parents() 把命中子块换成父块上下文
+    ① 检索前：QueryPreprocessor.process()（重写 / 扩展 / 子查询）
+    ② 检索中：build_multi_recall() 构建通道，按「子查询 × 通道」做 RRF 累加
+    ③ 精排  ：rerank()（模型可用时才生效，当前为 no-op）
+    ④ 回填  ：_expand_to_parents() 把命中子块换成父块上下文
+    任一步失败都有兜底，链路不中断。
     """
     col = _get_collection()
     if col is None:
         return _keyword_fallback(query, top_k)
 
-    results: List[Dict] = []
-
-    # ① 多路召回
-    if use_multi_route and settings.MULTI_QUERY_ENABLED:
+    # ===== ① 检索前预处理（v2.4.1）=====
+    queries: List[str] = [query]
+    preprocess_info: Dict = {"enabled": False, "source": "raw", "queries": [query]}
+    if settings.MULTI_QUERY_ENABLED:
         try:
-            results = multi_route_search(query, top_k)
-        except Exception:  # noqa: BLE001 多路召回异常 → 回落单路
-            results = []
+            from app.services.query_rewrite import QueryPreprocessor
 
-    # ② 单路混合检索兜底
-    if not results:
-        try:
-            results = HybridRetrieval(col, k=RRF_K, top_k=top_k).search(query, top_k)
-        except Exception:  # noqa: BLE001
-            results = []
+            preprocessor = QueryPreprocessor(
+                use_rewrite=settings.QUERY_REWRITE_ENABLED,
+                use_expansion=settings.QUERY_EXPANSION_ENABLED,
+                use_decompose=settings.QUERY_DECOMPOSE_ENABLED,
+                max_queries=settings.QUERY_PREPROCESS_MAX,
+            )
+            bundle = preprocessor.process(query)
+            queries = bundle.all_queries or [query]
+            preprocess_info = {
+                "enabled": True,
+                "source": bundle.source,
+                "rewritten": bundle.rewritten,
+                "step_back": bundle.step_back,
+                "sub_queries": bundle.sub_queries,
+                "queries": queries,
+            }
+        except Exception:  # noqa: BLE001 预处理失败 → 用原始 Query
+            queries = [query]
 
-    # ③ Rerank 精排（模型未接入时为 no-op）
+    # ===== ② 检索中：模块化多路召回 =====
+    results = _recall(queries, top_k, use_multi_route)
+
+    # ===== ③ Rerank 精排（模型未接入时为 no-op）=====
     if results:
         results = rerank(query, results)
-        # ④ 子块命中 → 回填父块（父块缺失时自动降级为子块）
+        for h in results:
+            h.setdefault("preprocess", preprocess_info)
+        # ===== ④ 子块命中 → 回填父块 =====
         return _expand_to_parents(results)
 
     # 兜底：Chroma 有数据但都没命中，用老的关键词打分
     return _expand_to_parents(_keyword_fallback(query, top_k))
+
+
+def _recall(queries: List[str], top_k: int, use_multi_route: bool) -> List[Dict]:
+    """检索中执行：模块化多路召回，失败逐级回落。
+
+    回落顺序：多路召回(模块化) → 多路召回(内置) → 单路混合检索
+    """
+    # ① 模块化多路召回（app/services/retrieval.py，课堂案例风格）
+    if use_multi_route and settings.MULTI_QUERY_ENABLED:
+        try:
+            docs, embeddings = _load_corpus_docs()
+            if docs:
+                recall = build_multi_recall(docs, embeddings)
+                fusion = settings.MULTI_RECALL_FUSION
+                per_channel = settings.MULTI_RECALL_TOPK_PER_CHANNEL
+                if fusion == "weight":
+                    raw = recall.weight_fusion(queries[0], top_k=top_k, top_k_per_channel=per_channel)
+                elif fusion == "round_robin":
+                    raw = recall.round_robin_fusion(queries[0], top_k=top_k, top_k_per_channel=per_channel)
+                else:
+                    raw = recall.rrf_fusion(queries, top_k=top_k, top_k_per_channel=per_channel)
+                return [_hit_from_channel(h) for h in raw]
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ② 内置多路召回（v2.4.0）
+    if use_multi_route and settings.MULTI_QUERY_ENABLED:
+        try:
+            hits = multi_route_search(queries[0], top_k)
+            if hits:
+                return hits
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ③ 单路混合检索兜底
+    try:
+        return HybridRetrieval(_get_collection(), k=RRF_K, top_k=top_k).search(queries[0], top_k)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _hit_from_channel(hit: Dict) -> Dict:
+    """把 retrieval 模块的输出转换成项目内部的 hit 结构（保持字段一致）。"""
+    doc = hit.get("full_doc") or {}
+    return {
+        "text": hit.get("text") or doc.get("text", ""),
+        "metadata": doc.get("metadata", {}) or {},
+        "distance": None,
+        "rrf_score": hit.get("rrf_score") or hit.get("weighted_score") or hit.get("score"),
+        "dense_rank": None,
+        "bm25_rank": None,
+        "channel": hit.get("channel"),
+        "recall_mode": "multi_recall_module",
+    }
 
 
 def _keyword_fallback(query: str, top_k: int) -> List[Dict]:

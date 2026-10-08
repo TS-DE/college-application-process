@@ -101,6 +101,17 @@ class Settings:
     # Rerank 精排（当前无可用模型，留空即跳过；接入 BGE-Reranker 后填写模型名）
     RERANK_MODEL: str = _env("RERANK_MODEL", "")
 
+    # ---------------- v2.4.1 检索前预处理 + 模块化多路召回 ----------------
+    # 检索前：查询重写 / 查询扩展 / 子查询分解 开关
+    QUERY_REWRITE_ENABLED: bool = _env("QUERY_REWRITE_ENABLED", "1") not in {"0", "false", "False"}
+    QUERY_EXPANSION_ENABLED: bool = _env("QUERY_EXPANSION_ENABLED", "1") not in {"0", "false", "False"}
+    QUERY_DECOMPOSE_ENABLED: bool = _env("QUERY_DECOMPOSE_ENABLED", "1") not in {"0", "false", "False"}
+    QUERY_PREPROCESS_MAX: int = int(_env("QUERY_PREPROCESS_MAX", "4"))
+    # 检索中：多路召回融合策略 rrf / weight / round_robin
+    MULTI_RECALL_FUSION: str = _env("MULTI_RECALL_FUSION", "rrf")
+    # 每个通道每条 Query 召回多少候选
+    MULTI_RECALL_TOPK_PER_CHANNEL: int = int(_env("MULTI_RECALL_TOPK_PER_CHANNEL", "20"))
+
     @property
     def DATABASE_URL(self) -> str:
         pwd = quote_plus(self.DB_PASSWORD)
