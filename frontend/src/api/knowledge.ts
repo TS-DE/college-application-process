@@ -1,11 +1,11 @@
-import { http } from './request'
+import { http, httpAI } from './request'
 import type { KnowledgeFile, RagBackendInfo, SearchResult } from '@/types/knowledge'
 
 /** 上传知识库文件（管理员） */
 export function uploadKnowledge(file: File) {
   const form = new FormData()
   form.append('file', file)
-  return http<{ code: number; msg: string; file_id: number; data: KnowledgeFile }>({
+  return httpAI<{ code: number; msg: string; file_id: number; data: KnowledgeFile }>({
     url: '/knowledge/upload',
     method: 'POST',
     data: form,
@@ -29,9 +29,11 @@ export function deleteKnowledge(id: number) {
   return http<{ code: number; msg: string }>({ url: `/knowledge/delete/${id}`, method: 'DELETE' })
 }
 
-/** 检索：所有登录用户可用（考生端 RAG） */
+/** 检索：所有登录用户可用（考生端 RAG）
+ * v2.5.2：检索涉及 embedding/LLM，使用独立长超时实例，避免阻塞短超时请求。
+ */
 export function searchKnowledge(query: string, topK = 5) {
-  return http<SearchResult>({ url: '/knowledge/search', params: { query, top_k: topK } })
+  return httpAI<SearchResult>({ url: '/knowledge/search', params: { query, top_k: topK }, timeout: 30000 })
 }
 
 export function ragStatus() {

@@ -1,4 +1,4 @@
-import { http } from './request'
+import { http, httpAI } from './request'
 
 export interface ChatPayload {
   question: string
@@ -15,7 +15,8 @@ export interface ChatResult {
 
 /** 志愿问答：use_rag=true 时后端先检索知识库再交给 Qwen3 */
 export function chat(payload: ChatPayload) {
-  return http<ChatResult>({ url: '/ai/chat', method: 'POST', data: payload, timeout: 120000 })
+  // v2.5.2：AI 问答使用独立的长超时实例，避免污染首页/登录的短超时
+  return httpAI<ChatResult>({ url: '/ai/chat', method: 'POST', data: payload, timeout: 120000 })
 }
 
 export function aiStatus() {

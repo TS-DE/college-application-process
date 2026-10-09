@@ -12,8 +12,117 @@
 | **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
 | **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回） | ✅ 已发布 |
 | **v2.5.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 已发布 |
-| **v2.5.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次热修复 |
+| **v2.5.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
+| **v2.5.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次热修复 |
 | **v2.6.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.5.2] - 2026-10-09 · 热修复：前端加载超时 + 登录无限 loading
+
+> 主题：v2.5.1 切换 Ali OpenAI 兼容通道后，AI 调用耗时仍可能达到数秒；
+> 更关键的是**启动阶段 /health 同步探测 Ollama、前端 axios 默认超时 60000ms、AI 接口与业务接口共用同一把超时尺子**，
+> 导致首页地图与登录请求被长耗时或阻塞的 AI 通道拖慢，出现 `timeout of 60000ms exceeded`、登录按钮一直转圈。
+> 本次把 AI 调用彻底剥离出首页/登录的关键路径，并给前端超时分层。
+
+---
+
+### 一、原有技术（v2.5.1）及缺陷
+
+| 环节 | v2.5.1 的技术 | 存在的缺陷 |
+|---|---|---|
+| 服务启动 | `main.py::on_startup()` 同步执行 `ensure_indexes()` + `rag_service.backend_info()` | 若 Chroma / DB 初始化慢，uvicorn 在 startup 事件结束**前不接收任何请求**，前端首屏等待 |
+| 健康检查 | `/api/health` 同步调用 `ollama_health()` + `backend_info()` | Ollama 未启动或 Ali 通道异常时，健康检查本身阻塞，可能拖慢前端全局状态探测 |
+| 前端超时 | `request.ts` 一把 `timeout: 60000` 管所有接口 | 登录、首页统计、AI 问答全部共用 60s：后端一旦阻塞，用户要转圈 60s 才收到错误 |
+| AI 接口执行 | `/api/ai/*`、`/api/recommend` 为同步 `def` 路由 | FastAPI 虽在线程池运行，但长耗时 AI 调用仍占用工作线程，极端情况下会挤压登录/统计等非 AI 请求 |
+| 错误提示 | axios 拦截器把所有错误都展示为后端返回的 `detail` | 超时时 `error.response` 为空，用户看到不友好的 `timeout of 60000ms exceeded` |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. 启动阶段不再阻塞：`backend/app/main.py`
+
+- `on_startup` 改为 `async`，`ensure_indexes()` 与 `rag_service.backend_info()` 放入 `asyncio.create_task` 后台执行；
+- 服务启动后即可接收请求，索引与 RAG 状态在后台补齐；
+- 新增 `_HEALTH_CACHE` 与轻量 `/api/health`：AI / RAG 状态走后台探测 + 5 秒缓存，单次探测限时 2 秒，超时返回 `degraded`，绝不阻塞首页/登录。
+
+#### 2. AI 路由全部改为 async + 线程池 + 显式超时
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/routers/ai.py` | `/ai/status`、`/ai/parse-intent`、`/ai/recommend-reason`、`/ai/chat` 全部改为 `async`；`/ai/chat` 整体放入线程池并设 120s 上限；探测类接口限时 3~30s |
+| `backend/app/routers/recommend.py` | `/recommend`、`/recommend/ai-reasons` 改为 `async` + 线程池；`/recommend` 整体 60s 上限，超时返回 504 |
+
+#### 3. 前端超时分层：`frontend/src/api/request.ts`
+
+- 默认 axios 实例 `request` 超时从 `60000ms` 降到 `10000ms`，用于首页、登录、统计、查大学等常规接口；
+- 新增 `aiRequest` 实例，超时 `120000ms`，专门用于 AI 问答、知识库检索、文件上传、AI 推荐理由；
+- 统一响应拦截器识别 `ECONNABORTED` / `timeout`，给出中文提示“请求超时，请稍后重试”。
+
+#### 4. 业务接口使用正确的超时实例
+
+| 文件 | 改动 |
+|---|---|
+| `frontend/src/api/ai.ts` | `chat` 改用 `httpAI`，保留 120s 长超时 |
+| `frontend/src/api/knowledge.ts` | `uploadKnowledge`、`searchKnowledge` 改用 `httpAI`（30s/120s） |
+| `frontend/src/api/recommend.ts` | `recommend` 按 `use_ai` 选择实例：不用 AI 30s，用 AI 60s |
+
+#### 5. 友好的超时提示
+
+`request.ts` 拦截器在超时时不再把 `timeout of 60000ms exceeded` 直接弹给用户，而是统一提示“请求超时，请稍后重试”。
+
+---
+
+### 三、验证流程
+
+#### 1. 启动速度
+
+```bash
+cd backend
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+服务应在 1~2 秒内进入 `Application startup complete.`，不再因为 startup 事件阻塞。
+
+#### 2. 健康检查非阻塞
+
+```bash
+GET /api/health
+# → 即使 Ollama 未启动，也应在 500ms 内返回
+# {"status":"degraded","database":"gaokao","ollama":false,"ollama_message":"AI 通道探测超时","rag":{"ready":null}}
+```
+
+#### 3. 首页与登录响应时间
+
+```bash
+# 首页统计
+GET /api/stats/major-count-by-province?province=河南&year=2025&category=物理类&batch=本科批
+# → 应在 3s 内返回
+
+# 登录
+POST /api/auth/login {"username":"admin","password":"admin123"}
+# → 应在 5s 内返回 token
+```
+
+#### 4. AI 接口独立超时
+
+```bash
+# AI 问答仍可长等待
+POST /api/ai/chat {"question":"福州大学至诚学院计算机专业学费是多少","use_rag":true,"top_k":3}
+# → 前端使用 120s 超时，正常返回约 5~8s
+```
+
+---
+
+### 四、后续演进方向（v2.6.0 及以后）
+
+| 方向 | 说明 |
+|---|---|
+| 流式输出 | `/api/ai/chat` 支持 SSE，减少用户等待感 |
+| AI 任务队列 | 将长耗时 AI 理由生成放入后台队列，前端轮询结果 |
+| 独立 AI Worker | AI 推理与业务 API 进程分离，彻底避免资源争抢 |
+| 前端请求优先级 | 关键路径请求（登录、首页）自动降级/重试，非关键请求可排队 |
 
 ---
 

@@ -649,6 +649,7 @@ python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → �
 | 症状 | 原因 | 处理 |
 |---|---|---|
 | **AI 问答全部超时 / 等半天才返回** | v2.5.0 用的是通用域名 `dashscope.aliyuncs.com` + 裸 HTTP，限时模型不在该域名上，每次都要等满超时才降级 | v2.5.1 已修正：统一用 `openai.OpenAI` + `ALI_BASE_URL`（工作空间专属域名）。排查：`GET /api/health` 看 `llm_provider` 是否为 `ali(openai-compatible)`；再看 `.env` 的 `ALI_BASE_URL` 与 Key 变量名是否写成 `Ali_API_KEY` |
+| **首页地图/登录提示 `timeout of 60000ms exceeded`，登录按钮一直转圈** | v2.5.1 把 AI 通道收敛后，启动阶段/健康检查仍同步探测 Ollama，前端 axios 默认超时 60s 又把所有接口一视同仁；AI 通道一旦阻塞，登录和首页统计也被拖住 | v2.5.2 已修正：① `main.py` startup 改为后台任务；② `/api/health` 限时 2s 缓存；③ AI 路由全部 `async` + 线程池；④ 前端默认超时降到 10s，AI 接口单独使用 120s。排查：刷新首页后 F12 看 `/api/health` 是否 <500ms；登录接口是否 <5s |
 | Key 配了但读不到 | 系统环境变量是在**服务进程启动之后**配置的，`os.getenv` 读不到 | 代码已兜底读 Windows 注册表（`llm_client.get_api_key()`）；或重启终端/服务 |
 | 回答很慢（>10s） | 检索前预处理、多路召回、相关性判断各自一次网络往返 | 已做：关思考（9.7s→2.6s）、ThreadPool 并发、embedding 批量 + 缓存、短问句跳过预处理。仍慢可设 `ALI_ENABLE_THINKING=0`、`QUERY_PREPROCESS_MIN_LEN` 调大、`ADVANCED_RAG_STRATEGY=standard` |
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
