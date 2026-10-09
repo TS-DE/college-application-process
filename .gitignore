@@ -19,3 +19,4 @@ backend/*.db
 .idea/
 .vscode/
 *.log
+_assistant_docs/

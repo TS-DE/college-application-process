@@ -1,4 +1,4 @@
-import { http } from './request'
+import { http, httpAI } from './request'
 import type { ProvinceMajorStatsResult, RecommendResult } from '@/types/recommend'
 
 export interface RecommendPayload {
@@ -12,8 +12,15 @@ export interface RecommendPayload {
   use_ai?: boolean
 }
 
+/** 生成冲/稳/保推荐。涉及 AI 理由时使用独立长超时实例，避免阻塞默认短超时。 */
 export function recommend(payload: RecommendPayload) {
-  return http<RecommendResult>({ url: '/recommend', method: 'POST', data: payload })
+  const request = payload.use_ai ? httpAI : http
+  return request<RecommendResult>({
+    url: '/recommend',
+    method: 'POST',
+    data: payload,
+    timeout: payload.use_ai ? 60000 : 30000
+  })
 }
 
 export interface ScoreCheckPayload {
