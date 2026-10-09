@@ -85,9 +85,23 @@ class Settings:
     # Ollama embedding 模型（离线优先）
     OLLAMA_BASE_URL: str = _env("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_EMBED_MODEL: str = _env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    # 备选：DashScope 千问 text-embedding-v3（需 API Key）
-    DASHSCOPE_API_KEY: str = _env("DASHSCOPE_API_KEY", "")
-    DASHSCOPE_EMBED_MODEL: str = _env("DASHSCOPE_EMBED_MODEL", "text-embedding-v3")
+    # ---------------- v2.5.1 LLM / Embedding 统一通道（★ 热修复） ----------------
+    # 说明：限时模型 qwen3.7-flash-2026-07-15 只能走 OpenAI 兼容接口，
+    #       base_url 必须是「工作空间专属域名」，不能是通用 dashscope 域名，也不能用 dashscope SDK。
+    ALI_API_KEY: str = _env("Ali_API_KEY", "")
+    ALI_BASE_URL: str = _env(
+        "ALI_BASE_URL",
+        "https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    )
+    ALI_LLM_MODEL: str = _env("ALI_LLM_MODEL", "qwen3.7-flash-2026-07-15")
+    # 向量模型与大语言模型共用同一个 Key 和同一个 base_url
+    ALI_EMBED_MODEL: str = _env("ALI_EMBED_MODEL", "text-embedding-v3")
+    # text-embedding-v3 支持指定维度；实际维度会由 rag_service 对齐已有 Chroma 集合
+    ALI_EMBED_DIMENSION: int = int(_env("ALI_EMBED_DIMENSION", "128"))
+    # 线上通道超时（秒），超时即降级到本地 Ollama，避免用户干等
+    ALI_TIMEOUT: float = float(_env("ALI_TIMEOUT", "30"))
+    # 是否允许模型「先思考再回答」：关掉后同一请求实测 9.7s → 2.6s，默认关闭
+    ALI_ENABLE_THINKING: bool = _env("ALI_ENABLE_THINKING", "0") not in {"0", "false", "False"}
     # 切片参数
     CHUNK_SIZE: int = int(_env("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(_env("CHUNK_OVERLAP", "50"))
@@ -99,8 +113,7 @@ class Settings:
     # 每条子查询在稠密/稀疏路各召回多少候选
     MULTI_QUERY_CANDIDATE_N: int = int(_env("MULTI_QUERY_CANDIDATE_N", "20"))
     # ---------------- v2.5.0 检索后优化（Re-ranking）+ 高级 RAG ----------------
-    # DashScope 统一模型名（课堂案例里的 qwen-plus 额度用尽，改为 qwen3.7-flash）
-    DASHSCOPE_MODEL: str = _env("DASHSCOPE_MODEL", "qwen3.7-flash-2026-07-15")
+    # 注：统一模型名已上移为 ALI_LLM_MODEL（v2.5.1 起 Ali API Key 与 Ollama 共用一套通道）
     # 本地兜底模型（Ollama）
     OLLAMA_FALLBACK_MODEL: str = _env("OLLAMA_FALLBACK_MODEL", _env("OLLAMA_MODEL", "qwen3:1.7b"))
     # Rerank 总开关：1=开启（默认用向量余弦精排，无需额外模型）
@@ -119,6 +132,9 @@ class Settings:
     QUERY_EXPANSION_ENABLED: bool = _env("QUERY_EXPANSION_ENABLED", "1") not in {"0", "false", "False"}
     QUERY_DECOMPOSE_ENABLED: bool = _env("QUERY_DECOMPOSE_ENABLED", "1") not in {"0", "false", "False"}
     QUERY_PREPROCESS_MAX: int = int(_env("QUERY_PREPROCESS_MAX", "4"))
+    # 短问句阈值：少于 N 个字认为意图已经很明确，**跳过**重写/扩展/分解（设 0 表示永不跳过）
+    # 目的：检索前预处理是 1 次 LLM 往返（约 5s），短问句收益 < 代价，砍掉后整链能进 10 秒
+    QUERY_PREPROCESS_MIN_LEN: int = int(_env("QUERY_PREPROCESS_MIN_LEN", "20"))
     # 检索中：多路召回融合策略 rrf / weight / round_robin
     MULTI_RECALL_FUSION: str = _env("MULTI_RECALL_FUSION", "rrf")
     # 每个通道每条 Query 召回多少候选

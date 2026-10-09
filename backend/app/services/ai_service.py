@@ -1,7 +1,11 @@
-"""本地大模型服务（Ollama + Qwen3）。
+"""大模型服务（v2.5.1：Ali OpenAI 兼容通道 + Ollama 本地兜底）。
+
+通道统一由 `app/services/llm_client.py` 编排（迪米特法则：本模块不知道背后是谁在回答）：
+    ① Ali OpenAI 兼容接口（base_url=ALI_BASE_URL，model=ALI_LLM_MODEL）
+    ② 本地 Ollama（OLLAMA_FALLBACK_MODEL）
 
 设计原则：AI 只做「理解」和「表达」，不做录取概率计算；
-任何一步失败都必须静默降级到规则实现，保证推荐列表永远可用。
+任何一步失败都必须静默降级（② → 规则实现），保证推荐列表永远可用。
 """
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+from app.services import llm_client  # 模块导入很轻：llm_client 内部再懒加载 openai SDK
 from app.config import settings
 
 # ---------------------------------------------------------------- 基础调用
@@ -46,6 +51,22 @@ def _strip_think(text: str) -> str:
     return text.strip().strip("`").strip()
 
 
+def ask_local(
+    prompt: str,
+    timeout: Optional[float] = None,
+    num_predict: int = 256,
+    temperature: float = 0.3,
+    top_p: float = 0.85,
+) -> Optional[str]:
+    """**只**调用本地 Ollama /api/generate，失败返回 None。
+
+    供明确要求「必须本地」的场景使用（离线演示 / 排查 / 单元测试）。
+    """
+    return llm_client.OllamaLLMChannel(timeout=timeout or 0).chat(
+        "", prompt, temperature=temperature, max_tokens=num_predict, top_p=top_p
+    )
+
+
 def ask(
     prompt: str,
     timeout: Optional[float] = None,
@@ -53,7 +74,12 @@ def ask(
     temperature: float = 0.3,
     top_p: float = 0.85,
 ) -> Optional[str]:
-    """调用 Ollama /api/generate，失败返回 None。
+    """统一 LLM 调用入口（v2.5.1 热修复）。
+
+    通道顺序（由 llm_client 编排，调用方无感知）：
+        ① Ali OpenAI 兼容接口 —— base_url=settings.ALI_BASE_URL，model=settings.ALI_LLM_MODEL
+        ② 本地 Ollama 兜底   —— settings.OLLAMA_FALLBACK_MODEL
+    两级都失败返回 None，由各业务函数的规则兜底接住，链路不中断。
 
     v2.3.0 起支持按场景指定采样参数：
       - 意图路由：temperature=0.0（要确定性二分类）
@@ -61,34 +87,15 @@ def ask(
     """
     if not settings.AI_ENABLED:
         return None
-    payload = {
-        "model": settings.OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "think": False,
-        "options": {
-            "temperature": temperature,
-            "top_p": top_p,
-            "num_predict": num_predict,
-        },
-    }
     try:
-        resp = requests.post(
-            f"{settings.OLLAMA_URL}/api/generate",
-            json=payload,
-            timeout=timeout or settings.OLLAMA_TIMEOUT,
+        text = llm_client.get_llm_client().chat(
+            "", prompt,
+            temperature=temperature,
+            max_tokens=num_predict,
+            top_p=top_p,
         )
-        if resp.status_code != 200:
-            # 老版本 Ollama 不认识 think 字段，去掉重试一次
-            payload.pop("think", None)
-            resp = requests.post(
-                f"{settings.OLLAMA_URL}/api/generate",
-                json=payload,
-                timeout=timeout or settings.OLLAMA_TIMEOUT,
-            )
-        resp.raise_for_status()
-        return _strip_think(resp.json().get("response", ""))
-    except Exception:  # noqa: BLE001
+        return _strip_think(text) or None
+    except Exception:  # noqa: BLE001 任何异常都不应中断业务链路
         return None
 
 

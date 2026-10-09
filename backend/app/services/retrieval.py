@@ -11,7 +11,7 @@
     MultiRecall         多路召回编排：多通道 × 多子查询 → RRF / 加权 / 轮询融合
 
 与项目的对接：
-    - Embedding 默认复用项目已有的 rag_service.get_embedding（Ollama / DashScope），
+    - Embedding 默认复用项目已有的 rag_service.get_embedding（Ali OpenAI 兼容 / Ollama），
       配置 EMBEDDING_MODEL_PATH 时可切换为本地 sentence-transformers（课堂案例方式）
     - 语料来自 Chroma 中的子块（父子块结构不变）
 """
@@ -34,7 +34,7 @@ _embedding_model = None
 
 
 class ProjectEmbedding:
-    """复用项目已有的 embedding 能力（Ollama nomic-embed-text / DashScope），
+    """复用项目已有的 embedding 能力（Ali text-embedding-v3 / Ollama nomic-embed-text），
     对外提供与 SentenceTransformer 一致的 `encode()` 接口（依赖倒置）。"""
 
     def __init__(self, dim: int = 768):
@@ -43,10 +43,13 @@ class ProjectEmbedding:
     def encode(self, texts: Sequence[str], normalize_embeddings: bool = True) -> np.ndarray:
         from app.services import rag_service  # 延迟导入，避免循环依赖
 
+        # v2.5.1：整批一次请求（Ali 支持原生 batch），把 N 次网络往返压成 1 次
+        batch = list(texts or [])
+        raw_vectors: List[Optional[List[float]]] = rag_service.get_embeddings_batch(batch) if batch else []
+
         vectors: List[List[float]] = []
         dim = self.dim
-        for t in texts:
-            vec = rag_service.get_embedding(t)
+        for t, vec in zip(batch, raw_vectors):
             if vec:
                 dim = len(vec)
                 vectors.append([float(x) for x in vec])
@@ -68,7 +71,7 @@ def get_embedding_model(model_path: str | None = None):
 
     优先顺序：
       1. 环境变量 EMBEDDING_MODEL_PATH 指定了路径 → 本地 sentence-transformers（课堂案例方式）
-      2. 否则 → 项目已有的 Ollama / DashScope embedding（离线可跑）
+      2. 否则 → 项目已有的 Ali / Ollama embedding（离线可跑）
     """
     global _embedding_model
     if _embedding_model is not None:

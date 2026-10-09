@@ -5,8 +5,8 @@ Self-RAG 的核心不是"多检索几次"，而是让模型**自己判断每一�
     ② 检索到的上下文是否有用（避免拿噪声去生成）
     ③ 生成结果是否合格（不完整就反思修正）
 
-模型：统一使用 settings.DASHSCOPE_MODEL（默认 qwen3.7-flash-2026-07-15）；
-DashScope 失败（如 403 额度用尽）自动降级本地 Ollama（依赖 query_rewrite.llm_chat）。
+模型：统一使用 settings.ALI_LLM_MODEL（默认 qwen3.7-flash-2026-07-15），
+走 OpenAI 兼容接口（llm_client.AliLLMChannel），失败自动降级本地 Ollama（OLLAMA_FALLBACK_MODEL）。
 检索器与生成器通过构造函数注入（依赖倒置），便于替换与单测。
 """
 from __future__ import annotations
@@ -49,14 +49,19 @@ class SelfRAG:
         self._llm = llm
 
     # ---------------- 底层 LLM（带降级） ----------------
-    def llm(self, prompt: str, temperature: float = 0.0) -> str:
-        """调用 LLM：DashScope 优先，失败降级本地 Ollama（query_rewrite.llm_chat 已封装）。"""
+    def llm(self, prompt: str, temperature: float = 0.0, max_tokens: int = 16) -> str:
+        """底层 LLM 调用：Ali OpenAI 兼容通道优先，失败降级本地 Ollama（llm_client 内部编排）。
+
+        :param max_tokens: 本类只用 LLM 做判断（YES/NO），输出一个标签即够，
+                          默认 16 token，既省推理时间也省费用。
+        两级都失败 → 返回空串，由各判断做保守处理（不抛异常，链路不中断）。
+        """
         if self._llm:
             return (self._llm(prompt) or "").strip()
         try:
-            from app.services.query_rewrite import llm_chat
+            from app.services.llm_client import get_llm_client
 
-            return (llm_chat("", prompt, temperature=temperature) or "").strip()
+            return get_llm_client().chat("", prompt, temperature=temperature, max_tokens=max_tokens).strip()
         except Exception:  # noqa: BLE001 两层都失败 → 返回空串，由各判断做保守处理
             return ""
 

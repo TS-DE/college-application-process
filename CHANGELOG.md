@@ -11,8 +11,209 @@
 | **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
 | **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
 | **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回） | ✅ 已发布 |
-| **v2.5.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 本次发布 |
+| **v2.5.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 已发布 |
+| **v2.5.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次热修复 |
 | **v2.6.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [2.5.1] - 2026-10-09 · 热修复：LLM 通道 base_url/SDK 修正 + README 深度重构
+
+> 主题：v2.5.0 上线后**用户 AI 问答全部超时**。根因是 LLM 通道用错了 base_url 与调用方式：
+> 限时模型 `qwen3.7-flash-2026-07-15` **必须**走 OpenAI 兼容接口且指向工作空间专属域名，
+> 不能用 `dashscope` Python SDK，也不能用通用域名 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
+> 本次把 LLM / Embedding 统一收敛到一个通道模块，并顺手把整条问答链路从 198s 优化到 5.7s。
+
+---
+
+### 一、原有技术（v2.5.0）及缺陷
+
+| 环节 | v2.5.0 的技术 | 存在的缺陷 |
+|---|---|---|
+| LLM 通道 | `requests.post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")`，Key 读 `DASHSCOPE_API_KEY` | ① **该模型不在这个通用域名上**，每次调用都要等满读超时才降级 → **所有 AI 问答超时**；<br>② Key 环境变量名与新的 `Ali_API_KEY` 不一致，配了也读不到；<br>③ 手写 HTTP，取值逻辑散落在多处 |
+| Embedding 通道 | 同一个通用域名 + requests | 同上；且没有维度对齐，换模型后与历史 768 维数据冲突会直接被 Chroma 拒绝 |
+| 调用耗时 | 串行：预处理 3 次 LLM + 每条 Query 单独 embedding | 一次问答要十几轮网络往返，最长观测到 **198 秒** |
+| 每次调研兜底 | 无 | Ali 失败后没有统一的「明确日志 + 本地兜底」策略 |
+| README | 目录结构与原版无异 | ① 只有静态树形，没有文件职责；<br>② 缺业务模块流程；<br>③ 流程图过于简陋，没有「文件 → 函数 → 参数 → 下一个文件」级别的链路 |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新建 `backend/app/services/llm_client.py`（★ 本次核心）
+
+两条通道 + 一个门面，**所有** LLM / Embedding 调用都收敛到这里：
+
+| 类 | 职责 | 说明 |
+|---|---|---|
+| `BaseLLMChannel` | LLM 通道抽象 | 只有 `chat(system_prompt, user_prompt, temperature, max_tokens, top_p)` |
+| `BaseEmbeddingChannel` | Embedding 通道抽象 | 只有 `embed()` / `embed_batch()` |
+| `AliLLMChannel` | **OpenAI 兼容** LLM 通道 | `OpenAI(api_key, base_url=ALI_BASE_URL)`，取值 `response.choices[0].message.content` |
+| `AliEmbeddingChannel` | **OpenAI 兼容** embedding | `client.embeddings.create(input=..., model=ALI_EMBED_MODEL, dimensions=...)`，原生批量 |
+| `OllamaLLMChannel` | 本地兜底 LLM | 直连 `/api/generate`（不走 `ai_service.ask`，避免循环依赖） |
+| `OllamaEmbeddingChannel` | 本地兜底 embedding | 直连 `/api/embeddings` |
+| `LLMClient` | 门面 + 降级编排 | 组合主/兜底通道（合成复用），按序尝试；附带进程内 embedding 缓存 |
+| `_EmbeddingCache` | 进程内向量缓存 | 同一条 Query 在召回 / Rerank 里被重复向量化 4~8 次，缓存后成本变 0 |
+
+关键代码（`llm_client.py`）：
+
+```python
+key = get_api_key()                      # ① os.getenv("Ali_API_KEY") → ② Windows 注册表补读
+self._client = OpenAI(api_key=key, base_url=settings.ALI_BASE_URL, timeout=settings.ALI_TIMEOUT, max_retries=0)
+resp = self.client.chat.completions.create(model=self.model, messages=messages,
+                                           temperature=..., max_tokens=...,
+                                           extra_body={"enable_thinking": False})  # 思考模式关闭
+return resp.choices[0].message.content   # 不再有 dashscope 的 response.output.choices[0]
+```
+
+#### 2. `backend/app/config.py`：配置项换血
+
+```python
+ALI_API_KEY          = _env("Ali_API_KEY", "")                       # 取代 DASHSCOPE_API_KEY
+ALI_BASE_URL         = _env("ALI_BASE_URL", "https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+ALI_LLM_MODEL        = _env("ALI_LLM_MODEL", "qwen3.7-flash-2026-07-15")   # 取代 DASHSCOPE_MODEL
+ALI_EMBED_MODEL      = _env("ALI_EMBED_MODEL", "text-embedding-v3")        # 取代 DASHSCOPE_EMBED_MODEL
+ALI_EMBED_DIMENSION  = 128                # 实际会优先对齐已有集合维度
+ALI_TIMEOUT          = 30                 # 超时即降级本地 Ollama
+ALI_ENABLE_THINKING  = 0                  # 关思考：同一请求实测 9.7s → 2.6s
+QUERY_PREPROCESS_MIN_LEN = 20             # 短问句跳过检索前预处理
+```
+
+旧的 `DASHSCOPE_API_KEY` / `DASHSCOPE_EMBED_MODEL` / `DASHSCOPE_MODEL` 已**全部删除**，代码内统一 `ALI_*` 前缀。
+
+#### 3. 调用点改造（全部改为走 `llm_client`）
+
+| 文件 | 改动 |
+|---|---|
+| `query_rewrite.py` | 删除 `DASHSCOPE_BASE_URL` / `get_dashscope_key()` / `_dashscope_chat()` / `_ollama_chat()`；`llm_chat()` 只剩三行，委托 `LLMClient.chat()`；`QueryBundle.source` 取值改为 `ali / ollama / raw` |
+| `self_rag.py` | `SelfRAG.llm()` 改调 `get_llm_client().chat(...)`；判断类输出限制 `max_tokens=16` |
+| `corrective_rag.py` | `CorrectiveRAG.llm()` 同上；`is_relevant()` 用 16 token；新增 `_filter_relevant()` 用线程池**并发**判相关性 |
+| `ai_service.py` | `ask()` 改走统一通道（Ali → Ollama）；新增 `ask_local()` 仅供「必须本地」场景 |
+| `rag_service.py` | 删除 `_dashscope_embedding()`；`get_embedding()` 走 `LLMClient.embed(dimensions=_collection_dimension())`；新增 `get_embeddings_batch()`；`backend_info()` 增加 `llm_provider` / `llm_model` |
+| `retrieval.py` | `ProjectEmbedding.encode()` 改为整批请求（一次往返算完一批 Query） |
+
+#### 4. 提速：198s → 5.7s
+
+| 手段 | 位置 | 收益 |
+|---|---|---|
+| 关闭思考模式（`extra_body.enable_thinking=False`） | `llm_client.AliLLMChannel` | 单次 9.7s → 2.6s |
+| 检索前预处理三路并发 | `query_rewrite.QueryPreprocessor.process()` | 3 次往返 → 1 次 |
+| 相关性判断并发 | `corrective_rag._filter_relevant()` | N 次 → 1 次 |
+| embedding 原生批量 | `AliEmbeddingChannel.embed_batch()` | 一次请求算完一批 Query |
+| embedding 进程内缓存 | `_EmbeddingCache` | 重复 Query 零成本 |
+| 短问句跳过预处理 | `QUERY_PREPROCESS_MIN_LEN=20` | 少一轮 LLM |
+| 限制判断类输出长度 | `max_tokens=16 / 128` | 少生成无用 token |
+
+#### 5. 降级策略（保持不变的强度）
+
+| 场景 | 处理 |
+|---|---|
+| `Ali_API_KEY` 为空 | `AliLLMChannel.available()` 返回 False → 直接用 Ollama |
+| Ali 调用超时 / 403 / 网络错误 | 捕获后打日志 `[LLM] Ali 通道失败，降级到 Ollama`，换 `OllamaLLMChannel` 重试 |
+| Key 配在系统环境变量但进程启动更早 | `get_api_key()` 兜底读 Windows 注册表（Machine / User），无需重启服务 |
+| Ollama 也失败 | `LLMClient.chat()` 返回 `""` → 各判断保守处理（保留原始 Query / "未查询到具体信息"），**不抛异常** |
+| Embedding 通道失败 | Ali → Ollama → 单条用零向量占位（保证矩阵形状一致） |
+| Chroma 维度不匹配 | `_collection_dimension()` 读取已有集合真实维度并复用（历史数据 768） |
+
+#### 6. 配置与依赖
+
+| 文件 | 改动 |
+|---|---|
+| `backend/.env` | 删除 `DASHSCOPE_API_KEY`；新增 `Ali_API_KEY / ALI_BASE_URL / ALI_LLM_MODEL / ALI_EMBED_MODEL / ALI_EMBED_DIMENSION / ALI_TIMEOUT` |
+| `backend/.env.example` | 同上，并写明「Key 与 base_url 由 LLM、Embedding 共用」 |
+| `backend/requirements.txt` | 移除 `dashscope`；新增 `openai>=1.0` |
+
+#### 7. README 深度重构
+
+改为**八章结构**：一、项目速览（技术栈表 + ★ 配置位置）／二、目录结构与文件职责（树 + 三种彩色标注）／
+三、业务模块调用流程（Mermaid 端到端图 + 参数级调用树 + 前端请求表）／四、RAG 模块调用流程（上传链 + 问答链 A-F 六分支）／
+五、接口清单（新增「调用链」列）／六、环境准备与启动（更新 Ali 说明）／七、常见问题排查（新增「AI 问答超时」）／八、RAG 版本演进对照。
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_llm_channel.py
+```
+
+实测输出（本机，2026-10-09）：
+
+```
+========================================================================
+【1】通道自检
+========================================================================
+  Ali_API_KEY：sk-ws-***-X（来源：系统环境变量/注册表）
+  LLM 通道顺序：['ali', 'ollama']
+  Embedding 通道顺序：['ali_embed', 'ollama_embed']
+  ALI_BASE_URL = https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  ALI_LLM_MODEL = qwen3.7-flash-2026-07-15
+
+【2】Ali LLM 调用：'你好，有什么可以帮您的吗？'   耗时 6.90s（首包含模型冷启动）
+
+【3】已有集合维度：768，本次请求维度：768
+  embedding 返回：768 维   耗时 1.84s
+
+【4】关闭 Key 后的降级（模拟线上通道故障）
+  Ollama 兜底返回：'你好！'   耗时 1.94s
+
+========================================================================
+【5】端到端问答（与 POST /api/ai/chat 同一条链路）
+========================================================================
+  临时知识库：3 个父块 → 21 个子块
+  问题：福州大学至诚学院计算机专业学费是多少
+  strategy = corrective
+  steps    = ['retrieved=2', 'relevant=2', 'generated']
+  answer   = 根据现有资料：福州大学至诚学院计算机科学与技术专业，学制4年，学费标准为23000元/年…
+  sources  = ['福大至诚招生.txt']
+  答案含正确数字(23000)：是
+  耗时 5.74s → [通过] 10 秒内返回
+  已清理临时集合与测试父块
+```
+
+耗时对比：
+
+| 阶段 | v2.5.0（错误通道） | v2.5.1（修正 + 优化） |
+|---|---|---|
+| 同一问题端到端 | **198.00s**（多次超时后兜底） | **5.74s** |
+| 提速倍数 | — | **约 34 倍** |
+
+#### 2. 接口端到端验证
+
+```bash
+# 注意：请求体必须 UTF-8 编码，否则中文会乱码导致误判为无关问题
+POST /api/ai/chat  {"question":"福州大学至诚学院计算机专业学费是多少","use_rag":true,"top_k":3}
+# → source=advanced:corrective，answer 带 sources（命中资料时约 5~8s）
+
+GET  /api/knowledge/search?query=专升本&top_k=3   （需 Bearer Token）
+# → hits=3，首次 3.56s，二次命中缓存 0.05s，证明 embedding 通道正常
+```
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python smoke_test.py           # 14 个业务接口全部 200；AI 意图解析 3.43s、推荐理由 1.62s（原 4~10s）
+python test_advanced_rag.py    # v2.5.0 用例仍通过（强制本地兜底）
+```
+
+> 踩坑记录：用 PowerShell `Invoke-RestMethod` 发中文请求体时可能因编码导致服务端收到乱码，
+> 表现为 `source=router_blocked`。改用 UTF-8 编码请求后恢复正常 —— 这不是代码问题。
+
+---
+
+### 四、后续演进方向（v2.6.0）
+
+| 方向 | 说明 |
+|---|---|
+| CrossEncoder 精排落地 | 下载 BGE-Reranker 到本地，配 `RERANK_MODEL` 后自动切换，对比余弦精排效果差异 |
+| 并行召回 | 召回通道 / 子查询并发执行，进一步压缩多路召回时延 |
+| 语义分块 | 父子块升级为语义 / 标题感知切分 |
+| Text-to-SQL 落地 | 把 `extract_sql_filters()` 抽出的条件真正接到 MySQL |
+| 回答流式输出 | 接入 SSE，避免长回答的等待感 |
 
 ---
 
