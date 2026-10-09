@@ -7,20 +7,20 @@
 对比 v2.4.1（检索 → 直接生成）与 v2.5.0（检索 → Rerank 精排 → Self-RAG/Corrective RAG）
 在同一 Query 下的排序与回答差异。
 
-说明：本用例把 DashScope Key 置空，**强制走本地 Ollama 兜底**，
+说明：本用例把 Ali_API_KEY 置空，**强制走本地 Ollama 兜底**，
 这样不依赖外网额度 / 网络抖动，任何环境都能稳定跑通；
-线上默认仍是 DashScope 优先、失败回落 Ollama（见 query_rewrite.llm_chat）。
+线上默认仍是 Ali OpenAI 兼容通道优先，失败才回落 Ollama（见 llm_client.LLMClient）。
 """
 import sys
 import time
 
 sys.path.insert(0, ".")
 
-from app.services import query_rewrite, rag_service
+from app.services import llm_client, rag_service
 from app.services.reranker import Reranker
 
 # 强制本地兜底（只影响本进程，不改动项目代码）
-query_rewrite.get_dashscope_key = lambda: ""
+llm_client.get_api_key = lambda: ""
 
 TEST_COLLECTION = "test_v250"
 

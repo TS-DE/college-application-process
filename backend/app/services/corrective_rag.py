@@ -6,7 +6,8 @@ Corrective RAG 的核心是「**纠偏**」：
 
 相比 Self-RAG（管"要不要检索/回答好不好"），Corrective RAG 管的是"**召回的文档对不对**"。
 
-模型：settings.DASHSCOPE_MODEL（默认 qwen3.7-flash-2026-07-15），失败降级本地 Ollama。
+模型：settings.ALI_LLM_MODEL（默认 qwen3.7-flash-2026-07-15），走 OpenAI 兼容接口，
+失败降级本地 Ollama（llm_client 负责通道编排）。
 检索器/生成器通过构造函数注入（依赖倒置），不引入 LlamaIndex 等框架，纯 Python 原生实现。
 """
 from __future__ import annotations
@@ -53,25 +54,50 @@ class CorrectiveRAG:
         self._llm = llm
 
     # ---------------- 底层 LLM（带降级） ----------------
-    def llm(self, prompt: str, temperature: float = 0.0) -> str:
+    def llm(self, prompt: str, temperature: float = 0.0, max_tokens: int = 128) -> str:
+        """底层 LLM 调用：Ali 通道优先，失败降级本地 Ollama；两级都失败返回空串做保守处理。
+
+        :param max_tokens: 输出上限，判断类调用建议 16，改写类 128，生成类走 generator 另算
+        """
         if self._llm:
             return (self._llm(prompt) or "").strip()
         try:
-            from app.services.query_rewrite import llm_chat
+            from app.services.llm_client import get_llm_client
 
-            return (llm_chat("", prompt, temperature=temperature) or "").strip()
+            return get_llm_client().chat("", prompt, temperature=temperature, max_tokens=max_tokens).strip()
         except Exception:  # noqa: BLE001
             return ""
 
     # ---------------- 三个原子能力 ----------------
     def is_relevant(self, query: str, doc: str) -> bool:
-        """判断单条文档是否能回答用户问题（RELEVANT / IRRELEVANT）。"""
+        """判断单条文档是否能回答用户问题（RELEVANT / IRRELEVANT）。
+
+        只输出一个标签，因此 max_tokens 给到 16 就够 —— 推理 token 更少、返回更快。
+        """
         prompt = (
             "判断文档是否能回答用户问题，只输出 RELEVANT 或 IRRELEVANT。\n\n"
             f"问题：{query}\n文档：{doc}\n输出："
         )
-        out = self.llm(prompt, temperature=0.0).upper()
+        out = self.llm(prompt, temperature=0.0, max_tokens=16).upper()
         return "IRRELEVANT" not in out and "RELEVANT" in out
+
+    def _filter_relevant(self, query: str, hits: List[Dict], relevant: List[str], relevant_hits: List[Dict]) -> None:
+        """并发执行相关性判断（v2.5.1 提速），结果按原始顺序追加到传入容器。"""
+        if not hits:
+            return
+        if len(hits) == 1:
+            if self.is_relevant(query, hits[0].get("text", "")):
+                relevant.append(hits[0].get("text", ""))
+                relevant_hits.append(hits[0])
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(len(hits), 4)) as pool:
+            flags = list(pool.map(lambda h: self.is_relevant(query, h.get("text", "")), hits))
+        for h, ok in zip(hits, flags):
+            if ok:
+                relevant.append(h.get("text", ""))
+                relevant_hits.append(h)
 
     def rewrite_query(self, query: str) -> str:
         """改写查询：让它更清晰、更容易命中知识库。"""
@@ -101,13 +127,10 @@ class CorrectiveRAG:
             result.answer = "根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。"
             return result
 
-        # ② 相关性过滤（逐条判断）
+        # ② 相关性过滤（v2.5.1：各文档互不依赖，并发判断）
         relevant: List[str] = []
         relevant_hits: List[Dict] = []
-        for h in hits:
-            if self.is_relevant(query, h.get("text", "")):
-                relevant.append(h.get("text", ""))
-                relevant_hits.append(h)
+        self._filter_relevant(query, hits, relevant, relevant_hits)
         result.steps.append(f"relevant={len(relevant)}")
 
         # ③ 全部无关 → 重写 Query 重试（最多 max_retry 次）
@@ -118,10 +141,7 @@ class CorrectiveRAG:
             result.retry_count += 1
             result.steps.append(f"retry_{result.retry_count}:{new_q}")
             retry_hits = self.retriever(new_q, k) or []
-            for h in retry_hits:
-                if self.is_relevant(query, h.get("text", "")):
-                    relevant.append(h.get("text", ""))
-                    relevant_hits.append(h)
+            self._filter_relevant(query, retry_hits, relevant, relevant_hits)
             current_query = new_q
 
         if not relevant:

@@ -1,491 +1,692 @@
 # 高考志愿填报系统（河南 2024-2025）+ RAG 知识库
 
 基于河南 2024-2025 年高考录取数据，构建「冲 / 稳 / 保」三档志愿推荐系统，
-并在其上扩展了独立的 **RAG 知识库模块**（Chroma 向量库 + Ollama embedding + Qwen3 生成）。
+并在其上扩展了独立的 **RAG 知识库模块**（Chroma 向量库 + Ali 大模型 + 本地 Ollama 兜底）。
 
 核心分工：
 
 - **规则引擎负责计算**：分数 → 位次换算、分档、筛选过滤、概率估算
 - **本地大模型负责理解与表达**：自然语言意图解析、推荐理由生成、知识库问答
-- **RAG 负责政策类问答**：上传政策文档 → 切片 → 向量化 → 检索 → 拼进 Prompt
+- **RAG 负责政策类问答**：上传政策文档 → 递归切片 → 向量化 → 多路召回 → 精排 → 拼进 Prompt
 - **物理隔离维度**：所有查询必须带 `province + year + category + batch`
 
+> ℹ️ 本文所有「文件 → 函数 → 参数 → 下一个调用点」均按当前代码实写（v2.5.1），
+> 行号随版本迭代会漂移，函数名与参数名为准。
+
 ---
 
-## 本次升级改动一览
+## 一、项目速览
 
-| 类别 | 改动 |
+一段话：**规则引擎算得准，大模型说得清。** 志愿推荐的分档与概率完全由 SQL + Python 规则决定，
+AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻译成人话」两件事；
+政策类问答则走完整的 RAG 链路（检索前改写 → 多路召回 → Rerank 精排 → Self-RAG / Corrective RAG → 防幻觉生成）。
+任一环节失败都会**静默降级**：推荐理由退化为规则文案、Embedding 退化为本地模型、LLM 退化为本地 Ollama。
+
+### 技术栈一览
+
+> ★ = 该技术的配置项所在位置；★★★ = 需要你手动改的配置文件
+
+| 层次 | 技术 | 说明 | 配置位置 |
+|---|---|---|---|
+| 前端框架 | Vue 3 + TypeScript + Vite | 组合式 API，`/api` 反向代理到 8000 | ★ `frontend/vite.config.ts` |
+| UI 库 | Element Plus | 表单 / 表格 / 上传 / 消息 | ★ `frontend/src/main.ts`（全量注册） |
+| 状态管理 | Pinia | `user`（登录态）、`knowledge`（文件与向量库状态） | ★ `frontend/src/stores/*.ts` |
+| 图表 | ECharts + 中国地图 GeoJSON | 首页「各省在豫招生专业数」热力地图 | ★ `frontend/src/views/student/Home.vue:116` |
+| 后端框架 | FastAPI | 路由按域拆分，全局 `TableNotFound` 处理 | ★ `backend/app/main.py:32-41` |
+| 数据访问 | SQLAlchemy Core + PyMySQL | 动态反射表 + `fetch_all()` 返回 dict | ★ `backend/app/database.py:64` |
+| 数据库 | MySQL（`gaokao`） | 录取 / 计划 / 一分一段 / 用户 / 知识文件 | ★ `backend/.env`（DB_*） |
+| 鉴权 | JWT（python-jose）+ bcrypt（passlib） | `admin` / `student` 两种角色 | ★ `backend/app/utils/security.py` |
+| 向量库 | Chroma `PersistentClient` | 集合 `gaokao_knowledge`，落盘 `backend/chroma_db/` | ★ `CHROMA_DB_PATH` / `CHROMA_COLLECTION` |
+| 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash-2026-07-15`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
+| LLM 兜底 | Ollama `qwen3:1.7b` | Ali 不可用自动降级，离线可跑 | ★ `OLLAMA_FALLBACK_MODEL` / `OLLAMA_URL` |
+| Embedding | Ali `text-embedding-v3` | 与 LLM 共用同一个 Key 与 base_url，维度对齐已有集合 | ★ `ALI_EMBED_MODEL` / `ALI_EMBED_DIMENSION` |
+| Embedding 兜底 | Ollama `nomic-embed-text` | 768 维，离线可用 | ★ `OLLAMA_EMBED_MODEL` |
+| 文档解析 | pypdf / python-docx | PDF / DOCX / TXT 文本提取 | ★ `backend/app/utils/file_utils.py` |
+
+<span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件清单 ★★★</span>
+
+| 文件 | 改什么 |
 |---|---|
-| 后端结构 | 单文件 `backend/main.py` → `backend/app/` 包（models / schemas / routers / services / utils） |
-| 前端 | 原生 HTML/CSS/JS → **Vue3 + TypeScript + Vite + Element Plus**（旧版归档到 `frontend/_legacy/`） |
-| 数据库 | 新增 `users`（role: admin/student）与新版 `knowledge_files`（stored_filename / chunk_count / uploaded_by） |
-| 鉴权 | JWT（python-jose）+ bcrypt（passlib），`get_current_admin` 依赖注入 |
-| RAG | 新增 `services/rag_service.py`（Chroma 持久化 + Ollama embedding + 切片 + 检索） |
-| 文件处理 | 新增 `utils/file_utils.py`（UUID 保存、PDF/DOCX/TXT 提取、500/50 切片） |
-| 接口 | 新增 auth（登录/注册/me）与 knowledge（上传/列表/详情/下载/删除/检索/status） |
-| 页面 | 新增管理端 `Dashboard.vue` / `Knowledge.vue`、考生端 `AiChat.vue`（RAG 问答） |
-| 工程化 | 新增 `.gitignore`、`backend/.env`、`frontend/.npmrc.local`，Git 已初始化并提交 |
+| `backend/.env`（由 `.env.example` 复制） | 数据库连接、<b>Ali_API_KEY</b>、ALI_BASE_URL、模型名、开关 |
+| `backend/app/config.py` | 所有配置项的**读取入口**与默认值（`_env()` + 极简 dotenv 加载） |
+| `backend/requirements.txt` | Python 依赖（v2.5.1 起：`openai>=1.0`，移除 `dashscope`） |
+| `frontend/vite.config.ts` | 端口 5173、`/api` 代理、别名 `@` |
+| `frontend/tsconfig.json` | TS 编译选项、`paths` 别名 |
+| `frontend/.npmrc.local` | npm 代理走不通时用 `npm i --userconfig .npmrc.local` |
 
 ---
 
-## 一、目录结构（前后端分离）
+## 二、目录结构与文件职责（★ 醒目标注）
+
+> 图例：
+> <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+> <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+> <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+
+### 2.1 仓库总览
 
 ```
 gaokao_project/
-├── backend/                          # FastAPI 后端
-│   ├── app/
-│   │   ├── main.py                   # FastAPI 入口（含 Vue SPA 回退）
-│   │   ├── config.py                 # 配置（DB / Ollama / Chroma / JWT / RAG）
-│   │   ├── database.py               # 引擎、动态表反射、ORM Base、get_db
-│   │   ├── models/
-│   │   │   ├── dataset.py            # 录取数据集表名解析与维度归一化
-│   │   │   ├── user.py               # 用户表 ORM（role: admin/student）
-│   │   │   └── knowledge.py          # 知识库文件表 ORM
-│   │   ├── schemas/
-│   │   │   ├── student.py            # 考生信息 / 推荐请求响应
-│   │   │   ├── user.py               # 登录 / 注册 / Token
-│   │   │   └── knowledge.py          # 知识库列表 / 检索
-│   │   ├── routers/
-│   │   │   ├── auth.py               # 登录注册 + get_current_admin 依赖
-│   │   │   ├── student.py            # 考生信息、分数 ↔ 位次
-│   │   │   ├── recommend.py          # 冲稳保推荐
-│   │   │   ├── university.py         # 查大学 / 查专业
-│   │   │   ├── meta.py               # 维度选项、省控线、一分一段
-│   │   │   ├── ai.py                 # 意图解析、推荐理由、RAG 问答
-│   │   │   └── knowledge.py          # 上传 / 列表 / 详情 / 删除 / 检索
-│   │   ├── services/
-│   │   │   ├── rank_service.py       # 分数 ↔ 位次换算
-│   │   │   ├── recommend_service.py  # 冲稳保规则引擎
-│   │   │   ├── ai_service.py         # Ollama 调用 + 规则兜底
-│   │   │   └── rag_service.py        # Chroma + embedding + 切片 + 检索
-│   │   └── utils/
-│   │       ├── security.py           # bcrypt 密码哈希 + JWT
-│   │       └── file_utils.py         # UUID 保存、PDF/DOCX/TXT 提取、切片
-│   ├── scripts/create_admin.py       # 创建 / 重置管理员
-│   ├── sql/
-│   │   ├── 03_knowledge.sql          # 旧版 knowledge_files（历史）
-│   │   └── 04_rag_tables.sql         # 新版 users + knowledge_files
-│   ├── knowledge_files/              # 上传的原始文件（已 gitignore）
-│   ├── chroma_db/                    # Chroma 持久化目录（已 gitignore）
-│   ├── smoke_test.py                 # 业务接口冒烟测试
-│   ├── smoke_rag.py                  # RAG 全链路冒烟测试
-│   ├── requirements.txt
-│   ├── .env                          # 本地配置（已 gitignore）
-│   └── .env.example
-├── frontend/                         # Vue3 + TypeScript 前端
-│   ├── src/
-│   │   ├── main.ts / App.vue
-│   │   ├── router/index.ts           # 路由 + 管理员守卫
-│   │   ├── api/{request,auth,knowledge,recommend,ai}.ts
-│   │   ├── stores/{user,knowledge}.ts
-│   │   ├── types/{user,knowledge,recommend}.ts
-│   │   ├── views/student/{Home,Volunteer,University,AiChat}.vue
-│   │   ├── views/admin/{Dashboard,Knowledge}.vue
-│   │   ├── views/Login.vue
-│   │   └── components/{Navbar,ChatBubble,UploadModal}.vue
-│   ├── _legacy/                      # 旧版原生 HTML/JS 前端（归档，不再使用）
-│   ├── package.json / vite.config.ts / tsconfig.json
-│   └── .npmrc.local                  # 本机 npm 配置（代理不可用时使用）
-├── gaokao_data/                      # CSV 原始数据 + 导入脚本
-├── .gitignore
-└── README.md
+├── backend/                      <span style="color:#888">// FastAPI 服务：业务规则 + RAG + AI</span>
+├── frontend/                     <span style="color:#888">// Vue3 + TS 单页应用</span>
+├── gaokao_data/                  <span style="color:#888">// 原始录取数据（MySQL 建库用）</span>
+├── CHANGELOG.md                  <span style="color:#888">// 版本迭代记录（每个版本的「原有缺陷 → 改进 → 验证」）</span>
+├── README.md                     <span style="color:#888">// 本文</span>
+└── 导入数据集.py                  <span style="color:#888">// CSV → MySQL 一次性导入脚本</span>
+```
+
+### 2.2 `backend/`
+
+```
+backend/
+├── app/
+│   ├── main.py                   <span style="color:#888">// FastAPI 入口：注册 8 个路由、CORS、SPA 回退、启动时补索引</span>
+│   ├── config.py                 <span style="color:#888">// 全局配置：DB / Ollama / Ali / Chroma / JWT / RAG 开关</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+│   ├── database.py               <span style="color:#888">// 引擎、表反射、`fetch_all/fetch_one/fetch_*_params`、幂等建索引</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   ├── models/                   <span style="color:#888">// 动态表解析 + ORM 模型（与 SQL 表一一对应）</span>
+│   │   ├── dataset.py            <span style="color:#888">// 表名拼接 `table_name()`、维度归一 `resolve_batch/category`、选科匹配 `subject_match()`</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── knowledge.py          <span style="color:#888">// ORM：knowledge_files（上传文件台账）</span>
+│   │   └── user.py               <span style="color:#888">// ORM：users（admin / student）</span>
+│   ├── schemas/                  <span style="color:#888">// Pydantic 出入参模型（请求体与响应体的唯一契约）</span>
+│   │   ├── student.py            <span style="color:#888">// RecommendIn / RecommendFilters / RecommendItem / ScoreToRankOut …</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   └── user.py               <span style="color:#888">// 登录注册入参、UserInfo</span>
+│   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
+│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答，v2.5.0 起返回 strategy/steps）、parse-intent、recommend-reason、status</span>
+│   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
+│   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
+│   │   ├── recommend.py          <span style="color:#888">// /api/recommend（主链路）、/api/recommend/ai-reasons（批量理由）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── stats.py              <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
+│   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
+│   │   └── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
+│   ├── services/                 <span style="color:#888">// 业务与算法层（所有计算发生在这里）</span>
+│   │   ├── recommend_service.py  <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── ai_service.py         <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
+│   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── query_rewrite.py      <span style="color:#888">// 检索前：重写 / 扩展(Step-Back) / 子查询分解（线程池并发）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── retrieval.py          <span style="color:#888">// 检索中：DenseChannel / BM25Channel / HybridSearch / MultiRecall（三通道 × 多 Query）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── reranker.py           <span style="color:#888">// 检索后：CrossEncoder / Embedding 余弦 / Noop 三种精排 + 失败降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── self_rag.py           <span style="color:#888">// Self-RAG：要不要检索 → 上下文有没有用 → 生成 → 自评不合格才反思</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   └── corrective_rag.py     <span style="color:#888">// Corrective RAG：相关性过滤 → 全部无关则重写 Query 再检索</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   └── utils/
+│       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取、20MB 限制</span>
+│       └── security.py           <span style="color:#888">// bcrypt 哈希校验 + JWT 签发/解析</span>
+├── sql/
+│   ├── 03_knowledge.sql          <span style="color:#888">// 旧版 knowledge_files（历史归档）</span>
+│   └── 04_rag_tables.sql         <span style="color:#888">// 新版 users + knowledge_files 建表</span>
+├── knowledge_files/              <span style="color:#888">// 上传的原始文件（UUID 重命名，已 gitignore）</span>
+├── chroma_db/                    <span style="color:#888">// Chroma 持久化目录（sqlite3 + 向量分片，已 gitignore）</span>
+├── .env                          <span style="color:#888">// 本地真实配置（不入库）</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── .env.example                  <span style="color:#888">// 配置模板（含 Ali_* 全部说明）</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── requirements.txt              <span style="color:#888">// Python 依赖清单</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── smoke_test.py                 <span style="color:#888">// 14 个业务接口冒烟</span>
+├── smoke_rag.py                  <span style="color:#888">// RAG 全链路冒烟：登录 → 上传 → 检索 → 问答 → 删除</span>
+├── test_llm_channel.py           <span style="color:#888">// v2.5.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
+├── test_advanced_rag.py          <span style="color:#888">// v2.5.0：精排 + 三条高级链路对比（强制本地兜底）</span>
+├── test_query_preprocess_recall.py <span style="color:#888">// v2.4.1：检索前预处理 + 多路召回</span>
+├── test_multi_query.py           <span style="color:#888">// v2.4.0：Query 分解 + 跨路 RRF</span>
+├── test_parent_child.py          <span style="color:#888">// v2.2.0：父子块检索</span>
+├── test_hybrid_search.py         <span style="color:#888">// v2.1.0：混合检索 + RRF 融合</span>
+└── test_anti_hallucination.py    <span style="color:#888">// v2.3.x：路由 + 防幻觉拒答</span>
+```
+
+### 2.3 `frontend/`
+
+```
+frontend/
+├── src/
+│   ├── main.ts                   <span style="color:#888">// 应用入口：createApp + Pinia + Router + ElementPlus + 图标全局注册</span>
+│   ├── App.vue                   <span style="color:#888">// 根布局：Navbar + RouterView</span>
+│   ├── router/index.ts           <span style="color:#888">// 8 条路由 + 全局守卫（admin 路由校验 role）</span>
+│   ├── api/                      <span style="color:#888">// 所有 HTTP 请求集中在此（组件不写 URL）</span>
+│   │   ├── request.ts            <span style="color:#888">// axios 实例（baseURL=/api, timeout=60s）+ Token 注入 + 401/403 处理</span>
+│   │   ├── recommend.ts          <span style="color:#888">// recommend / scoreCheck / controlLines / listUniversities / listMajors / majorCountByProvince</span>
+│   │   ├── knowledge.ts          <span style="color:#888">// upload / list / detail / delete / search / ragStatus</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── ai.ts                 <span style="color:#888">// chat（timeout 120s）/ aiStatus / parseIntent</span>
+│   │   └── auth.ts               <span style="color:#888">// login / register / fetchMe</span>
+│   ├── stores/
+│   │   ├── user.ts               <span style="color:#888">// token + user（派生 isLogin / role / isAdmin）</span>
+│   │   └── knowledge.ts          <span style="color:#888">// files / keyword / backend 状态与动作</span>
+│   ├── views/
+│   │   ├── Login.vue             <span style="color:#888">// 登录；按 role 跳 `/admin/knowledge` 或 `/`</span>
+│   │   ├── student/
+│   │   │   ├── Home.vue          <span style="color:#888">// 首页 ECharts 中国地图 + 快捷工具入口</span>
+│   │   │   ├── Volunteer.vue     <span style="color:#888">// 志愿填报主页面（分数 → 位次 → 冲稳保）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格）</span>
+│   │   │   └── AiChat.vue        <span style="color:#888">// AI 问答（可开关知识库增强，展示 sources）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   └── admin/
+│   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）</span>
+│   │       └── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   ├── components/
+│   │   ├── Navbar.vue            <span style="color:#888">// 顶部导航 + 登录态 + 退出</span>
+│   │   ├── UploadModal.vue       <span style="color:#888">// el-upload 直传 /api/knowledge/upload（自带 Bearer）</span>
+│   │   └── ChatBubble.vue        <span style="color:#888">// 聊天气泡纯展示组件</span>
+│   ├── types/                    <span style="color:#888">// TS 类型：recommend / knowledge / user</span>
+│   └── styles/main.css           <span style="color:#888">// 全局样式与 CSS 变量</span>
+├── index.html                    <span style="color:#888">// Vite 入口 HTML</span>
+├── vite.config.ts                <span style="color:#888">// dev server + /api 代理 + @ 别名</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── tsconfig.json                 <span style="color:#888">// TS 编译配置</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── package.json                  <span style="color:#888">// 依赖与 scripts（dev / build / preview）</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── .npmrc.local                  <span style="color:#888">// npm 本地代理兜底配置</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
+├── dist/                         <span style="color:#888">// 构建产物（生产模式下由 FastAPI 托管）</span>
+├── public/china.json             <span style="color:#888">// 中国地图 GeoJSON（首页 `fetch('/china.json')` 加载）</span>
+└── _legacy/                      <span style="color:#888">// 旧版原生 JS 前端（已归档，不参与构建）</span>
 ```
 
 ---
 
-## 二、环境准备（首次只需做一次）
+## 三、业务模块调用流程（★ 详细到参数级别）
 
-### 1. 后端依赖
+### 3.1 端到端流程图：志愿填报
 
-```bash
-pip install -r backend/requirements.txt
+```mermaid
+graph TD
+    A["考生填写<br/>province/year/category/batch<br/>score 或 rank / 选科"] -->|"<b>onRecommend() L242</b><br/>POST /api/recommend"| B["routers/recommend.py:recommend() L12"]
+
+    B -->|"payload: <b>RecommendIn</b>"| C["services/recommend_service.py<br/><b>recommend() L318</b>"]
+
+    C -->|"rank 为空<br/>(score, province, year, category, batch)"| D["rank_service.<b>score_to_rank() L66</b>"]
+    D --> D1[("score_range_2025_henan<br/>cumulative_count = 位次")]
+
+    C --> E["<b>_plan_index() L38</b><br/>lru_cache(32)<br/>入参 province/year/category/batch"]
+    E --> E1[("enrollment_plan_2025_henan<br/>元组 / 学费 / 计划数 / 选科要求")]
+
+    C --> F["<b>_fetch_candidates() L149</b>"]
+    F --> F1["_build_filters() L105<br/>AND 条件拼装"]
+    F --> F2["dataset.resolve_batch()<br/>dataset.resolve_category()"]
+    F --> F3["位次窗口裁剪 L171<br/>rank ± buffer*span ± buffer"]
+    F --> F4["_dedupe() L178<br/>院校+专业+专业组去重"]
+    F --> F5[("major_admission_2025_henan")]
+
+    C --> G["dataset.<b>subject_match() L181</b><br/>再选科目 Python 侧过滤"]
+    C --> H["dataset.<b>split_tiers() L282</b><br/>冲 / 稳 / 保 三档"]
+    H --> I["_to_item() L219"]
+    I --> I1["_probability() L204<br/>冲 40-30x / 稳 70-15x / 保 98-10x"]
+    I --> I2["_reason_of() L258<br/>→ ai_service._rule_reason() L316"]
+
+    C -->|"with_ai=True 且 ai_enabled"| J["ai_service.<b>batch_reasons() L426</b><br/>ThreadPoolExecutor(AI_MAX_WORKERS)"]
+    J --> J1["recommend_reason() L398<br/>→ build_reason_context() L374"]
+    J1 --> J2["<b>ask() L70</b> → llm_client<br/>Ali → Ollama → 规则兜底"]
+
+    I1 --> K[["RecommendOut<br/>student / chong / wen / bao / meta"]]
+    J2 --> K
+    K --> L["Volunteer.vue 渲染三栏卡片<br/>含 probability 与 ai_reason"]
+
+    style C fill:#e8f5e9,stroke:#388e3c
+    style D fill:#e8f5e9,stroke:#388e3c
+    style I fill:#e8f5e9,stroke:#388e3c
+    style J2 fill:#e3f2fd,stroke:#1976d2
+    style D1 fill:#fff3cd,stroke:#d32f2f
+    style F5 fill:#fff3cd,stroke:#d32f2f
+    style E1 fill:#fff3cd,stroke:#d32f2f
 ```
 
-> 注意：`passlib 1.7.4` 与 `bcrypt>=4.1` 不兼容，requirements 中已锁定 `bcrypt==4.0.1`。
+### 3.2 代码级调用树（参数级）
 
-### 2. MySQL 数据库
+<details>
+<summary><b>展开： /api/recommend 完整调用树（文件 → 函数 → 关键参数）</b></summary>
+
+```
+POST /api/recommend                                     routers/recommend.py:12  recommend()
+│   body: RecommendIn(province="河南", year=2025, category="物理类", batch="本科批",
+│                     score?, rank?, filters?, buffer?, span_factor?,
+│                     limit=60, with_ai=False, ai_limit=8)
+│   异常映射 L34-37：ValueError → 400，其它 → 500
+└─► services/recommend_service.py:318  recommend(province, year, category, batch,
+                                                rank=None, score=None, filters=None,
+                                                buffer=None, span_factor=None,
+                                                limit=60, with_ai=False, ai_limit=0)
+    │
+    ├─① services/rank_service.py:66  score_to_rank(province, year, category, batch, score)
+    │   └─ _load_score_range(province, year, category, batch=None)  :28
+    │       └─ models/dataset.py:64  table_name("score_range", year, province)   → "score_range_2025_henan"
+    │           └─ database.py:48  get_table(name)           → 反射 Table（缓存）
+    │               └─ database.py:64  fetch_all(select(...)) → List[Dict]
+    │   ↳ 返回 {score, rank, segment_count, rank_range, control_score, batch_used, exact, score_diff}
+    │
+    ├─② _plan_index(province, year, category, batch)   :38   @lru_cache(32)
+    │   └─ enrollment_plan_2025_henan → 三级索引 {code / name / school: {tuition, plan_count, duration, subject_req}}
+    ├─③ _lookup_plan(idx, uni_code, uni_name, major_code, major_name)  :86   代码 > 名称 > 校名
+    │
+    ├─④ _fetch_candidates(province, year, category, batch, filters, rank, buffer, span)  :149
+    │   ├─ _build_filters(tbl, filters)  :105
+    │   │    AND: min_rank IS NOT NULL
+    │   │         major_name/major_group/major_note LIKE %major_keyword%
+    │   │         不含 exclude_keyword / university_keyword LIKE / school_province=
+    │   │         school_nature= / subject_req LIKE / is_985=1 / is_211=1
+    │   ├─ models/dataset.py:75/103  resolve_batch() / resolve_category()   ← 2024 表结构特判
+    │   ├─ L171-172 位次窗口：min_rank ∈ [rank - buffer*span - buffer, rank + buffer*span + buffer]
+    │   └─ _dedupe(rows)  :178   院校+专业+专业组唯一（留 min_rank 最小）
+    │
+    ├─⑤ models/dataset.py:181  subject_match(subject_req_text, filters.subject_selected)
+    │       "不限"/空 → 放行；含"或" → 任一命中；≥2 门或含"必选" → 必须全含
+    ├─⑥ filters.tuition_max  Python 侧再过滤  :364-368
+    │
+    ├─⑦ split_tiers(rows, rank, buffer=settings.RANK_BUFFER, span=settings.RANK_SPAN_FACTOR, limit)  :282
+    │       rank-lo ≤ min_rank < rank-buffer        → chong（按 min_rank 降序）
+    │       |min_rank - rank| ≤ buffer              → wen （按 |差值| 升序）
+    │       rank+buffer < min_rank ≤ rank+lo        → bao （按 min_rank 升序）
+    │       池空自动放宽上下界（保证不返回空页）
+    │
+    ├─⑧ _to_item(row, rank, tier, buffer, span, plan)  :219
+    │   ├─ _probability(tier, gap, buffer, span)  :204   → int，钳制 [5,99]
+    │   └─ _reason_of(item, rank)  :258 → ai_service.py:316 _rule_reason(ctx)  ← 规则文案，永远可用
+    │
+    └─⑨ ai_service.py:426  batch_reasons(items, student, limit=ai_limit, workers=AI_MAX_WORKERS)
+        └─ ai_service.py:398  recommend_reason(item, student, use_llm=True) → (text, source)
+            ├─ build_reason_context(item, student)  :374   组装 17 字段（含 rank_diff、tier_label）
+            ├─ _rule_reason(ctx)  :316                     规则兜底（必然可用）
+            └─ ask(_REASON_PROMPT, num_predict=180, timeout=min(OLLAMA_TIMEOUT, 40))  :70
+                └─ services/llm_client.py  get_llm_client().chat(...)
+                    ├─ AliLLMChannel   (OpenAI 兼容，base_url=ALI_BASE_URL)
+                    └─ OllamaLLMChannel(settings.OLLAMA_FALLBACK_MODEL)
+            ⚠️ 降级三处：AI_ENABLED=0 / ask 返回空 / 长度 <8 或 >220 → 返回 (fallback, "rule")
+
+返回 RecommendOut{ student, chong[], wen[], bao[], meta{total_scanned, buffer, span_factor, table, ai_enabled, ai_generated, elapsed_ms} }
+```
+
+</details>
+
+### 3.3 其余业务接口的调用链（一行一个）
+
+```
+GET  /api/meta/control-lines     routers/meta.py:198   → rank_service.control_lines(province, year, category)      :148
+GET  /api/meta/score-check       routers/meta.py:218   → rank_service.score_check(province, year, category, score) :214
+                                                          ├─ control_lines()  :148
+                                                          └─ score_to_rank()  :66
+GET  /api/meta/score-table       routers/meta.py:184   → rank_service.score_table(province, year, category, batch) :140
+GET  /api/score-to-rank          routers/student.py:73 → rank_service.score_to_rank(...)                            :66
+GET  /api/rank-to-score          routers/student.py:91 → rank_service.rank_to_score(...)                            :108
+POST /api/student/profile        routers/student.py:45 → _ensure_rank(p) :24 → score_to_rank()  （档案仅存内存）
+POST /api/ai/parse-intent        routers/ai.py:34      → ai_service.parse_intent(text, province, use_llm=True)      :246
+                                                          └─ 规则 _rule_parse_intent() :149 ← AI 失败时的兜底
+POST /api/ai/recommend-reason    routers/ai.py:44      → ai_service.recommend_reason(payload, {rank, score})         :398
+GET  /api/universities           routers/university.py:36 → recommend_service._probability()（跨模块复用）           :204
+GET  /api/majors                 routers/university.py:144 → recommend_service._plan_index()/_lookup_plan()          :38/:86
+GET  /api/stats/major-count-by-province  routers/stats.py → 各省在豫招生专业数（首页地图数据源）
+```
+
+### 3.4 前端请求表（调用已是二级：Vue → api → URL）
+
+| 前端文件（调用位置） | 方法 | 地址 | 关键参数 |
+|---|---|---|---|
+| `Volunteer.vue` → `onRecommend()` L242 | POST | `/api/recommend` | `province,year,category,batch,score,rank,filters{subject_selected},use_ai` |
+| `Volunteer.vue` → `autoCheck()` L200 | GET | `/api/meta/score-check` | `province,year,category,score` |
+| `Volunteer.vue` → `loadLines()` L172 | GET | `/api/meta/control-lines` | `province,year,category` |
+| `Home.vue` → `load()` L212 | GET | `/api/stats/major-count-by-province` | `province=河南,year,category,batch` |
+| `Home.vue` → `loadGeoJson()` L108 | GET | 静态 `/china.json` | 无（ECharts registerMap） |
+| `University.vue` → `load()` L118 | GET | `/api/universities` | `province,year,category,batch,keyword,school_province,rank,page` |
+| `University.vue` → `openMajors()` L139 | GET | `/api/majors` | `university_name,category,batch,…` |
+| `AiChat.vue` → `send()` L68 | POST | `/api/ai/chat` | `{question, use_rag, top_k}`（timeout 120s） |
+| `AiChat.vue` → `knowledgeStore.search()` | GET | `/api/knowledge/search` | `query, top_k=3` |
+| `Knowledge.vue` → `viewDetail()` L68 | GET | `/api/knowledge/detail/{id}` | path `id` |
+| `Knowledge.vue` → `store.remove(id)` L77 | DELETE | `/api/knowledge/delete/{id}` | path `id` |
+| `UploadModal.vue`（el-upload action） | POST | `/api/knowledge/upload` | `FormData{file}` + Bearer |
+| `Dashboard.vue` → `store.loadBackendInfo()` | GET | `/api/knowledge/status` | 无 |
+| `userStore.login()` | POST | `/api/auth/login` | `{username,password}` |
+| `router/index.ts` → `beforeEach` 守卫 | GET | `/api/auth/me` | Bearer |
+
+> 说明：`api/*.ts` 是唯一出口（`request.ts` 统一注入 Token、统一处理 401/403），Vue 组件里不出现裸 URL。
+
+---
+
+## 四、RAG 知识库模块调用流程（★ 详细到参数级别）
+
+### 4.1 主链一：管理员上传文档
+
+```mermaid
+graph TD
+    A["admin/Knowledge.vue<br/>点击上传"] --> B["UploadModal.vue<br/>el-upload action=<br/>/api/knowledge/upload"]
+    B -->|"FormData{file} + Bearer"| C["routers/knowledge.py:60<br/><b>upload_knowledge()</b>"]
+    C --> C1{"is_allowed(file.filename)?<br/>size ≤ MAX_FILE_SIZE?"}
+    C1 -->|否| C2["400 不支持的类型 / 文件过大"]
+    C1 -->|是| D["utils/file_utils.py<br/><b>save_upload_file()</b> → UUID 落盘 knowledge_files/"]
+    D --> E[("MySQL knowledge_files<br/>status=已上传")]
+    E --> F["utils/file_utils.py<br/><b>extract_text()</b><br/>pypdf / python-docx / txt"]
+    F --> G["rag_service.<b>split_text()</b><br/>RecursiveCharacterTextSplitter<br/>size=CHUNK_SIZE(500) / overlap=50"]
+    G --> H["rag_service.<b>add_documents()</b><br/>chunks, metadata{file_id, filename}, key_fmt"]
+    H --> I["<b>put_parents()</b><br/>父块原文写入 parent_store.json"]
+    H --> J["<b>split_child_text()</b><br/>120 / 20 → 子块"]
+    J --> K["<b>get_embedding()</b> → llm_client<br/>Ali text-embedding-v3 → Ollama nomic"]
+    K --> L[("Chroma gaokao_knowledge<br/>add(ids, embeddings, documents, metadatas)")]
+    H --> M[("MySQL 回写<br/>chunk_count / status=已向量化")]
+    L --> N["返回 {code:200, file_id, data}"]
+
+    style G fill:#e3f2fd,stroke:#1976d2
+    style K fill:#e3f2fd,stroke:#1976d2
+    style L fill:#fff3cd,stroke:#d32f2f
+    style M fill:#fff3cd,stroke:#d32f2f
+```
+
+<details>
+<summary>展开：上传链参数级调用树</summary>
+
+```
+POST /api/knowledge/upload            routers/knowledge.py:60  upload_knowledge(file: UploadFile, db, current_user)
+│   权限：Depends(get_current_admin)  第 63 行
+│   校验：is_allowed(filename) L66（白名单）／ len(content) > MAX_FILE_SIZE(20MB) L73
+├─► utils/file_utils.py  save_upload_file(content, original)   → (stored_filename, file_path)
+│       UUID 重命名，落盘 settings.KNOWLEDGE_DIR
+├─► db.add(KnowledgeFile(filename, stored_filename, file_path, file_type,
+│                        file_size, uploaded_by=current_user["id"], status="已上传"))
+│       ORM 模型 models/knowledge.py → 表 knowledge_files
+├─► utils/file_utils.py  extract_text(file_path, record.file_type)
+│       PDF → pypdf；DOCX → python-docx；其它 → 按 utf-8/gbk 兜底解码
+├─► services/rag_service.py  split_text(text, size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
+│       分隔符优先级 ["\n\n", "\n", "。", "，"]；langchain 缺失时退化为定长切分
+└─► services/rag_service.py  add_documents(chunks, metadata, key_fmt="file_{id}_chunk_{idx}")
+        ├─ put_parents(parents)                父块 docstore（parent_store.json）
+        ├─ split_child_text(parent, 120, 20)   子块
+        ├─ add_document(child_id, text, meta, embedding=None)
+        │   └─ get_embedding(text)  → llm_client.get_llm_client().embed(text, dimensions=_collection_dimension())
+        │       ├─ AliEmbeddingChannel  (client.embeddings.create(input=batch, model=ALI_EMBED_MODEL, dimensions=768/128))
+        │       └─ OllamaEmbeddingChannel (/api/embeddings, model=nomic-embed-text)
+        │   └─ Chroma col.add(ids=[doc_id], embeddings=[vec], documents=[text], metadatas=[metadata])
+        └─ 返回写入子块数 → record.chunk_count / status="已向量化"
+```
+
+</details>
+
+### 4.2 主链二：用户 AI 问答（按提问类型分六个分支）
+
+入口：`AiChat.vue:send()` → `POST /api/ai/chat` → `routers/ai.py:52 chat()`
+
+```mermaid
+graph TD
+    START["POST /api/ai/chat<br/>payload{question, use_rag, top_k, strategy}"] --> R0{"use_rag?"}
+    R0 -->|否| ROUTER0["直接用 replace-背景+question 提示词调 ask()"]
+    R0 -->|是| R1{"rag_service.<b>route_query()</b> L1140<br/>ROUTER_PROMPT 二分类"}
+    R1 -->|NO 或 LLM 无返回拦截失败| A1["分支 A：OFF_TOPIC_ANSWER L1122<br/>固定话术，不检索"]
+    R1 -->|YES| R2{"ADVANCED_RAG_ENABLED?<br/>ai.py L84"}
+    R2 -->|否 或 高级链路异常| S["分支 C：标准 RAG<br/>answer_with_strategy(strategy='standard')"]
+    R2 -->|是| R3{"<b>route_strategy()</b> L846<br/>纯规则，零 LLM 延迟"}
+
+    R3 -->|"含 是不是/能不能/是否/可否/对不对"| D["分支 D：Self-RAG"]
+    R3 -->|"≥2 个复合词 或 len≥18"| E["分支 E：Corrective RAG"]
+    R3 -->|其它| S
+
+    S --> S1["search()<br/>①检索前 ②多路召回 ③Rerank ④父块回填"]
+    D --> D1["should_retrieve → retrieve → context_useful<br/>→ generate → 自评合格? → 否定才反思"]
+    E --> E1["retrieve → 并发相关性过滤<br/>→ 全无关? 重写 Query 重试 N 次 → generate"]
+
+    S1 --> F{"LLM 通道是否可用？"}
+    D1 --> F
+    E1 --> F
+    F -->|Ali 正常| G1["AliLLMChannel<br/>qwen3.7-flash-2026-07-15"]
+    F -->|Ali 失败/无 Key| G2["分支 F 降级：<b>OllamaLLMChannel</b><br/>打印 [LLM] Ali 通道失败，降级到 Ollama"]
+    F -->|两者都失败| G3["返回空串 → 各判断保守处理<br/>（保留原 Query / 未查询到具体信息）"]
+
+    style D fill:#e3f2fd,stroke:#1976d2
+    style E fill:#e3f2fd,stroke:#1976d2
+    style G2 fill:#fff3cd,stroke:#d32f2f
+    style G3 fill:#ffebee,stroke:#c62828
+```
+
+#### 分支 A：无关问题（如「婚假几天」）
+
+| 步骤 | 位置 | 判断 / 参数 | 结果 |
+|---|---|---|---|
+| ① 路由二分类 | `routers/ai.py:76` → `rag_service.route_query()` L1140 | `ask(ROUTER_PROMPT.format(query=question), temperature=0.0, top_p=1.0, num_predict=5, timeout=20)` | 返回 `"YES" in intent.upper()` |
+| ② 拦截 | `routers/ai.py:77-81` | `if use_rag and not route_query(...)` | 直接返回 `rag_service.OFF_TOPIC_ANSWER` L1122，`source="router_blocked"`，**不检索、不调用后续 LLM** |
+| ③ 兜底 | `route_query` L1159 | LLM 返回空 → **放行**（避免误伤） | 走主流程 |
+
+#### 分支 B：结构化查询（如「XX 学费多少」→ `SQL_EXTRACT_PROMPT` + MySQL）
+
+`rag_service.extract_sql_filters()` 提供「自然语言 → MySQL 过滤条件」的能力
+（`SQL_EXTRACT_PROMPT` 抽出的字段：province / year / category / batch / keyword …），当前版本用于把
+可以落到 SQL 的条件从 Query 里抽出来；真正执行 SQL 的仍是「初审四维 + filters」，
+即第三章 `recommend_service` 那条链路。因此本分支在实践中表现为：
+**AIL聊天里的结构化问句 → `route_query` 放行 → 标准/高级 RAG 用父块上下文回答**，
+避免与规则引擎的计算职责重叠（AI 不算概率，只做表达）。
+
+#### 分支 C：一般政策问题（标准 RAG）
+
+```mermaid
+graph LR
+    Q[query] --> P1["① QueryPreprocessor.process()<br/>query_rewrite.py:227"]
+    P1 -->|"len&lt;QUERY_PREPROCESS_MIN_LEN(20)"| P1S["跳过（source=raw(short)）"]
+    P1 -->|"否则线程池并发"| P2["rewrite / step_back / decompose"]
+    P2 --> P3["QueryBundle.all_queries ≤ QUERY_PREPROCESS_MAX(4)<br/>原始 Query 置顶去重"]
+    P3 --> R1["② rag_service.search() L~960<br/>↓ _recall()"]
+    R1 --> R2["build_multi_recall(docs, embeddings)<br/>retrieval.py:DenseChannel + BM25Channel + HybridSearch"]
+    R2 --> R3["③ rerank() L828 → reranker.Reranker<br/>CrossEncoder / Embedding余弦 / Noop"]
+    R3 --> R4["④ _expand_to_parents()<br/>子块命中 → 换父块上下文"]
+    R4 --> R5["generate_answer() L1164<br/>ANTI_HALLUCINATION_PROMPT<br/>temperature=0.1 top_p=0.3"]
+```
+
+关键参数一览：
+
+| 环节 | 文件:函数 | 关键参数 |
+|---|---|---|
+| 检索前 | `query_rewrite.py:227 QueryPreprocessor.process(query)` | `use_rewrite/use_expansion/use_decompose`、`max_queries=QUERY_PREPROCESS_MAX`、`min_len=QUERY_PREPROCESS_MIN_LEN` |
+| 检索中 | `retrieval.py MultiRecall.search(queries, top_k)` | `MULTI_RECALL_FUSION=rrf`、`MULTI_RECALL_TOPK_PER_CHANNEL`、`RRF_K=60` |
+| 检索后 | `rag_service.py:828 rerank(query, hits)` | `RERANK_ENABLED`、`RERANK_MODEL`（留空走 embedding 余弦） |
+| 父子回填 | `rag_service._expand_to_parents(hits)` | `CHILD_CHUNK_SIZE=120`、`CHILD_CHUNK_OVERLAP=20`、`PARENT_STORE_FILE` |
+| 防幻觉生成 | `rag_service.py:1164 generate_answer(query, context)` | `temperature=0.1`、`top_p=0.3` |
+
+#### 分支 D：Self-RAG（含「是不是 / 能不能 / 是否」）
+
+判断点：`rag_service.py:846 route_strategy()` → `judge_words = ("是不是","能不能","要不要","是否","可否","有没有","对不对")`（L858-862）
+
+```
+SelfRAG.run(query)                                   self_rag.py
+├─① should_retrieve(query)        → llm(prompt, temperature=0.0, max_tokens=16)
+│     NO  → 直接生成，不检索（省一次检索 + 一次 embedding）
+├─② retriever(query, top_k)       → rag_service.search()（与分支 C 共用同一条检索链）
+├─③ is_context_useful(query, ctx) → YES / NO
+│     NO  → 用「通用知识 + 明确说明资料不足」的口径生成（不编造）
+├─④ generator(query, context)     → rag_service.generate_answer()
+└─⑤ should_continue_generate()    → 合格即结束；不合格才 reflect_and_correct()（省一次 LLM 调用）
+返回 SelfRAGResult{answer, used_context, hits, need_retrieve, context_useful, steps}
+```
+
+#### 分支 E：Corrective RAG（复合多实体 / ≥18 字）
+
+判断点：`route_strategy()` L863 —— `sum(complex_words 命中数) >= 2 or len(q) >= 18`
+
+```
+CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
+├─① retriever(query, k)               → rag_service.search()
+├─② _filter_relevant(query, hits, ...) 并发 is_relevant()（max_tokens=16，ThreadPoolExecutor ≤ 4）
+│       命中就进 relevant[] / relevant_hits[]
+├─③ while not relevant and retry_count < CORRECTIVE_MAX_RETRY:
+│       rewrite_query(current_query) → retriever(new_q, k) → 再过滤
+├─④ 仍无相关文档 → 返回拒答文案（"根据现有资料，未查询到具体信息…"）
+└─⑤ generator(query, relevant)        → rag_service.generate_answer()
+返回 CorrectiveRAGResult{answer, used_docs, hits, rewritten_query, retry_count, steps}
+```
+
+#### 分支 F：降级路径（Ali 通道失败 → Ollama → 空串保守处理）
+
+| 触发条件 | 处理位置 | 行为 |
+|---|---|---|
+| `Ali_API_KEY` 为空 | `llm_client.AliLLMChannel.available()` | 直接跳过 Ali 通道，用 Ollama |
+| Ali 调用超时 / 403 / 网络错误 | `llm_client.py` `except` → `logger.warning("[LLM] Ali 通道失败，降级到 Ollama")` | 换 `OllamaLLMChannel` 重试一次 |
+| Ollama 也不可用 | 同上 → 打日志后返回 `None` | `LLMClient.chat()` 返回 `""`，各判断**保守处理**（"未查询到具体信息" / 保留原始 Query），不抛异常 |
+| Embedding 通道失败 | `AliEmbeddingChannel.embed_batch()` → `OllamaEmbeddingChannel` | 单条失败用零向量占位，保证矩阵形状一致 |
+| Chroma 维度不匹配 | `rag_service._collection_dimension()` | 优先对齐已有集合维度（历史 768），取不到才用 `ALI_EMBED_DIMENSION` |
+
+### 4.3 RAG 模块的上游 / 下游依赖
+
+| 模块 | 上游调用者 | 下游被调用者 |
+|---|---|---|
+| `llm_client.py` | `ai_service.ask`、`query_rewrite.llm_chat`、`self_rag.SelfRAG.llm`、`corrective_rag.CorrectiveRAG.llm`、`rag_service.get_embedding` | `openai.OpenAI`（Ali）、`requests`（Ollama） |
+| `query_rewrite.py` | `rag_service.search()` | `llm_client.get_llm_client().chat()` |
+| `retrieval.py` | `rag_service.build_multi_recall()` / `_recall()` | `rag_service.get_embeddings_batch()`（经 `ProjectEmbedding.encode`） |
+| `reranker.py` | `rag_service.rerank()` | `rag_service.get_embedding()` |
+| `self_rag.py` | `rag_service.answer_with_strategy()` | `llm_client` + 注入进来的 `retriever/generator`（= `rag_service.search/generate_answer`） |
+| `corrective_rag.py` | `rag_service.answer_with_strategy()` | 同上 |
+| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` |
+
+---
+
+## 五、接口清单
+
+> 「调用链」列 = 该接口在前端的发起位置（Vue 文件 → 方法 → api 函数）
+
+| 方法 | 路径 | 说明 | 权限 | 调用链（前端） |
+|---|---|---|---|---|
+| GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
+| GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
+| POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
+| POST | `/api/recommend` | **冲稳保推荐主链路** | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
+| POST | `/api/recommend/ai-reasons` | 批量生成 AI 理由 | 公开 | 预留 |
+| GET | `/api/score-to-rank` | 分数 → 位次 | 公开 | 预留（页面走 score-check） |
+| GET | `/api/rank-to-score` | 位次 → 分数 | 公开 | 预留 |
+| POST | `/api/student/profile` | 保存考生信息并返回换算位次 | 公开 | 预留 |
+| GET | `/api/student/profile/{id}` | 读取内存档案 | 公开 | 预留 |
+| GET | `/api/score-table` | 一分一段表 | 公开 | 预留 |
+| GET | `/api/control-lines` | 各省控线与可填分数区间 | 公开 | `Volunteer.vue:loadLines()` → `controlLines()` |
+| GET | `/api/score-check` | 分数体检（批次线 + 位次） | 公开 | `Volunteer.vue:autoCheck()` → `scoreCheck()` |
+| GET | `/api/universities` | 查大学（分页 / 筛选 / 概率） | 公开 | `University.vue:load()` → `listUniversities()` |
+| GET | `/api/majors` | 查专业 | 公开 | `University.vue:openMajors()` → `listMajors()` |
+| GET | `/api/stats/major-count-by-province` | 各省在豫招生专业数 | 公开 | `Home.vue:load()` → `majorCountByProvince()` |
+| POST | `/api/auth/login` | 登录（JSON / form），返回 JWT | 公开 | `userStore.login()` → `api/auth.ts:login()` |
+| POST | `/api/auth/register` | 注册（默认 student） | 公开 | `userStore.register()`（预留） |
+| GET | `/api/auth/me` | 当前用户信息 | 需登录 | `router/index.ts` 守卫 → `userStore.loadMe()` |
+| POST | `/api/knowledge/upload` | 上传并向量化 | admin | `UploadModal.vue` el-upload 直传 |
+| GET | `/api/knowledge/list` | 文件列表 | admin | `Knowledge.vue` → `store.loadList()` |
+| GET | `/api/knowledge/detail/{id}` | 文件详情 | admin | `Knowledge.vue:viewDetail()` |
+| GET | `/api/knowledge/download/{id}` | 下载原文件 | admin | `api/knowledge.ts:downloadUrl()`（拼接） |
+| DELETE | `/api/knowledge/delete/{id}` | 删除文件 + 向量 + 记录 | admin | `Knowledge.vue:removeFile()` → `store.remove()` |
+| GET | `/api/knowledge/search` | **向量检索**（所有登录用户） | 需登录 | `AiChat.vue` → `knowledgeStore.search()` |
+| GET | `/api/knowledge/status` | 向量库 / embedding 后端状态 | admin | `Dashboard.vue` → `store.loadBackendInfo()` |
+
+---
+
+## 六、环境准备与启动
+
+### 6.1 依赖
+
+| 组件 | 版本要求 | 备注 |
+|---|---|---|
+| Python | 3.11+ | 后端 |
+| Node.js | 18+ | 前端 |
+| MySQL | 5.7+ / 8.0 | 数据库 `gaokao` |
+| Ollama | 最新版 | 本地兜底 LLM + Embedding |
+
+### 6.2 后端
 
 ```bash
-# （可选）导入河南 2024-2025 录取数据 8 张表
+cd backend
+python -m venv .venv && .venv\Scripts\activate     # 可选
+pip install -r requirements.txt                     # 含 openai>=1.0
+
+# 1) 配置 LLM / Embedding 通道（v2.5.1）
+copy .env.example .env
+```
+
+`.env` 关键段落（**重点是变量名和 base_url**）：
+
+```ini
+# ★ Key 的变量名是 Ali_API_KEY（也可直接配 Windows 系统环境变量，代码会自动补读注册表）
+Ali_API_KEY=sk-xxxxxxxxxxxxxxxx
+
+# ★ 必须是「工作空间专属域名」，不能用通用 dashscope 域名，也不能用 dashscope SDK
+ALI_BASE_URL=https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+ALI_LLM_MODEL=qwen3.7-flash-2026-07-15
+
+# 向量模型与大语言模型共用同一个 Key 和同一个 base_url
+ALI_EMBED_MODEL=text-embedding-v3
+ALI_EMBED_DIMENSION=128     # 实际会优先对齐已有 Chroma 集合维度
+ALI_TIMEOUT=30
+ALI_ENABLE_THINKING=0       # 思考模式关掉：同一请求实测 9.7s → 2.6s
+
+# 本地兜底
+OLLAMA_URL=http://localhost:11434
+OLLAMA_FALLBACK_MODEL=qwen3:1.7b
+OLLAMA_EMBED_MODEL=nomic-embed-text
+```
+
+```bash
+# 2) 拉取本地兜底模型
+ollama pull qwen3:1.7b
+ollama pull nomic-embed-text
+
+# 3) 建表 + 导入数据
+mysql -u root -p gaokao < backend/sql/04_rag_tables.sql
 cd gaokao_data && python import_to_mysql.py
 
-# 建 RAG / 鉴权相关两张表
-mysql -u root -p gaokao < backend/sql/04_rag_tables.sql
-```
-
-数据表：
-
-- 录取数据：`enrollment_plan_{y}_henan`、`major_admission_{y}_henan`、`school_admission_{y}_henan`、`score_range_{y}_henan`（y = 2024 / 2025）
-- RAG / 鉴权：`users`、`knowledge_files`
-
-### 3. 创建管理员
-
-```bash
+# 4) 启动
 cd backend
-python scripts/create_admin.py                    # 默认 admin / admin123（角色 admin）
-python scripts/create_admin.py 用户名 密码 [admin|student]
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-已创建的测试账号：`admin / admin123`（管理员）、`student01 / student123`（考生）。
-
-### 4. 本地大模型（生成 + embedding）
+启动后自检：
 
 ```bash
-ollama pull qwen3:1.7b          # 生成模型
-ollama pull nomic-embed-text    # embedding 模型（768 维）
-ollama serve                    # 默认 http://localhost:11434
+curl http://127.0.0.1:8000/api/health
+# rag.embedding_provider = "ali"、llm_provider = "ali(openai-compatible)" 表示线上通道已生效
 ```
 
-### 5. 前端依赖
+### 6.3 前端
 
 ```bash
 cd frontend
-npm install
+npm install                       # 代理异常时用 npm install --userconfig .npmrc.local
+npm run dev                       # http://127.0.0.1:5173
+npm run build                     # 产物 dist/，生产模式下由 FastAPI 托管
 ```
 
-> 若 `~/.npmrc` 配了代理（如 `127.0.0.1:7890`）而代理未启动，npm 会报 `ECONNREFUSED`，
-> 可改用项目内配置绕过：`npm install --userconfig .npmrc.local`
-
-### 6. 环境变量
-
-复制并按需修改（也可直接用仓库里已配好的 `backend/.env`）：
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` | localhost / 3306 / root / 123456 / gaokao | MySQL 连接 |
-| `OLLAMA_URL` / `OLLAMA_MODEL` | http://localhost:11434 / qwen3:1.7b | 生成模型 |
-| `OLLAMA_EMBED_MODEL` | nomic-embed-text | 本地 embedding 模型 |
-| `DASHSCOPE_API_KEY` | 空 | 填了则走千问 text-embedding-v3 |
-| `JWT_SECRET` / `JWT_ALGORITHM` / `JWT_EXPIRE_MINUTES` | gaokao-dev-secret-change-me / HS256 / 720 | JWT 配置 |
-| `CHROMA_DB_PATH` / `CHROMA_COLLECTION` | backend/chroma_db / gaokao_knowledge | 向量库 |
-| `KNOWLEDGE_DIR` | backend/knowledge_files | 上传文件目录 |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 500 / 50 | 切片参数 |
-| `RANK_BUFFER` / `RANK_SPAN_FACTOR` / `TIER_LIMIT` | 5000 / 8 / 60 | 冲稳保参数 |
-
----
-
-## 三、如何启动
-
-### 方式一：开发模式（推荐，前端热更新）
-
-需要开 **两个终端**。
-
-```bash
-# 终端 1：后端（8000 端口）
-cd backend
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-# 或：python -m app.main
-
-# 终端 2：前端（5173 端口，vite 已配置 /api 代理到 8000）
-cd frontend
-npm run dev
-```
-
-访问：
-
-| 地址 | 说明 |
-|---|---|
-| <http://127.0.0.1:5173/> | 前端开发服务器（考生端首页） |
-| <http://127.0.0.1:8000/docs> | 后端交互式接口文档 |
-| <http://127.0.0.1:8000/api/health> | 健康检查（含 DB / Ollama / RAG 状态） |
-
-### 方式二：生产模式（后端直接托管 dist）
-
-```bash
-# 1. 构建前端
-cd frontend
-npm run build          # 输出 frontend/dist
-
-# 2. 启动后端（自动托管 dist，并支持 /admin/knowledge 等前端路由回退）
-cd ../backend
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-访问 <http://127.0.0.1:8000/> 即可，无需再开前端服务。
-
-### 登录与页面入口
-
-| 页面 | 路径 | 权限 |
-|---|---|---|
-| 考生端首页 | `/` | 公开 |
-| 志愿填报 | `/volunteer` | 公开 |
-| 查大学 / 专业 | `/university` | 公开 |
-| AI 助手（RAG 问答） | `/ai-chat` | 需登录 |
-| 后台首页 | `/admin` | 仅管理员 |
-| 知识库管理 | `/admin/knowledge` | 仅管理员 |
-| 登录 | `/login` | 公开 |
-
-> 未登录访问 `/admin` 会被路由守卫重定向到 `/login`；
-> 知识库检索接口要求登录态，上传 / 列表 / 删除要求管理员角色。
-
-### 冒烟测试
+### 6.4 验证脚本
 
 ```bash
 cd backend
-python smoke_test.py     # 志愿推荐等 14 个业务接口
-python smoke_rag.py      # 登录 → 上传 → 向量化 → 检索 → RAG 问答 → 删除
+python test_llm_channel.py   # v2.5.1：通道自检 + 端到端 10 秒验证（推荐首先跑）
+python smoke_test.py         # 14 个业务接口
+python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → 删除
 ```
-
-### 停止服务
-
-```bash
-# Windows：结束占用端口的进程
-netstat -ano | findstr :8000
-taskkill /PID <PID> /F
-```
-
-**首页中国地图**（`/api/stats/major-count-by-province`）：
-按 `school_province` 聚合 `major_admission` 表，返回各省「在河南投放的专业数 + 涉及院校数」；
-前端 ECharts 中国地图（GeoJSON 取自阿里云 DataV，已本地化为 `frontend/public/china.json`）紫色渐变着色，
-点击省份跳转「查大学 / 专业」并自动带上省份筛选。
 
 ---
 
-## 四、接口清单
+## 七、常见问题排查
 
-| 方法 | 路径 | 说明 |
+| 症状 | 原因 | 处理 |
 |---|---|---|
-| GET | `/api/health` | 服务 + 数据库 + Ollama + RAG 状态 |
-| GET | `/api/stats/major-count-by-province` | 各省高校在豫招生专业数量（首页地图） |
-| POST | `/api/student/profile` | 保存考生信息并返回换算位次 |
-| GET | `/api/score-to-rank` | 分数 → 位次（查一分一段表） |
-| GET | `/api/rank-to-score` | 位次 → 分数 |
-| POST | `/api/recommend` | **冲稳保推荐**（核心） |
-| POST | `/api/recommend/ai-reasons` | 批量补充 AI 推荐理由 |
-| GET | `/api/universities` | 院校列表（分页、筛选、概率） |
-| GET | `/api/majors` | 院校专业录取明细 |
-| GET | `/api/meta/options` | 可用年份 / 科类 / 批次 |
-| GET | `/api/meta/province-stats` | 各省份在豫招生数量 |
-| GET | `/api/meta/hot-schools` | 热门院校（985/211 优先） |
-| GET | `/api/meta/score-table` | 一分一段表 |
-| GET | `/api/meta/control-lines` | 各批次省控线 + 本科/专科可填分数区间 |
-| GET | `/api/meta/score-check` | 分数校验：是否过线 + 自动推荐批次 + 自动换算位次 |
-| GET | `/api/ai/status` | Ollama 状态 |
-| POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 |
-| POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 |
-| POST | `/api/ai/chat` | 志愿问答（`use_rag=true` 时先检索知识库再回答） |
-| POST | `/api/auth/login` | 登录（支持 JSON 与 form），返回 JWT |
-| POST | `/api/auth/register` | 注册（默认 student） |
-| GET | `/api/auth/me` | 当前用户信息 |
-| GET | `/api/knowledge/status` | 向量库 / embedding 状态（admin） |
-| POST | `/api/knowledge/upload` | **上传并向量化**（admin，PDF/TXT/DOCX，≤20MB） |
-| GET | `/api/knowledge/list` | 文件列表（admin，支持 keyword） |
-| GET | `/api/knowledge/detail/{id}` | 文件详情（admin） |
-| GET | `/api/knowledge/download/{id}` | 下载原文件（admin） |
-| DELETE | `/api/knowledge/delete/{id}` | 删除文件 + 向量 + 记录（admin） |
-| GET | `/api/knowledge/search` | **向量检索**（所有登录用户，供 RAG 调用） |
+| **AI 问答全部超时 / 等半天才返回** | v2.5.0 用的是通用域名 `dashscope.aliyuncs.com` + 裸 HTTP，限时模型不在该域名上，每次都要等满超时才降级 | v2.5.1 已修正：统一用 `openai.OpenAI` + `ALI_BASE_URL`（工作空间专属域名）。排查：`GET /api/health` 看 `llm_provider` 是否为 `ali(openai-compatible)`；再看 `.env` 的 `ALI_BASE_URL` 与 Key 变量名是否写成 `Ali_API_KEY` |
+| Key 配了但读不到 | 系统环境变量是在**服务进程启动之后**配置的，`os.getenv` 读不到 | 代码已兜底读 Windows 注册表（`llm_client.get_api_key()`）；或重启终端/服务 |
+| 回答很慢（>10s） | 检索前预处理、多路召回、相关性判断各自一次网络往返 | 已做：关思考（9.7s→2.6s）、ThreadPool 并发、embedding 批量 + 缓存、短问句跳过预处理。仍慢可设 `ALI_ENABLE_THINKING=0`、`QUERY_PREPROCESS_MIN_LEN` 调大、`ADVANCED_RAG_STRATEGY=standard` |
+| Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
+| 上传成功但检索为空 | Ollama / Ali embedding 都失败，或 `status=失败` | 看 `GET /api/knowledge/status` 与后端日志 `[LLM]` 开头的告警 |
+| 回答没有引用知识库 | `/api/ai/chat` 需传 `use_rag=true` 且已登录 | 前端 `AiChat.vue` 的「知识库增强」开关需打开 |
+| `npm install` 报 `ECONNREFUSED 127.0.0.1:7890` | `~/.npmrc` 里的代理未启动 | `npm install --userconfig .npmrc.local` |
+| `AttributeError: module 'bcrypt'` / passlib 报错 | bcrypt 版本过高 | 安装 `bcrypt==4.0.1` |
+| 推荐结果为空 | 科类 / 批次与年份不匹配 | 2024 用理科/文科，2025 用物理类/历史类 |
+| `/admin/knowledge` 刷新后 404 | 未构建 dist 或未启用 SPA 回退 | 开发模式请用 5173 端口 |
 
 ---
 
-## 五、冲稳保规则
+## 八、RAG 版本演进对照
 
-设考生位次 `R`，院校专业最低录取位次 `M`，缓冲 `B`（默认 5000，可配 `RANK_BUFFER`）：
+| 版本 | 分块策略 | 检索策略 | 交给 LLM 的上下文 | 关键改进一句话 |
+|---|---|---|---|---|
+| v2.0.0 | 定长 500/50 | 纯稠密 Top-K | 500 字块（可能切断） | Naive RAG 基线 |
+| v2.1.0 | 递归分块 500/50 | 稠密 + 稀疏 → **RRF(k=60)** | 语义完整的 500 字 | 混合检索，召回率上来 |
+| v2.2.0 | **父子块**（父 500 / 子 120） | 只索引子块，命中后回填父块 | 父块 | 检索粒度与上下文粒度解耦 |
+| v2.3.0 | 父子块 | + Query 路由 + 防幻觉 Prompt | 父块（路由筛选） | 无关问题不再浪费检索 |
+| v2.3.1 | 父子块 | 放宽路由 + 修正误拒答 | 父块 | 热修复：该答的答得出来 |
+| v2.4.0 | 父子块 | **多路召回**：Query 分解 → 跨路 RRF 累加 | 父块（多路融合） | 复合问题不再只召回一面 |
+| v2.4.1 | 父子块 | 检索前预处理 + 模块化三通道 | 父块 | 检索前/中拆成两个可复用模块 |
+| v2.5.0 | 父子块 | + **Rerank 精排落地** + Self-RAG / Corrective RAG | 父块（精排后） | 检索之后还能「再排一次」「自我反思」「纠偏重试」 |
+| **v2.5.1** | 父子块（不变） | 同 v2.5.0，**LLM/Embedding 通道修正 + 提速 34 倍** | 父块（不变） | Ali OpenAI 兼容通道正确落地，问答从 198s → 5.7s |
 
-| 档位 | 判定 | 排序 | 概率区间 |
-|---|---|---|---|
-| 冲 | `R - 8B ≤ M < R - B` | 位次降序（越接近越有希望） | 10% – 40% |
-| 稳 | `R - B ≤ M ≤ R + B` | 位次差绝对值升序 | 55% – 85% |
-| 保 | `R + B < M ≤ R + 8B` | 位次升序（越稳妥越靠前） | 88% – 98% |
-
-- 若某档在窗口内无结果，自动放宽窗口重新取数，保证三档都有内容
-- 概率是**规则估算值**，用于排序与直观展示，不是官方录取概率
-- 位次差 `rank_diff = M - R`：正数表示该专业往年位次比你低，更稳妥
-
----
-
-## 六、数据维度的两个坑（已在 `app/models/dataset.py` 抹平）
-
-1. **科类口径不同**：2025 是 `物理类 / 历史类`，2024 是 `理科 / 文科`；
-   且 2024 的 `major_admission` / `school_admission` 表 `category` 列整列为空
-   → 查 2024 录取表时**必须跳过 category 过滤**，否则结果为空。
-2. **批次写法不同**：2024 录取表写 `本一 / 本二 / 专科`，招生计划与一分一段写
-   `本科一批 / 本科二批 / 专科批`；2025 统一为 `本科批 / 专科批`
-   → 统一按「新高考口径」传入，由 `resolve_batch()` 翻译成该表的真实取值。
-
-另外：院校代码 / 专业代码在库里是 DOUBLE（pymysql 返回 `Decimal('2385.0000000000')`），
-已在 `normalize_code()` 统一成 `2385`。
+> 每个版本的「原有技术缺陷 → 改进技术与代码位置 → 降级策略 → 验证流程」详见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
-## 七、AI 集成与降级
+### 设计原则落点速查
 
-- 模型：`qwen3:1.7b`（Ollama），配置见 `OLLAMA_MODEL`
-- **意图解析**：少样本 Prompt 输出 JSON，解析失败或超时自动降级到关键词规则
-  （`_rule_parse_intent`），响应里的 `source` 字段标明 `llm` 或 `rule`
-- **推荐理由**：默认使用规则生成的理由（瞬时返回，含位次差、学费、计划人数）；
-  需要时再调用大模型，不可用时自动回退规则文案，**推荐列表永远可用**
-- **RAG 问答**：`/api/ai/chat` 传 `use_rag=true` 时先检索知识库片段，再拼进 Prompt 生成，
-  返回 `answer` + `sources`（引用了哪些文档）
-- 单次调用约 4–10 秒，批量生成采用线程池并发（`AI_MAX_WORKERS`）
-- 设置 `AI_ENABLED=0` 可完全关闭 AI
-
----
-
-## 八、3+1+2 选科与分数校验（考生端 `/volunteer`）
-
-由 `frontend/src/views/student/Volunteer.vue` 实现（逻辑与旧版 `profile-form.js` 一致）：
-
-- **普通类 / 艺术类 Tab**：顶部大分类，当前仅支持普通类（艺术类置灰提示）
-- **考试地区**：当前仅河南，省份是后续扩展的最大分支
-- **成绩类型**：本科 / 专科单选，决定「预估分数」可填区间
-  - 本科：`1 - 750`（满分）
-  - 专科：`1 - 本科线 - 1`（低于本科线的分数段，按年份科类动态计算）
-    - 例：2025 河南 物理类 → 专科 `1 - 426`；2024 河南 理科 → 专科 `1 - 395`
-- **高考科目（3+1+2）**：
-  - 一行 6 个 pill：物理 / 化学 / 生物 / 政治 / 历史 / 地理
-  - 物理和历史互斥，作为「首选科目」决定科类（2025 物理类/历史类，2024 理科/文科）
-  - 化学 / 生物 / 政治 / 地理为「再选科目」，最多选 2 门；全部最多选 3 门
-  - 再选科目作为 `filters.subject_selected` 传给推荐接口，按专业 `subject_req` 过滤
-    （「再选不限」通过；「再选化学、生物(2科必选)」必须全部包含；含「或」任一命中即可）
-- **自动换算**：填入分数 → 调 `/api/meta/score-check` → 自动填充位次、
-  推荐填报批次（带「推荐」标签），并显示排名区间；均可手动修改
-  - 已取消单独的「换算位次」按钮
-- **区间校验**：分数不在当前成绩类型区间内时给出红字提示，不会错误换算
-- **联动重算**：年份、首选科目、地区、批次、成绩类型任一变化都会重新换算
-- **未过线提示**：分数低于本省最低批次线时提示各批次高考批次线
-- 每次进入志愿填报页，分数 / 位次 / 批次 / 选科一律留空
-
----
-
-## 九、RAG 知识库模块
-
-### 9.1 链路
-
-```
-上传（PDF / TXT / DOCX）
-  → save_upload_file：UUID 重命名落盘 knowledge_files/
-  → extract_text：pypdf / python-docx / 纯文本
-  → split_text：500 字切片、50 字重叠
-  → get_embedding：Ollama nomic-embed-text（或 DashScope text-embedding-v3）
-  → Chroma PersistentClient 写入集合 gaokao_knowledge
-  → MySQL 回写 chunk_count / status = 已向量化
-
-提问（v2.5.0 检索链路）
-  → ① 检索前：query_rewrite.QueryPreprocessor（重写 / 扩展 / 子查询）
-  → ② 检索中：retrieval.MultiRecall（dense / bm25 / hybrid 三通道 × 多 Query，RRF 融合）
-  → ③ 检索后：reranker.Reranker 精排（CrossEncoder 或 embedding 余弦）
-  → ④ 父子块回填：子块命中 → 换成父块上下文
-  → ⑤ Modular RAG：route_strategy() 选路 → Self-RAG / Corrective RAG / 标准 RAG → 生成
-  → /api/ai/chat 返回 answer + sources + strategy + steps
-```
-
-### 9.2 关键文件
-
-| 文件 | 职责 |
+| 原则 | 本项目落点 |
 |---|---|
-| `backend/app/services/rag_service.py` | Chroma 客户端、embedding、切片写入、`search()`、`rerank()`、`route_strategy()`、`answer_with_strategy()`、`delete_by_file()` |
-| `backend/app/services/query_rewrite.py` | 检索前：重写 / 扩展 / 子查询分解 + DashScope↔Ollama 统一 LLM 通道 |
-| `backend/app/services/retrieval.py` | 检索中：dense / bm25 / hybrid 通道 + MultiRecall 融合（rrf / weight / round_robin） |
-| `backend/app/services/reranker.py` | 检索后：CrossEncoder / embedding 余弦 / noop 三种精排 + 失败降级 |
-| `backend/app/services/self_rag.py` | Self-RAG：是否检索 → 上下文是否有用 → 生成 → 自评不合格才反思修正 |
-| `backend/app/services/corrective_rag.py` | Corrective RAG：相关性过滤 → 不足则重写 Query 重试 |
-| `backend/app/utils/file_utils.py` | UUID 保存、文本提取、切片（500 / 50） |
-| `backend/app/routers/knowledge.py` | upload / list / detail / download / delete / search / status |
-| `backend/app/routers/auth.py` | JWT、bcrypt、`get_current_user` / `get_current_admin` |
-| `frontend/src/views/admin/Knowledge.vue` | 管理端列表（文件名称 / 大小 / 上传时间 / 操作：详情、删除） |
-| `frontend/src/components/UploadModal.vue` | 拖拽上传弹窗 |
-| `frontend/src/views/student/AiChat.vue` | 考生端 RAG 问答（可开关知识库增强） |
-
-### 9.3 建表 SQL（`backend/sql/04_rag_tables.sql`）
-
-```sql
-CREATE TABLE users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    role ENUM('admin', 'student') DEFAULT 'student',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE knowledge_files (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    filename VARCHAR(255) NOT NULL,
-    stored_filename VARCHAR(255) NOT NULL,   -- UUID 重命名后的文件名
-    file_path VARCHAR(500) NOT NULL,
-    file_type VARCHAR(20),                   -- pdf / txt / docx
-    file_size INT,
-    upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-    chunk_count INT DEFAULT 0,               -- 切分后的片段数
-    status VARCHAR(50) DEFAULT '已上传',      -- 已上传 / 已向量化 / 失败
-    uploaded_by INT,
-    FOREIGN KEY (uploaded_by) REFERENCES users(id)
-);
-```
-
-### 9.4 权限与鉴权
-
-- 密码：`passlib[bcrypt]`（bcrypt 锁 4.0.1）；JWT：`python-jose` HS256
-- 依赖链：`OAuth2PasswordBearer → get_current_user（解析 JWT）→ get_current_admin（校验 role）`
-- `/api/knowledge/upload|list|detail|download|delete|status` 仅 admin（非 admin → 403，无 Token → 401）
-- `/api/knowledge/search` 对所有登录用户开放（考生端 AI 助手调用）
-- 前端 `router.beforeEach` 校验 `meta.requiresAdmin`，非管理员跳 `/login`
-
-### 9.5 切换向量库 / embedding
-
-- 迁移 Milvus：只需替换 `rag_service.py` 中的集合读写函数（客户端、写入、检索、删除）
-- 切换千问官方 embedding：在 `.env` 填 `DASHSCOPE_API_KEY`，`get_embedding()` 会优先走 DashScope
-- Ollama 不可用时 `search()` 自动退化为关键词匹配，链路不中断
-
-### 9.6 上传安全
-
-- 文件类型白名单：`.pdf` / `.txt` / `.docx`
-- UUID 重命名落盘，避免文件名冲突与路径遍历
-- 单文件上限 20MB
-- 删除时同时清理：磁盘文件 + MySQL 记录 + Chroma 向量
-
----
-
-## 十、联调用例
-
-### 志愿推荐
-
-输入：**河南 · 2025 · 物理类 · 本科批 · 611 分**
-
-- 位次换算：`/api/score-to-rank?score=611` → `rank = 34569`（省控线 427，线差 +184）
-- 推荐：`POST /api/recommend` → 冲 / 稳 / 保 三档，规则理由立即返回
-- 示例结果：稳档 `北京建筑大学 计算机科学与技术`，最低位次 34569，位次差 0，概率 70%
-- AI 理由：`POST /api/ai/recommend-reason` → 约 4 秒返回 60 字以内文案
-
-### RAG 问答（`python smoke_rag.py` 实测）
-
-```
-login: admin & student ok
-no token search: 401          # 未登录拦截
-student list: 403             # 学生访问管理接口被拒
-student search: 200           # 检索对登录用户开放
-upload: 200 上传并向量化成功 chunk_count = 2
-search hits: 2                # 命中原文片段
-chat: 200 source = rag+llm sources = ['河南志愿填报指南.txt']
-delete: 200 已删除 → list / search 归零
-```
-
----
-
-## 十一、常见问题排查
-
-| 现象 | 原因 / 处理 |
-|---|---|
-| npm install 报 `ECONNREFUSED 127.0.0.1:7890` | `~/.npmrc` 里的代理未启动，用 `npm install --userconfig .npmrc.local` |
-| `AttributeError: module 'bcrypt'` / passlib 报错 | bcrypt 版本过高，安装 `bcrypt==4.0.1` |
-| 端口 8000 被占用 | `netstat -ano \| findstr :8000` 找到 PID 后 `taskkill /PID <PID> /F` |
-| `/admin/knowledge` 刷新后 404 | 后端未构建 dist 或未启用 SPA 回退；开发模式请用 5173 端口 |
-| 上传成功但检索为空 | 检查 Ollama 是否运行、`ollama pull nomic-embed-text` 是否完成；可看 `/api/knowledge/status` |
-| 回答没有引用知识库 | `/api/ai/chat` 需传 `use_rag=true`，且当前用户已登录 |
-| 推荐结果为空 | 确认科类 / 批次与年份匹配（2024 用理科/文科，2025 用物理类/历史类） |
-
----
-
-## 十二、注意事项
-
-- `major_admission` 表的 `min_score / min_rank` 是**专业组投档线**粒度，不是单个专业精确线，
-  结果仅供演示，正式使用应替换为官方投档表。
-- 数据集没有「双一流」独立字段，目前以 `985 / 211` 近似。
-- 位次优先于分数：分数每年波动，位次才是硬通货。
-- 首次启动会自动为 4 类表补 `(category, batch, min_rank)` 索引（幂等）。
-- 考生信息与「我的志愿表」保存在浏览器 localStorage / sessionStorage，不入库。
-- `knowledge_files/` 与 `chroma_db/` 已在 `.gitignore` 中排除，不会提交到仓库。
-- 旧版原生前端已归档到 `frontend/_legacy/`，当前前端为 Vue3 + TypeScript。
+| 单一职责 | `llm_client.py` 只管「怎么调模型 + 怎么降级」；Prompt 全部留在各业务模块 |
+| 开闭原则 | 新增 LLM 通道只需加一个 `BaseLLMChannel` 子类，`LLMClient` 一行不改 |
+| 里氏替换 | `HybridSearch` 既是编排组合又能被 `MultiRecall` 当普通通道使用 |
+| 依赖倒置 | `SelfRAG / CorrectiveRAG` 依赖注入的 `retriever / generator / llm` 抽象，不依赖具体实现 |
+| 接口隔离 | LLM 通道只有 `chat()`，Embedding 通道只有 `embed()/embed_batch()` |
+| 迪米特法则 | `ai_service.ask()` 只知道 `llm_client`，不知道背后是 Ali 还是 Ollama |
+| 合成复用 | `LLMClient` **组合**主通道 + 兜底通道；`MultiRecall` **组合**多个通道，而非继承 |

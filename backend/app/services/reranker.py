@@ -49,7 +49,7 @@ class CrossEncoderReranker(BaseReranker):
 
 
 class EmbeddingReranker(BaseReranker):
-    """向量余弦精排：复用项目已有的 embedding（Ollama / DashScope），无需额外模型。
+    """向量余弦精排：复用项目已有的 embedding（Ali / Ollama），无需额外模型。
 
     虽然不如 CrossEncoder 精准，但「召回用稀疏/稠密的融合分，精排用语义余弦」
     已经能把语义最贴近的文档顶到前面。

@@ -1,15 +1,17 @@
-"""RAG 服务：Chroma 向量库 + Ollama embedding + 递归分块 + 混合检索。
+"""RAG 服务：Chroma 向量库 + embedding 通道 + 递归分块 + 混合检索。
 
 设计要点：
 - 所有向量库操作都封装在本文件，将来换 Milvus 只需替换这几个函数
 - 分块：RecursiveCharacterTextSplitter（递归分块），失败时退化为定长切分
 - 检索：稠密（Chroma 向量）+ 稀疏（BM25 关键词）→ RRF 融合（k=60）
-- 默认调用本地 Ollama embedding（离线可用），可通过 DASHSCOPE_API_KEY 切到千问 text-embedding-v3
-- 若 Ollama / Chroma 不可用，退化为「关键词打分」的本地检索，保证链路不中断
+- v2.5.1：embedding 与 LLM 统一走 `llm_client`（Ali OpenAI 兼容 → Ollama 兜底），
+  维度自动对齐已存在的集合，避免历史 768 维数据报错
+- 若 Ali / Ollama / Chroma 全不可用，退化为「关键词打分」的本地检索，保证链路不中断
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Dict, List, Optional
@@ -17,6 +19,9 @@ from typing import Dict, List, Optional
 import requests
 
 from app.config import settings
+from app.services import llm_client
+
+logger = logging.getLogger(__name__)
 
 # RRF 融合常数：k=60（消除前几名排名的剧烈波动，见 HybridRetrieval.rrf 注释）
 RRF_K = 60
@@ -87,8 +92,10 @@ def backend_info() -> dict:
         "vector_store": "chroma",
         "persist_path": settings.CHROMA_DB_PATH,
         "collection": settings.CHROMA_COLLECTION,
-        "embedding_model": settings.OLLAMA_EMBED_MODEL,
-        "embedding_provider": "dashscope" if settings.DASHSCOPE_API_KEY else "ollama",
+        "embedding_model": settings.ALI_EMBED_MODEL if llm_client.get_api_key() else settings.OLLAMA_EMBED_MODEL,
+        "embedding_provider": llm_client.get_api_key() and "ali" or "ollama",
+        "llm_provider": llm_client.get_api_key() and "ali(openai-compatible)" or "ollama",
+        "llm_model": settings.ALI_LLM_MODEL if llm_client.get_api_key() else settings.OLLAMA_FALLBACK_MODEL,
         "ready": col is not None,
         "error": _chroma_error,
         "count": (col.count() if col else 0),
@@ -97,44 +104,51 @@ def backend_info() -> dict:
 
 # ---------------- Embedding ----------------
 
+_collection_dim_cache: Optional[int] = None
+
+
+def _collection_dimension() -> Optional[int]:
+    """读取已有集合里第一条向量的维度（结果缓存一次，避免每次都查库）。
+
+    用途：写入/查询前把 Ali embedding 的维度对齐到已有集合，
+    否则 text-embedding-v3 默认 128 维会与历史 768 维数据冲突，Chroma 直接拒绝写入。
+    """
+    global _collection_dim_cache
+    if _collection_dim_cache is not None:
+        return _collection_dim_cache
+    try:
+        col = _get_collection()
+        data = col.get(include=["embeddings"], limit=1) if col else None
+        emb = (data or {}).get("embeddings")
+        _collection_dim_cache = len(emb[0]) if emb is not None and len(emb) else None
+    except Exception:  # noqa: BLE001 查不到就按配置走
+        _collection_dim_cache = None
+    return _collection_dim_cache
+
+
 def get_embedding(text: str) -> Optional[List[float]]:
-    """获取文本向量：优先 DashScope，其次 Ollama，都失败返回 None。"""
-    if settings.DASHSCOPE_API_KEY:
-        vec = _dashscope_embedding(text)
-        if vec:
-            return vec
-    return _ollama_embedding(text)
+    """获取文本向量（v2.5.1 统一通道）。
+
+    顺序：Ali OpenAI 兼容 embedding（text-embedding-v3）→ 本地 Ollama（nomic-embed-text）→ None。
+    维度：`dimensions` 优先取已有集合的真实维度（如历史上是 768），取不到才用 ALI_EMBED_DIMENSION(128)，
+    这样新数据永远和历史数据同维，不会出现 Chroma 维度不匹配。
+    """
+    dim = _collection_dimension() or settings.ALI_EMBED_DIMENSION
+    return llm_client.get_llm_client().embed(text, dimensions=dim)
+
+
+def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
+    """批量获取向量（v2.5.1 提速）：一次网络往返算完一批 Query / 一批文档。
+
+    多路召回一次要向量化 3-4 条 Query，逐条请求 = 3-4 次往返，合并后只剩 1 次。
+    """
+    dim = _collection_dimension() or settings.ALI_EMBED_DIMENSION
+    return llm_client.get_llm_client().embed_batch(list(texts), dimensions=dim)
 
 
 def _ollama_embedding(text: str) -> Optional[List[float]]:
-    try:
-        resp = requests.post(
-            f"{settings.OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
-            timeout=settings.OLLAMA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json().get("embedding")
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _dashscope_embedding(text: str) -> Optional[List[float]]:
-    """千问官方 text-embedding-v3（需 DASHSCOPE_API_KEY）。"""
-    try:
-        resp = requests.post(
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings",
-            headers={
-                "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={"model": settings.DASHSCOPE_EMBED_MODEL, "input": text},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
-    except Exception:  # noqa: BLE001
-        return None
+    """本地 Ollama embedding 兜底（保留独立入口，供离线排查使用）。"""
+    return llm_client.OllamaEmbeddingChannel().embed(text)
 
 
 # ---------------- 分块：递归分块（Recursive Splitting） ----------------
@@ -1146,8 +1160,13 @@ def route_query(query: str) -> bool:
         timeout=20,
     )
     if not intent:
-        return True  # LLM 不可用 → 放行，交回主流程兜底
-    return "YES" in intent.upper()
+        # LLM 不可用 → 放行，交回主流程兜底
+        logger.info("[RAG] 路由：LLM 无返回 → 放行（query=%s）", query)
+        return True
+    ok = "YES" in intent.upper()
+    # 留痕：路由误判是最难排查的线上问题，这里把「模型原话」写进日志
+    logger.info("[RAG] 路由：模型输出=%r → %s（query=%s）", intent, "放行" if ok else "拦截", query)
+    return ok
 
 
 def generate_answer(
