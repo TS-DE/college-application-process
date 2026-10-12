@@ -12,6 +12,7 @@
         <router-link to="/university">查大学</router-link>
         <router-link to="/ai-chat">AI 助手</router-link>
         <router-link v-if="userStore.isAdmin" to="/admin/knowledge">知识库管理</router-link>
+        <router-link v-if="userStore.isAdmin" to="/admin/rag-eval">RAG 量化评估</router-link>
       </nav>
 
       <div class="right">

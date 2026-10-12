@@ -132,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import { applySuggestion as apiApply, getReport, listChanges, listDatasets, listReports, rollbackEvaluate, runEval, uploadDataset } from '@/api/eval'
@@ -238,6 +238,17 @@ async function doRollback() {
     await loadChanges()
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '回滚失败')
+  }
+}
+
+/** el-upload 自定义上传：把文件交给后端 /api/eval/datasets 校验并落盘 */
+async function onUpload(options: { file: File }) {
+  try {
+    const res = await uploadDataset(options.file)
+    ElMessage.success(res.msg || '数据集已上传')
+    await loadDatasets()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '上传失败')
   }
 }
 
