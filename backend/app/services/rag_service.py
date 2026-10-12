@@ -4,7 +4,7 @@
 - 所有向量库操作都封装在本文件，将来换 Milvus 只需替换这几个函数
 - 分块：RecursiveCharacterTextSplitter（递归分块），失败时退化为定长切分
 - 检索：稠密（Chroma 向量）+ 稀疏（BM25 关键词）→ RRF 融合（k=60）
-- v2.5.1：embedding 与 LLM 统一走 `llm_client`（Ali OpenAI 兼容 → Ollama 兜底），
+- 0.7.1：embedding 与 LLM 统一走 `llm_client`（Ali OpenAI 兼容 → Ollama 兜底），
   维度自动对齐已存在的集合，避免历史 768 维数据报错
 - 若 Ali / Ollama / Chroma 全不可用，退化为「关键词打分」的本地检索，保证链路不中断
 """
@@ -34,7 +34,7 @@ CHILD_CHUNK_OVERLAP = 20    # 子块重叠
 # docstore 文件：父块原文按 parent_id 存这里，向量库只存子块（见 put_parents 注释）
 PARENT_STORE_FILE = "parent_store.json"
 
-# ---------------- v2.4.0 多路召回（Multi-Query Recall） ----------------
+# ---------------- 0.5.0 多路召回（Multi-Query Recall） ----------------
 # 把复杂问题拆成 3-4 条聚焦的子查询，分别走混合检索，再按 RRF 累加融合
 MULTI_QUERY_PROMPT = """你是一个高考志愿填报系统的查询改写专家。
 请把用户的复杂问题拆解成 3-4 条**更聚焦**的子查询，用于分别检索知识库。
@@ -127,7 +127,7 @@ def _collection_dimension() -> Optional[int]:
 
 
 def get_embedding(text: str) -> Optional[List[float]]:
-    """获取文本向量（v2.5.1 统一通道）。
+    """获取文本向量（0.7.1 统一通道）。
 
     顺序：Ali OpenAI 兼容 embedding（text-embedding-v3）→ 本地 Ollama（nomic-embed-text）→ None。
     维度：`dimensions` 优先取已有集合的真实维度（如历史上是 768），取不到才用 ALI_EMBED_DIMENSION(128)，
@@ -138,7 +138,7 @@ def get_embedding(text: str) -> Optional[List[float]]:
 
 
 def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
-    """批量获取向量（v2.5.1 提速）：一次网络往返算完一批 Query / 一批文档。
+    """批量获取向量（0.7.1 提速）：一次网络往返算完一批 Query / 一批文档。
 
     多路召回一次要向量化 3-4 条 Query，逐条请求 = 3-4 次往返，合并后只剩 1 次。
     """
@@ -825,7 +825,7 @@ def _load_corpus_docs() -> tuple:
 
 
 def rerank(query: str, hits: List[Dict]) -> List[Dict]:
-    """Rerank 精排（v2.5.0 落地）：对多路召回的候选做二次排序。
+    """Rerank 精排（0.7.0 落地）：对多路召回的候选做二次排序。
 
     实现见 app/services/reranker.py：
       - 配置了 RERANK_MODEL 且 CrossEncoder 可用 → CrossEncoderReranker
@@ -947,7 +947,7 @@ def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dic
     if col is None:
         return _keyword_fallback(query, top_k)
 
-    # ===== ① 检索前预处理（v2.4.1）=====
+    # ===== ① 检索前预处理（0.6.0）=====
     queries: List[str] = [query]
     preprocess_info: Dict = {"enabled": False, "source": "raw", "queries": [query]}
     if settings.MULTI_QUERY_ENABLED:
@@ -1011,7 +1011,7 @@ def _recall(queries: List[str], top_k: int, use_multi_route: bool) -> List[Dict]
         except Exception:  # noqa: BLE001
             pass
 
-    # ② 内置多路召回（v2.4.0）
+    # ② 内置多路召回（0.5.0）
     if use_multi_route and settings.MULTI_QUERY_ENABLED:
         try:
             hits = multi_route_search(queries[0], top_k)
@@ -1063,11 +1063,11 @@ def _keyword_fallback(query: str, top_k: int) -> List[Dict]:
     return scored[:top_k]
 
 
-# ---------------- v2.3.0：Query 路由 + 防幻觉 Prompt ----------------
+# ---------------- 0.4.0：Query 路由 + 防幻觉 Prompt ----------------
 
 # 1) 路由拦截提示词：在 RAG 检索之前单独调用一次 LLM 做二分类
 #    参数：temperature=0.0（要确定性），max_tokens=5（只要 YES / NO）
-#    v2.3.1 修正：v2.3.0 的关键词列表太窄，跨省招生计划（"2025河南在福建招生的院校"）
+#    0.4.1 修正：0.4.0 的关键词列表太窄，跨省招生计划（"2025河南在福建招生的院校"）
 #    这类长尾高考问题会被误判为 NO；这里改成「满足任意一条即为 YES」的宽松口径。
 ROUTER_PROMPT = """你是一个高考志愿填报系统的意图分类器。
 你的任务是判断用户的问题是否与【高考、志愿填报、院校、专业、招生、录取、分数线、学费、位次、选科、批次】相关。
@@ -1089,7 +1089,7 @@ ROUTER_PROMPT = """你是一个高考志愿填报系统的意图分类器。
 
 # 2) 防幻觉提示词：RAG 检索之后，把父块 Context 与 Query 一起交给 LLM
 #    参数：temperature=0.1，top_p=0.3
-#    v2.3.1 修正：v2.3.0 用「绝对铁律 + top_p=0.1」过于保守，父块里明明有 23000 元/年，
+#    0.4.1 修正：0.4.0 用「绝对铁律 + top_p=0.1」过于保守，父块里明明有 23000 元/年，
 #    模型也不敢生成、直接套用拒答话术；这里改成「回答规则」：有资料就完整回答，
 #    只有上下文中完全没有相关信息时才拒答。
 ANTI_HALLUCINATION_PROMPT = """你是一个严谨的高考志愿填报助手。请严格根据【检索上下文】回答用户问题。
@@ -1130,7 +1130,7 @@ SQL_EXTRACT_PROMPT = """你是一个高考数据提取器。请从用户的问�
 
 【JSON输出】："""
 
-# 命中这些关键词时，优先考虑走 MySQL 结构化查询而不是 RAG（v2.3.0 预留）
+# 命中这些关键词时，优先考虑走 MySQL 结构化查询而不是 RAG（0.4.0 预留）
 STRUCTURED_KEYWORDS = ("学费", "分数线", "位次", "录取分", "招生人数", "计划数")
 
 # 路由被拦截时返回给用户的固定话术（与放宽后的路由口径保持一致）
@@ -1178,7 +1178,7 @@ def generate_answer(
     """防幻觉生成：优先依据检索到的父块上下文回答，上下文中完全没有才拒答。
 
     - 参数默认：**temperature=0.1**，**top_p=0.3**
-      （v2.3.0 用的 top_p=0.1 过于保守，会导致上下文明明有数字时模型也放弃生成）
+      （0.4.0 用的 top_p=0.1 过于保守，会导致上下文明明有数字时模型也放弃生成）
     - 返回 None 表示生成失败，由调用方降级（回退原 chat 逻辑或提示稍后重试）
     """
     from app.services.ai_service import ask
@@ -1193,7 +1193,7 @@ def generate_answer(
 
 
 def extract_sql_filters(query: str) -> Optional[Dict]:
-    """结构化条件提取（v2.3.0 预留，配合 Text-to-SQL 走 MySQL）。
+    """结构化条件提取（0.4.0 预留，配合 Text-to-SQL 走 MySQL）。
 
     - 参数：temperature=0.0
     - 命中「学费/分数线/位次」等强结构化关键词时优先走 MySQL 精确查询，

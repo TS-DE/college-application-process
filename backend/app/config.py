@@ -85,7 +85,7 @@ class Settings:
     # Ollama embedding 模型（离线优先）
     OLLAMA_BASE_URL: str = _env("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_EMBED_MODEL: str = _env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-    # ---------------- v2.5.1 LLM / Embedding 统一通道（★ 热修复） ----------------
+    # ---------------- 0.7.1 LLM / Embedding 统一通道（★ 热修复） ----------------
     # 说明：限时模型 qwen3.7-flash-2026-07-15 只能走 OpenAI 兼容接口，
     #       base_url 必须是「工作空间专属域名」，不能是通用 dashscope 域名，也不能用 dashscope SDK。
     ALI_API_KEY: str = _env("Ali_API_KEY", "")
@@ -106,14 +106,14 @@ class Settings:
     CHUNK_SIZE: int = int(_env("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(_env("CHUNK_OVERLAP", "50"))
 
-    # ---------------- v2.4.0 多路召回（Multi-Query Recall） ----------------
+    # ---------------- 0.5.0 多路召回（Multi-Query Recall） ----------------
     MULTI_QUERY_ENABLED: bool = _env("MULTI_QUERY_ENABLED", "1") not in {"0", "false", "False"}
     # 子查询条数上限（含原始 Query）
     MULTI_QUERY_MAX: int = int(_env("MULTI_QUERY_MAX", "4"))
     # 每条子查询在稠密/稀疏路各召回多少候选
     MULTI_QUERY_CANDIDATE_N: int = int(_env("MULTI_QUERY_CANDIDATE_N", "20"))
-    # ---------------- v2.5.0 检索后优化（Re-ranking）+ 高级 RAG ----------------
-    # 注：统一模型名已上移为 ALI_LLM_MODEL（v2.5.1 起 Ali API Key 与 Ollama 共用一套通道）
+    # ---------------- 0.7.0 检索后优化（Re-ranking）+ 高级 RAG ----------------
+    # 注：统一模型名已上移为 ALI_LLM_MODEL（0.7.1 起 Ali API Key 与 Ollama 共用一套通道）
     # 本地兜底模型（Ollama）
     OLLAMA_FALLBACK_MODEL: str = _env("OLLAMA_FALLBACK_MODEL", _env("OLLAMA_MODEL", "qwen3:1.7b"))
     # Rerank 总开关：1=开启（默认用向量余弦精排，无需额外模型）
@@ -126,7 +126,7 @@ class Settings:
     # Corrective RAG 重试次数（信息不足时重写 Query 重试）
     CORRECTIVE_MAX_RETRY: int = int(_env("CORRECTIVE_MAX_RETRY", "1"))
 
-    # ---------------- v2.4.1 检索前预处理 + 模块化多路召回 ----------------
+    # ---------------- 0.6.0 检索前预处理 + 模块化多路召回 ----------------
     # 检索前：查询重写 / 查询扩展 / 子查询分解 开关
     QUERY_REWRITE_ENABLED: bool = _env("QUERY_REWRITE_ENABLED", "1") not in {"0", "false", "False"}
     QUERY_EXPANSION_ENABLED: bool = _env("QUERY_EXPANSION_ENABLED", "1") not in {"0", "false", "False"}
@@ -139,6 +139,34 @@ class Settings:
     MULTI_RECALL_FUSION: str = _env("MULTI_RECALL_FUSION", "rrf")
     # 每个通道每条 Query 召回多少候选
     MULTI_RECALL_TOPK_PER_CHANNEL: int = int(_env("MULTI_RECALL_TOPK_PER_CHANNEL", "20"))
+
+    # ---------------- 0.8.0 RAG 量化评估与自动调优 ----------------
+    # 评估模块总开关
+    EVAL_ENABLED: bool = _env("EVAL_ENABLED", "1") not in {"0", "false", "False"}
+    # 评估数据集目录（相对仓库根目录）
+    EVAL_DATA_DIR: str = _env("EVAL_DATA_DIR", "data/eval")
+    # 评估报告输出目录（相对仓库根目录）
+    EVAL_REPORT_DIR: str = _env("EVAL_REPORT_DIR", "data/eval_reports")
+    # 是否启用 LLM 打分指标（Faithfulness / Answer Relevance / Answer Correctness）
+    # 默认关闭：本地可算的核心指标已经够用，避免额度耗尽 + API 报错影响评估流程
+    EVAL_LLM_METRICS_ENABLED: bool = _env("EVAL_LLM_METRICS_ENABLED", "0") not in {"0", "false", "False"}
+    # 语义相似度阈值（用于判定「召回片段是否命中标准答案」）
+    EVAL_SIM_THRESHOLD: float = float(_env("EVAL_SIM_THRESHOLD", "0.65"))
+    # 单次评估的检索条数
+    EVAL_TOP_K: int = int(_env("EVAL_TOP_K", "5"))
+    # 单次评估最大样本数（防止 LLM 链路太慢导致接口超时）
+    EVAL_MAX_SAMPLES: int = int(_env("EVAL_MAX_SAMPLES", "50"))
+    # 防幻觉 Prompt 版本：standard / strict（faithfulness 低时由自动调优切到 strict）
+    PROMPT_VERSION: str = _env("PROMPT_VERSION", "standard")
+    # 自动调优总开关
+    AUTO_TUNE_ENABLED: bool = _env("AUTO_TUNE_ENABLED", "1") not in {"0", "false", "False"}
+    # 自动调优白名单：只有白名单内的参数才允许被「一键应用」修改
+    AUTO_TUNE_WHITELIST: str = _env(
+        "AUTO_TUNE_WHITELIST",
+        "CHUNK_SIZE,CHUNK_OVERLAP,MULTI_RECALL_TOPK_PER_CHANNEL,RERANK_ENABLED,RERANK_MODEL,"
+        "MULTI_QUERY_ENABLED,QUERY_REWRITE_ENABLED,QUERY_EXPANSION_ENABLED,QUERY_DECOMPOSE_ENABLED,"
+        "ADVANCED_RAG_ENABLED,PROMPT_VERSION",
+    )
 
     @property
     def DATABASE_URL(self) -> str:

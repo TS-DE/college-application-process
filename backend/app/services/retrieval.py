@@ -43,7 +43,7 @@ class ProjectEmbedding:
     def encode(self, texts: Sequence[str], normalize_embeddings: bool = True) -> np.ndarray:
         from app.services import rag_service  # 延迟导入，避免循环依赖
 
-        # v2.5.1：整批一次请求（Ali 支持原生 batch），把 N 次网络往返压成 1 次
+        # 0.7.1：整批一次请求（Ali 支持原生 batch），把 N 次网络往返压成 1 次
         batch = list(texts or [])
         raw_vectors: List[Optional[List[float]]] = rag_service.get_embeddings_batch(batch) if batch else []
 

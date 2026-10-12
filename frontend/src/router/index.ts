@@ -21,6 +21,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/admin/Knowledge.vue'),
     meta: { requiresAdmin: true }
   },
+  {
+    path: '/admin/rag-eval',
+    name: 'admin-rag-eval',
+    component: () => import('@/views/admin/RAGEval.vue'),
+    meta: { requiresAdmin: true }
+  },
 
   // 登录
   { path: '/login', name: 'login', component: () => import('@/views/Login.vue') },

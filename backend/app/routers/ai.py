@@ -72,7 +72,7 @@ async def recommend_reason(payload: RecommendReasonIn) -> RecommendReasonOut:
 async def chat(payload: dict) -> dict:
     """志愿问答（可选 RAG）。
 
-    v2.5.2：整体链路改为 async + 线程池执行，防止同步 LLM 调用阻塞主事件循环，
+    0.7.2：整体链路改为 async + 线程池执行，防止同步 LLM 调用阻塞主事件循环，
     进而拖慢首页、登录等非 AI 接口。整体超时 120 秒，超时返回 504。
     """
     return await asyncio.wait_for(
@@ -90,10 +90,10 @@ def _chat_sync(payload: dict) -> dict:
         raise HTTPException(status_code=400, detail="question 不能为空")
     if not ai_enabled():
         raise HTTPException(status_code=503, detail="AI 未启用")
-    # v2.5.2：不再强制探测 Ollama；Ali 通道可用时即可正常问答，Ollama 只作为兜底。
+    # 0.7.2：不再强制探测 Ollama；Ali 通道可用时即可正常问答，Ollama 只作为兜底。
     # 真正不可用的情况由 ask() / rag_service 返回空值后抛出 504。
 
-    # ---- v2.3.0 ① Query 意图路由：无关问题直接拦截，不走检索 ----
+    # ---- 0.4.0 ① Query 意图路由：无关问题直接拦截，不走检索 ----
     use_rag = bool(payload.get("use_rag"))
     if use_rag and not rag_service.route_query(question):
         return {
@@ -102,7 +102,7 @@ def _chat_sync(payload: dict) -> dict:
             "sources": [],
         }
 
-    # ---- v2.5.0 ② Modular RAG：按 Query 特征走 Self-RAG / Corrective RAG / 标准 RAG ----
+    # ---- 0.7.0 ② Modular RAG：按 Query 特征走 Self-RAG / Corrective RAG / 标准 RAG ----
     if use_rag and rag_service.settings.ADVANCED_RAG_ENABLED:
         try:
             adv = rag_service.answer_with_strategy(
@@ -138,9 +138,9 @@ def _chat_sync(payload: dict) -> dict:
                 parts.append(f"[{name}] {h['text']}")
             rag_snippets = "\n".join(parts[:5])
 
-    # ---- v2.3.0 ② 防幻觉生成：命中资料时用强约束 Prompt（temperature=0.1, top_p=0.1）----
+    # ---- 0.4.0 ② 防幻觉生成：命中资料时用强约束 Prompt（temperature=0.1, top_p=0.1）----
     if use_rag and rag_snippets:
-        # v2.3.1：top_p 从 0.1 放宽到 0.3，避免模型在极端保守采样下放弃生成
+        # 0.4.1：top_p 从 0.1 放宽到 0.3，避免模型在极端保守采样下放弃生成
         answer = rag_service.generate_answer(question, rag_snippets, temperature=0.1, top_p=0.3)
         if not answer:
             raise HTTPException(status_code=504, detail="大模型响应超时")
@@ -163,7 +163,7 @@ def _chat_sync(payload: dict) -> dict:
             + rag_snippets
         )
     if use_rag and not rag_snippets:
-        # v2.3.1 修正：不再直接拒答，而是让模型基于通用知识给方向性建议，
+        # 0.4.1 修正：不再直接拒答，而是让模型基于通用知识给方向性建议，
         # 但明确禁止编造具体数字（学费 / 分数线 / 位次）
         prompt_parts.append(
             "注意：知识库中未检索到直接相关的资料。请基于你的通用知识给出**方向性建议**"

@@ -15,7 +15,7 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-// v2.5.2：默认超时从 60000ms 下调到 10000ms，避免后端偶发阻塞时前端长时间挂起。
+// 0.7.2：默认超时从 60000ms 下调到 10000ms，避免后端偶发阻塞时前端长时间挂起。
 // AI / 文件上传等长耗时接口请使用 aiRequest 或在请求配置里显式覆盖 timeout。
 const DEFAULT_TIMEOUT = 10000
 

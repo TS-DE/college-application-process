@@ -2,7 +2,7 @@
 
 参考课堂案例 01_查询重写.py / 02_查询扩展.py / 03_子查询.py。
 
-v2.5.1 起，LLM 通道统一交给 `app/services/llm_client.py`：
+0.7.1 起，LLM 通道统一交给 `app/services/llm_client.py`：
 OpenAI 兼容接口（base_url=ALI_BASE_URL，Key=Ali_API_KEY），失败降级本地 Ollama。
 
 类结构：
@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 
-# ====================== LLM 通道（v2.5.1：统一走 llm_client） ======================
+# ====================== LLM 通道（0.7.1：统一走 llm_client） ======================
 
 
 def default_chat_model() -> str:
@@ -50,7 +50,7 @@ def get_api_key() -> str:
 
 def llm_chat(system_prompt: str, user_prompt: str, temperature: float = 0.0,
              model: Optional[str] = None, max_tokens: int = 128) -> str:
-    """统一的 LLM 调用入口（v2.5.1：全部委托给 llm_client）。
+    """统一的 LLM 调用入口（0.7.1：全部委托给 llm_client）。
 
     通道顺序由 llm_client 决定：Ali（OpenAI 兼容，已关思考）→ 本地 Ollama；
     两级都失败返回空串，调用方各自做保守处理（保留原始 Query / 走单路检索），不抛异常。
@@ -233,7 +233,7 @@ class QueryPreprocessor:
     def process(self, query: str) -> QueryBundle:
         """执行检索前预处理。任一步失败都不影响整体（降级为原始 Query）。
 
-        v2.5.1：重写 / 扩展 / 分解三者互不依赖，改为**线程池并发**调用，
+        0.7.1：重写 / 扩展 / 分解三者互不依赖，改为**线程池并发**调用，
         单 Query 的预处理耗时从「三次串行」降到「一次最慢的那回」，这是能否在 10 秒内返回的关键。
         """
         original = (query or "").strip()

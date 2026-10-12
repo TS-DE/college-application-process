@@ -1,12 +1,12 @@
-"""v2.4.1 最小验证用例：检索前预处理 + 模块化多路召回。
+"""0.6.0 最小验证用例：检索前预处理 + 模块化多路召回。
 
 运行：
     cd backend
     python test_query_preprocess_recall.py
 
 对比：
-    v2.3.1：原始 Query 直接走单路混合检索
-    v2.4.1：QueryPreprocessor（重写/扩展/子查询）→ MultiRecall（dense + bm25 + hybrid 三通道）
+    0.4.1：原始 Query 直接走单路混合检索
+    0.6.0：QueryPreprocessor（重写/扩展/子查询）→ MultiRecall（dense + bm25 + hybrid 三通道）
 """
 import sys
 
@@ -94,7 +94,7 @@ def main() -> None:
 
     print()
     print("=" * 78)
-    print("【3】v2.3.1（单路）vs v2.4.1（预处理 + 多路召回）")
+    print("【3】0.4.1（单路）vs 0.6.0（预处理 + 多路召回）")
     print("=" * 78)
 
     def sides(hits):
@@ -102,17 +102,17 @@ def main() -> None:
         return sum(1 for k in ("23000", "位次", "独立学院") if k in text)
 
     old = rag_service.HybridRetrieval(col, k=60, top_k=3).search(COMPLEX_QUERY, 3)
-    print("  -- v2.3.1 单路混合检索 --")
+    print("  -- 0.4.1 单路混合检索 --")
     for i, h in enumerate(old, 1):
         print(f"    {i}. [RRF {h['rrf_score']:.5f}] {h['text'][:38]}...")
     new = rag_service.search(COMPLEX_QUERY, top_k=3)
-    print("  -- v2.4.1 预处理 + 多路召回 --")
+    print("  -- 0.6.0 预处理 + 多路召回 --")
     for i, h in enumerate(new, 1):
         print(f"    {i}. [{h.get('context_level')}] {h['text'][:38]}...")
 
     s_old, s_new = sides(old), sides(new)
-    print(f"\n  覆盖语义侧面数：v2.3.1 = {s_old}/3，v2.4.1 = {s_new}/3")
-    print(f"  [{'通过' if s_new >= s_old else '未通过'}] v2.4.1 覆盖不低于 v2.3.1")
+    print(f"\n  覆盖语义侧面数：0.4.1 = {s_old}/3，0.6.0 = {s_new}/3")
+    print(f"  [{'通过' if s_new >= s_old else '未通过'}] 0.6.0 覆盖不低于 0.4.1")
 
     print()
     print("=" * 78)

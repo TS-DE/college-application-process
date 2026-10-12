@@ -10,7 +10,7 @@
 - **RAG 负责政策类问答**：上传政策文档 → 递归切片 → 向量化 → 多路召回 → 精排 → 拼进 Prompt
 - **物理隔离维度**：所有查询必须带 `province + year + category + batch`
 
-> ℹ️ 本文所有「文件 → 函数 → 参数 → 下一个调用点」均按当前代码实写（v2.5.1），
+> ℹ️ 本文所有「文件 → 函数 → 参数 → 下一个调用点」均按当前代码实写（0.7.1），
 > 行号随版本迭代会漂移，函数名与参数名为准。
 
 ---
@@ -49,7 +49,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 |---|---|
 | `backend/.env`（由 `.env.example` 复制） | 数据库连接、<b>Ali_API_KEY</b>、ALI_BASE_URL、模型名、开关 |
 | `backend/app/config.py` | 所有配置项的**读取入口**与默认值（`_env()` + 极简 dotenv 加载） |
-| `backend/requirements.txt` | Python 依赖（v2.5.1 起：`openai>=1.0`，移除 `dashscope`） |
+| `backend/requirements.txt` | Python 依赖（0.7.1 起：`openai>=1.0`，移除 `dashscope`） |
 | `frontend/vite.config.ts` | 端口 5173、`/api` 代理、别名 `@` |
 | `frontend/tsconfig.json` | TS 编译选项、`paths` 别名 |
 | `frontend/.npmrc.local` | npm 代理走不通时用 `npm i --userconfig .npmrc.local` |
@@ -70,6 +70,9 @@ gaokao_project/
 ├── backend/                      <span style="color:#888">// FastAPI 服务：业务规则 + RAG + AI</span>
 ├── frontend/                     <span style="color:#888">// Vue3 + TS 单页应用</span>
 ├── gaokao_data/                  <span style="color:#888">// 原始录取数据（MySQL 建库用）</span>
+├── data/                         <span style="color:#888">// 0.8.0：RAG 量化评估数据与报告产出</span>
+│   ├── eval/                     <span style="color:#888">// 评估数据集：`question` + `ground_truth`（rag_demo_qa.json / gaokao_qa.json）</span>
+│   └── eval_reports/             <span style="color:#888">// 评估报告 JSON（*.md 为同名 Markdown 渲染件，均已 gitignore）</span>
 ├── CHANGELOG.md                  <span style="color:#888">// 版本迭代记录（每个版本的「原有缺陷 → 改进 → 验证」）</span>
 ├── README.md                     <span style="color:#888">// 本文</span>
 └── 导入数据集.py                  <span style="color:#888">// CSV → MySQL 一次性导入脚本</span>
@@ -92,14 +95,15 @@ backend/
 │   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   └── user.py               <span style="color:#888">// 登录注册入参、UserInfo</span>
 │   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
-│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答，v2.5.0 起返回 strategy/steps）、parse-intent、recommend-reason、status</span>
+│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答，0.7.0 起返回 strategy/steps）、parse-intent、recommend-reason、status</span>
 │   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
 │   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
 │   │   ├── recommend.py          <span style="color:#888">// /api/recommend（主链路）、/api/recommend/ai-reasons（批量理由）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── stats.py              <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
 │   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
-│   │   └── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
+│   │   ├── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
+│   │   └── eval.py               <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（均仅 admin）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── services/                 <span style="color:#888">// 业务与算法层（所有计算发生在这里）</span>
 │   │   ├── recommend_service.py  <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
@@ -111,6 +115,16 @@ backend/
 │   │   ├── reranker.py           <span style="color:#888">// 检索后：CrossEncoder / Embedding 余弦 / Noop 三种精排 + 失败降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── self_rag.py           <span style="color:#888">// Self-RAG：要不要检索 → 上下文有没有用 → 生成 → 自评不合格才反思</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   └── corrective_rag.py     <span style="color:#888">// Corrective RAG：相关性过滤 → 全部无关则重写 Query 再检索</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── eval/                 <span style="color:#888">// 0.8.0 RAG 量化评估（8 个类，按单一职责拆分）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
+│   │   │   ├── eval_config.py    <span style="color:#888">// RAGEvalConfig：评估配置（阈值 / top_k / 目录），支持前端覆盖</span>
+│   │   │   ├── data_builder.py   <span style="color:#888">// BaseRAGRunner(抽象) / ProjectRAGRunner / EvalDataBuilder：构建四字段数据集</span>
+│   │   │   ├── metrics_local.py  <span style="color:#888">// LocalMetrics：语义相似度 + context_precision/recall + MRR/NDCG/HitRate（免 LLM）</span>
+│   │   │   ├── metrics_llm.py    <span style="color:#888">// LLMMetrics：Faithfulness / Relevance / Correctness（默认关闭）</span>
+│   │   │   ├── evaluator.py      <span style="color:#888">// EvalReport / RAGEvaluator：编排 + 聚合（skipna）+ 评级</span>
+│   │   │   ├── diagnoser.py      <span style="color:#888">// DiagnosisItem / RAGDiagnoser：决策树 → 问题 + 建议 + 参数变更</span>
+│   │   │   ├── report_generator.py <span style="color:#888">// ReportGenerator：Markdown + ECharts 数据 + 落盘</span>
+│   │   │   ├── report_store.py   <span style="color:#888">// EvalReportStore：报告读写与倒序列举（趋势图）</span>
+│   │   │   └── auto_tuner.py     <span style="color:#888">// AutoTuner：白名单参数写回 .env + 备份 + 回滚 + changes.log</span>
 │   └── utils/
 │       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取、20MB 限制</span>
 │       └── security.py           <span style="color:#888">// bcrypt 哈希校验 + JWT 签发/解析</span>
@@ -124,12 +138,12 @@ backend/
 ├── requirements.txt              <span style="color:#888">// Python 依赖清单</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
 ├── smoke_test.py                 <span style="color:#888">// 14 个业务接口冒烟</span>
 ├── smoke_rag.py                  <span style="color:#888">// RAG 全链路冒烟：登录 → 上传 → 检索 → 问答 → 删除</span>
-├── test_llm_channel.py           <span style="color:#888">// v2.5.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
-├── test_advanced_rag.py          <span style="color:#888">// v2.5.0：精排 + 三条高级链路对比（强制本地兜底）</span>
-├── test_query_preprocess_recall.py <span style="color:#888">// v2.4.1：检索前预处理 + 多路召回</span>
-├── test_multi_query.py           <span style="color:#888">// v2.4.0：Query 分解 + 跨路 RRF</span>
-├── test_parent_child.py          <span style="color:#888">// v2.2.0：父子块检索</span>
-├── test_hybrid_search.py         <span style="color:#888">// v2.1.0：混合检索 + RRF 融合</span>
+├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
+├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
+├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
+├── test_multi_query.py           <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF</span>
+├── test_parent_child.py          <span style="color:#888">// 0.3.0：父子块检索</span>
+├── test_hybrid_search.py         <span style="color:#888">// 0.2.0：混合检索 + RRF 融合</span>
 └── test_anti_hallucination.py    <span style="color:#888">// v2.3.x：路由 + 防幻觉拒答</span>
 ```
 
@@ -146,7 +160,8 @@ frontend/
 │   │   ├── recommend.ts          <span style="color:#888">// recommend / scoreCheck / controlLines / listUniversities / listMajors / majorCountByProvince</span>
 │   │   ├── knowledge.ts          <span style="color:#888">// upload / list / detail / delete / search / ragStatus</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── ai.ts                 <span style="color:#888">// chat（timeout 120s）/ aiStatus / parseIntent</span>
-│   │   └── auth.ts               <span style="color:#888">// login / register / fetchMe</span>
+│   │   ├── auth.ts               <span style="color:#888">// login / register / fetchMe</span>
+│   │   └── eval.ts               <span style="color:#888">// 0.8.0：runEval / getReport / listReports / applySuggestion / listChanges / rollback / datasets</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── stores/
 │   │   ├── user.ts               <span style="color:#888">// token + user（派生 isLogin / role / isAdmin）</span>
 │   │   └── knowledge.ts          <span style="color:#888">// files / keyword / backend 状态与动作</span>
@@ -158,8 +173,9 @@ frontend/
 │   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格）</span>
 │   │   │   └── AiChat.vue        <span style="color:#888">// AI 问答（可开关知识库增强，展示 sources）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   └── admin/
-│   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）</span>
-│   │       └── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）+ RAG 量化评估入口</span>
+│   │       ├── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │       └── RAGEval.vue       <span style="color:#888">// 0.8.0：一键评估 + 指标卡片 + 柱状/雷达/趋势图 + 诊断 + 一键应用建议 + 变更日志</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── components/
 │   │   ├── Navbar.vue            <span style="color:#888">// 顶部导航 + 登录态 + 退出</span>
 │   │   ├── UploadModal.vue       <span style="color:#888">// el-upload 直传 /api/knowledge/upload（自带 Bearer）</span>
@@ -519,7 +535,54 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 | `reranker.py` | `rag_service.rerank()` | `rag_service.get_embedding()` |
 | `self_rag.py` | `rag_service.answer_with_strategy()` | `llm_client` + 注入进来的 `retriever/generator`（= `rag_service.search/generate_answer`） |
 | `corrective_rag.py` | `rag_service.answer_with_strategy()` | 同上 |
-| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` |
+| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` |
+
+### 4.4 主链三：RAG 量化评估（0.8.0）
+
+入口：`admin/RAGEval.vue` 点击「一键运行评估」→ `api/eval.ts:runEval()` → `POST /api/eval/run`
+
+```mermaid
+graph TD
+    A["admin/RAGEval.vue<br/>选择数据集 + 配置覆盖"] -->|"POST /api/eval/run<br/>{dataset_id, config_overrides}"| B["routers/eval.py:run_eval()<br/>get_current_admin 鉴权"]
+    B --> C["eval/<b>EvalDataBuilder.load_qa_pairs()</b><br/>读 data/eval/*.json|csv"]
+    C --> D["<b>ProjectRAGRunner.retrieve()</b><br/>rag_service.search(top_k=TOP_K_FOR_EVAL)"]
+    D --> E["<b>ProjectRAGRunner.generate()</b><br/>rag_service.generate_answer()"]
+    E --> F["数据集四字段齐备<br/>question / answer / contexts / ground_truth"]
+    F --> G["<b>RAGEvaluator.run()</b>"]
+
+    G --> G1["LocalMetrics<br/>semantic_similarity / precision / recall<br/>MRR / NDCG / HitRate"]
+    G --> G2["LLMMetrics（默认关闭）<br/>Faithfulness / Relevance / Correctness"]
+    G1 --> H["_aggregate() 求均值（skipna）→ _grade() 评级"]
+    G2 --> H
+
+    H --> I["<b>RAGDiagnoser.diagnose()</b><br/>决策树规则 → DiagnosisItem<br/>（问题 + 建议 + param_changes）"]
+    H --> J["<b>ReportGenerator</b><br/>Markdown + ECharts(bar/radar/trend) + 落盘"]
+    J --> K[("data/eval_reports/{report_id}.json|.md")]
+    K --> L["EvalReportStore.latest_summary()<br/>历史趋势"]
+    L --> M["返回前端：aggregate / grade / details<br/>/ chart_data / diagnoses"]
+
+    M --> N{"管理员点「一键应用」"}
+    N -->|"POST /api/eval/apply-suggestion"| O["<b>AutoTuner.plan()</b> → 按白名单解析<br/>decrease/increase → 具体数值"]
+    O --> P["备份 .env → .env.bak.{ts}"]
+    P --> Q["写回白名单参数 + 追加 changes.log"]
+    Q --> R["返回 need_restart=true"]
+    N -->|"POST /api/eval/rollback"| S["AutoTuner.rollback()<br/>还原最近备份"]
+
+    style G fill:#f3e5f5,stroke:#9c27b0
+    style I fill:#f3e5f5,stroke:#9c27b0
+    style O fill:#f3e5f5,stroke:#9c27b0
+```
+
+关键数据流（三级闭环）：
+
+| 阶段 | 产物 | 落点 |
+|---|---|---|
+| ① 评估 | 九项指标 + 综合评级 | `EvalReport.aggregate` / `grade` |
+| ② 诊断 | 问题 + 建议 + 参数变更草案 | `DiagnosisItem[]`（随报告持久化） |
+| ③ 调优 | 白名单参数实际写回 | `backend/.env` + `services/eval/changes.log` |
+
+> 设计要点：评估器通过 `BaseRAGRunner` 抽象依赖 RAG 系统（依赖倒置），
+> 因此用 Mock 跑测试、或将来替换检索引擎，都不需要改评估代码。
 
 ---
 
@@ -577,7 +640,7 @@ cd backend
 python -m venv .venv && .venv\Scripts\activate     # 可选
 pip install -r requirements.txt                     # 含 openai>=1.0
 
-# 1) 配置 LLM / Embedding 通道（v2.5.1）
+# 1) 配置 LLM / Embedding 通道（0.7.1）
 copy .env.example .env
 ```
 
@@ -637,7 +700,7 @@ npm run build                     # 产物 dist/，生产模式下由 FastAPI �
 
 ```bash
 cd backend
-python test_llm_channel.py   # v2.5.1：通道自检 + 端到端 10 秒验证（推荐首先跑）
+python test_llm_channel.py   # 0.7.1：通道自检 + 端到端 10 秒验证（推荐首先跑）
 python smoke_test.py         # 14 个业务接口
 python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → 删除
 ```
@@ -648,8 +711,8 @@ python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → �
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| **AI 问答全部超时 / 等半天才返回** | v2.5.0 用的是通用域名 `dashscope.aliyuncs.com` + 裸 HTTP，限时模型不在该域名上，每次都要等满超时才降级 | v2.5.1 已修正：统一用 `openai.OpenAI` + `ALI_BASE_URL`（工作空间专属域名）。排查：`GET /api/health` 看 `llm_provider` 是否为 `ali(openai-compatible)`；再看 `.env` 的 `ALI_BASE_URL` 与 Key 变量名是否写成 `Ali_API_KEY` |
-| **首页地图/登录提示 `timeout of 60000ms exceeded`，登录按钮一直转圈** | v2.5.1 把 AI 通道收敛后，启动阶段/健康检查仍同步探测 Ollama，前端 axios 默认超时 60s 又把所有接口一视同仁；AI 通道一旦阻塞，登录和首页统计也被拖住 | v2.5.2 已修正：① `main.py` startup 改为后台任务；② `/api/health` 限时 2s 缓存；③ AI 路由全部 `async` + 线程池；④ 前端默认超时降到 10s，AI 接口单独使用 120s。排查：刷新首页后 F12 看 `/api/health` 是否 <500ms；登录接口是否 <5s |
+| **AI 问答全部超时 / 等半天才返回** | 0.7.0 用的是通用域名 `dashscope.aliyuncs.com` + 裸 HTTP，限时模型不在该域名上，每次都要等满超时才降级 | 0.7.1 已修正：统一用 `openai.OpenAI` + `ALI_BASE_URL`（工作空间专属域名）。排查：`GET /api/health` 看 `llm_provider` 是否为 `ali(openai-compatible)`；再看 `.env` 的 `ALI_BASE_URL` 与 Key 变量名是否写成 `Ali_API_KEY` |
+| **首页地图/登录提示 `timeout of 60000ms exceeded`，登录按钮一直转圈** | 0.7.1 把 AI 通道收敛后，启动阶段/健康检查仍同步探测 Ollama，前端 axios 默认超时 60s 又把所有接口一视同仁；AI 通道一旦阻塞，登录和首页统计也被拖住 | 0.7.2 已修正：① `main.py` startup 改为后台任务；② `/api/health` 限时 2s 缓存；③ AI 路由全部 `async` + 线程池；④ 前端默认超时降到 10s，AI 接口单独使用 120s。排查：刷新首页后 F12 看 `/api/health` 是否 <500ms；登录接口是否 <5s |
 | Key 配了但读不到 | 系统环境变量是在**服务进程启动之后**配置的，`os.getenv` 读不到 | 代码已兜底读 Windows 注册表（`llm_client.get_api_key()`）；或重启终端/服务 |
 | 回答很慢（>10s） | 检索前预处理、多路召回、相关性判断各自一次网络往返 | 已做：关思考（9.7s→2.6s）、ThreadPool 并发、embedding 批量 + 缓存、短问句跳过预处理。仍慢可设 `ALI_ENABLE_THINKING=0`、`QUERY_PREPROCESS_MIN_LEN` 调大、`ADVANCED_RAG_STRATEGY=standard` |
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
@@ -666,15 +729,15 @@ python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → �
 
 | 版本 | 分块策略 | 检索策略 | 交给 LLM 的上下文 | 关键改进一句话 |
 |---|---|---|---|---|
-| v2.0.0 | 定长 500/50 | 纯稠密 Top-K | 500 字块（可能切断） | Naive RAG 基线 |
-| v2.1.0 | 递归分块 500/50 | 稠密 + 稀疏 → **RRF(k=60)** | 语义完整的 500 字 | 混合检索，召回率上来 |
-| v2.2.0 | **父子块**（父 500 / 子 120） | 只索引子块，命中后回填父块 | 父块 | 检索粒度与上下文粒度解耦 |
-| v2.3.0 | 父子块 | + Query 路由 + 防幻觉 Prompt | 父块（路由筛选） | 无关问题不再浪费检索 |
-| v2.3.1 | 父子块 | 放宽路由 + 修正误拒答 | 父块 | 热修复：该答的答得出来 |
-| v2.4.0 | 父子块 | **多路召回**：Query 分解 → 跨路 RRF 累加 | 父块（多路融合） | 复合问题不再只召回一面 |
-| v2.4.1 | 父子块 | 检索前预处理 + 模块化三通道 | 父块 | 检索前/中拆成两个可复用模块 |
-| v2.5.0 | 父子块 | + **Rerank 精排落地** + Self-RAG / Corrective RAG | 父块（精排后） | 检索之后还能「再排一次」「自我反思」「纠偏重试」 |
-| **v2.5.1** | 父子块（不变） | 同 v2.5.0，**LLM/Embedding 通道修正 + 提速 34 倍** | 父块（不变） | Ali OpenAI 兼容通道正确落地，问答从 198s → 5.7s |
+| 0.1.0 | 定长 500/50 | 纯稠密 Top-K | 500 字块（可能切断） | Naive RAG 基线 |
+| 0.2.0 | 递归分块 500/50 | 稠密 + 稀疏 → **RRF(k=60)** | 语义完整的 500 字 | 混合检索，召回率上来 |
+| 0.3.0 | **父子块**（父 500 / 子 120） | 只索引子块，命中后回填父块 | 父块 | 检索粒度与上下文粒度解耦 |
+| 0.4.0 | 父子块 | + Query 路由 + 防幻觉 Prompt | 父块（路由筛选） | 无关问题不再浪费检索 |
+| 0.4.1 | 父子块 | 放宽路由 + 修正误拒答 | 父块 | 热修复：该答的答得出来 |
+| 0.5.0 | 父子块 | **多路召回**：Query 分解 → 跨路 RRF 累加 | 父块（多路融合） | 复合问题不再只召回一面 |
+| 0.6.0 | 父子块 | 检索前预处理 + 模块化三通道 | 父块 | 检索前/中拆成两个可复用模块 |
+| 0.7.0 | 父子块 | + **Rerank 精排落地** + Self-RAG / Corrective RAG | 父块（精排后） | 检索之后还能「再排一次」「自我反思」「纠偏重试」 |
+| **0.7.1** | 父子块（不变） | 同 0.7.0，**LLM/Embedding 通道修正 + 提速 34 倍** | 父块（不变） | Ali OpenAI 兼容通道正确落地，问答从 198s → 5.7s |
 
 > 每个版本的「原有技术缺陷 → 改进技术与代码位置 → 降级策略 → 验证流程」详见 [CHANGELOG.md](./CHANGELOG.md)。
 
