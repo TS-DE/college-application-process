@@ -27,7 +27,7 @@
 | v2.5.1 | **0.7.1** | 热修复（LLM 通道 + README） |
 | v2.5.2 | **0.7.2** | 热修复（前端超时 + 登录阻塞） |
 | v3.0.0（本次） | **0.8.0** | RAG 量化评估模块 |
-| v2.6.0（路线图） | **0.9.0** | 并行召回 + CrossEncoder + Text-to-SQL（计划） |
+| v2.6.0（路线图） | **0.9.0** | ~~并行召回 + CrossEncoder + Text-to-SQL~~ → 实际落地为**知识图谱双通道** |
 
 > 替换范围：`CHANGELOG.md` / `README.md` / 项目文档（简历、面经、行动方案）/ 全部 Python 与 TS 代码注释
 > / `backend/.env` 与 `.env.example` 注释。依赖清单（`frontend/package.json` 的 `^2.3.2` 等 npm 包版本）
@@ -52,8 +52,205 @@
 | **0.7.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 已发布 |
 | **0.7.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.7.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
-| **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次发布 |
-| **0.9.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+| **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
+| **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 本次发布 |
+| **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.9.0] - 2026-10-12 · 知识图谱双通道：GraphQueryEngine + 向量检索按优先级 + Token 配额融合
+
+### 一、原有技术（0.8.0）及缺陷
+
+| 缺陷 | 具体表现 |
+|---|---|
+| 只有向量通道 | 「XX 学校 XX 专业学费多少」这类结构化事实查询，向量库召回不到就答"未查询到" |
+| 相似度 ≠ 正确性 | 向量检索返回的是**语义相似**的文本片段，对数字、关系（院校-专业-省份）的精确性没有任何保证 |
+| 缺结构化事实来源 | 院校 / 专业 / 专业组 / 选科要求 / 投档线这些关系型数据全在 MySQL 里，向量库只存了切片文本 |
+| 无融合机制 | 即便接了图谱，也没有"结构化事实 vs 语义文本"该怎么一起喂给 LLM 的明确策略 |
+
+**实测对照**（同一问题「福州大学至诚学院计算机专业学费多少」）：
+
+| 链路 | 回答 |
+|---|---|
+| 0.8.0 纯向量 RAG | "根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。" |
+| 0.9.0 图谱 + 向量融合 | "根据【图谱事实】中的权威精确数据，福州大学至诚学院计算机科学与技术专业的学费为 **23000 元**。" |
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新增 `services/graph/` 模块（7 个文件，单一职责）
+
+| 文件 | 类 | 职责 |
+|---|---|---|
+| `ontology.py` | — | 本体常量：8 类节点标签 / 8 类关系 / 属性键，中文标签的 Cypher 转义只此一处处理 |
+| `graph_store.py` | `GraphStore` | **只**负责 Neo4j 连接 + 执行 Cypher + 读 Schema；连接失败抛 `GraphConnectionError` |
+| `entity_extractor.py` | `EntityExtractor` | **只**负责实体识别：LLM 抽取 + 词典匹配双路混合，词典路优先；含简称→全称消歧 |
+| `cypher_generator.py` | `CypherGenerator` | **只**负责把「实体 + 问题」编译成 Cypher；Schema 动态注入 + 4 条高考 Few-shot + 只读保护 |
+| `graph_query_engine.py` | `GraphQueryEngine` | 图谱通道唯一入口，**合成复用**上面三个类；任一步失败返回 `GraphResult(hit=False)` 不抛异常 |
+| `graph_builder.py` | `GraphBuilder` | 离线构建：MySQL → Neo4j，全部 `MERGE` 保证幂等 |
+| `__init__.py` | — | 统一导出；`GraphBuilder` 用 `__getattr__` 懒加载（在线链路用不到） |
+
+图谱本体：
+
+```
+节点：院校 / 专业 / 专业组 / 省份 / 批次 / 选科要求 / 分数段 / 年份
+关系：
+  (院校)-[:OPENS]->(专业)        院校开设专业（携带 year/province/batch/category/min_score/min_rank）
+  (院校)-[:TUITION]->(专业)      学费（携带 tuition/duration）
+  (院校)-[:ENROLLS]->(专业)      招生计划（携带 plan_count/subject_req）
+  (院校)-[:RANKS]->(分数段)      院校投档线
+  (专业)-[:ADMITS]->(分数段)     专业投档线
+  (院校)-[:LOCATED_IN]->(省份)
+  (专业)-[:BELONGS_TO]->(专业组)
+  (专业组)-[:REQUIRES]->(选科要求)
+```
+
+#### 2. 实体识别双路混合（Hybrid）
+
+```
+LLM 路   ：qwen3.7-flash，temperature=0，严格 JSON 输出 (实体类型, 实体名)
+词典路   ：MySQL 的 university_name / major_name / school_province 列生成词典，字符串匹配
+合并去重 ：词典路结果优先（来自权威数据源）
+消歧     ：简称 → 词典全称（"计算机" → "计算机科学与技术"），否则 Cypher 查不到节点
+降级     ：LLM 路失败 → 只用词典路；词典路为空 → 只用 LLM 路；两路都空 → 返回 []
+```
+
+#### 3. `rag_service.search_with_graph()`：融合层（中枢神经）
+
+**为什么不做分数融合（RRF 不适用）**：图谱结果是**对/错的精确事实**（学费 23000、最低分 512），
+向量结果是**相似度文本**（"该校学费适中，性价比高"），二者量纲不可比，
+把 0.91 的向量相似度和一条 100% 正确的图谱事实一起排序没有意义。因此用两级策略：
+
+```
+Level 1 优先级：图谱上下文排在前面，Prompt 明确「图谱为权威事实，冲突时以图谱为准」
+Level 2 配额  ：总预算 4000 token，图谱最多 60%（2400 token ≈ 3600 字符），
+               向量最多 40%（1600 token ≈ 2400 字符）；
+               某一路没用满时，剩余额度让给另一路
+第一版刻意不做 Level 3 串行筛选（会把两路从并行变串行，延迟翻倍）→ 留到 1.0.0
+```
+
+并行调度用 `ThreadPoolExecutor` 而非 `asyncio.gather`：两条链路内部都是同步阻塞调用
+（Neo4j bolt / Chroma / HTTP），无 GPU 的 i5 机器上线程池更稳。
+
+#### 4. 配置项（`config.py` 新增）
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | `bolt://localhost:7687` / `neo4j` / `12345678` | Neo4j 连接 |
+| `GRAPH_ENABLED` | `1` | 图谱通道总开关，关闭后走纯向量链路 |
+| `GRAPH_MAX_TOKENS` | `2400` | 图谱配额（总预算的 60%） |
+| `VECTOR_MAX_TOKENS` | `1600` | 向量配额（总预算的 40%） |
+| `GRAPH_LLM_EXTRACT_ENABLED` | `1` | LLM 抽取路开关 |
+| `GRAPH_DICT_EXTRACT_ENABLED` | `1` | 词典匹配路开关 |
+
+#### 5. `routers/ai.py` 的 `/api/ai/chat` 新增 `use_graph`
+
+- `use_graph=true`（默认）且 `GRAPH_ENABLED=1` → 走 `answer_with_graph()`，
+  响应新增 `graph_hit` / `vector_hit` / `fusion_strategy` / `graph_cypher` / `graph_error`
+- `use_graph=false` → **保持 0.8.0 行为完全不变**（向后兼容）
+- 图谱链路异常 → 自动回落到下面的纯向量流程
+
+### 三、验证流程
+
+#### 1. 离线构建（year=2025）
+
+```bash
+cd backend
+# 注意：图谱通道需要 py2neo，本地跑在 conda py312_env（已装 py2neo 2021.2.4）
+python -m app.services.graph.graph_builder --year 2025 --batch 本科批
+```
+
+实测输出：
+
+```
+[GRAPH] 构建完成：{'school': 624, 'major': 8204, 'major_group': 15212, 'province': 31,
+'batch': 6, 'subject_req': 10, 'score_segment': 11, 'opens': 13885, 'tuition': 33247,
+'enrolls': 33247, 'ranks': 1562, 'admits': 13885, 'located_in': 624,
+'belongs_to': 15426, 'requires': 8719}
+```
+
+所有写入用 `MERGE`，重复运行不会产生重复节点 / 关系。
+
+#### 2. `GraphQueryEngine` 单测：查询「福州大学至诚学院计算机专业学费多少」
+
+```bash
+python test_graph_rag.py --real
+```
+
+实测输出：
+
+```
+词典规模：院校 624 / 专业 1020
+耗时 7.90s hit=True
+实体：[{'type': '院校', 'name': '福州大学至诚学院'}, {'type': '专业', 'name': '计算机科学与技术'}]
+Cypher：
+MATCH (s:`院校` {name: $院校_0})-[r:TUITION]->(m:`专业` {name: $专业_0})
+RETURN s.name AS 院校, m.name AS 专业, r.tuition AS 学费, r.duration AS 学制
+LIMIT 20
+上下文：
+院校: 福州大学至诚学院；专业: 计算机科学与技术；学费: 23000；学制: 4年
+```
+
+> LLM 抽出的是简称「计算机」，经词典消歧归一到「计算机科学与技术」后才匹配上节点。
+
+#### 3. 双通道融合对比：`use_graph=false` vs `use_graph=true`
+
+```bash
+python test_graph_rag.py --compare
+```
+
+实测输出：
+
+```
+--- use_graph=false（纯向量 RAG）---
+耗时 4.60s
+回答：根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。
+--- use_graph=true（图谱 + 向量融合）---
+耗时 5.14s
+graph_hit=True vector_hit=True strategy=priority_quota
+回答：根据现有资料，福州大学至诚学院计算机科学与技术专业的学费为 **23000元/年**。
+```
+
+接口层验证（`POST /api/ai/chat`）：
+
+```json
+// {"question": "...", "use_rag": true, "use_graph": true}
+{
+  "answer": "根据【图谱事实】中的权威精确数据，福州大学至诚学院计算机科学与技术专业的学费为 **23000元**。",
+  "source": "graph+vector",
+  "graph_hit": true,
+  "vector_hit": true,
+  "fusion_strategy": "priority_quota",
+  "graph_cypher": "MATCH (s:`院校` {name: $院校_0})-[r:TUITION]->(m:`专业` {name: $专业_0}) ..."
+}
+```
+
+降级验证（py2neo 未安装的服务进程）：`graph_error` 返回
+`"py2neo 未安装（ModuleNotFoundError）：请执行 pip install py2neo"`，
+`graph_hit=false`、`vector_hit=true`，问答自动退化为纯向量 RAG，**不报错、不中断**。
+
+#### 4. 回归验证
+
+```bash
+cd backend
+python test_graph_rag.py        # 桩版 6 个用例全部通过（不连 Neo4j / 不调 LLM）
+python smoke_test.py            # 业务接口全部 200
+python smoke_rag.py             # chat: source=graph+vector，RAG SMOKE DONE
+cd ../frontend && npx tsc --noEmit
+```
+
+> 桩版之所以能不连 Neo4j 跑通，是因为 `GraphStore` / `EntityExtractor` / `CypherGenerator`
+> 全部是构造注入（依赖倒置），测试时换成桩对象即可。
+
+### 四、后续演进方向（1.0.0）
+
+| 方向 | 说明 |
+|---|---|
+| Level 3 串行筛选 | 图谱不完整时才查向量，把两路从并行变串行以进一步降噪（需权衡延迟） |
+| 图谱 Schema 自动扩展 | 从 MySQL 元数据自动推断新节点 / 关系，不必手写 `GraphBuilder` |
+| 图谱命中率纳入评估 | 在 0.8.0 的评估体系里增加 `graph_hit_rate` 指标，量化图谱通道贡献 |
+| 图谱结果重排序 | 对图谱返回的多条记录做二次排序（如按年份就近） |
+| 实体链接增强 | 引入别名表 / 拼音匹配，处理「郑大」「华科」这类简称 |
 
 ---
 
@@ -229,7 +426,7 @@ cd ../frontend && npx tsc --noEmit   # 前端类型检查通过
 
 ---
 
-### 四、后续演进方向（0.9.0）
+### 四、后续演进方向（1.0.0）
 
 | 方向 | 说明 |
 |---|---|

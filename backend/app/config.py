@@ -168,6 +168,21 @@ class Settings:
         "ADVANCED_RAG_ENABLED,PROMPT_VERSION",
     )
 
+    # ---------------- 0.9.0 知识图谱双通道（向量 + 图谱融合） ----------------
+    # Neo4j 连接信息（本地开发默认值，生产环境务必走 .env 覆盖）
+    NEO4J_URI: str = _env("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER: str = _env("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = _env("NEO4J_PASSWORD", "12345678")
+    # 图谱通道总开关：关闭后 /api/ai/chat 走纯向量链路（向后兼容）
+    GRAPH_ENABLED: bool = _env("GRAPH_ENABLED", "1") not in {"0", "false", "False"}
+    # 融合层 Token 配额：总预算 4000，图谱 60% / 向量 40%
+    # 注：1 token ≈ 1.5 个中文字符，故 2400 token ≈ 3600 字符
+    GRAPH_MAX_TOKENS: int = int(_env("GRAPH_MAX_TOKENS", "2400"))
+    VECTOR_MAX_TOKENS: int = int(_env("VECTOR_MAX_TOKENS", "1600"))
+    # 实体识别双路开关：LLM 抽取路 / 词典匹配路（两路都关则图谱通道直接不可用）
+    GRAPH_LLM_EXTRACT_ENABLED: bool = _env("GRAPH_LLM_EXTRACT_ENABLED", "1") not in {"0", "false", "False"}
+    GRAPH_DICT_EXTRACT_ENABLED: bool = _env("GRAPH_DICT_EXTRACT_ENABLED", "1") not in {"0", "false", "False"}
+
     @property
     def DATABASE_URL(self) -> str:
         pwd = quote_plus(self.DB_PASSWORD)
