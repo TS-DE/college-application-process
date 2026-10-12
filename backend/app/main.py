@@ -15,12 +15,12 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import settings
 from app.database import TableNotFound, ensure_indexes
-from app.routers import ai, auth, knowledge, meta, recommend, stats, student, university
+from app.routers import ai, auth, eval as eval_router, knowledge, meta, recommend, stats, student, university
 
 app = FastAPI(
     title="高考志愿填报系统",
     description="河南 2024-2025 录取数据冲稳保推荐 + RAG 知识库（Ollama / Chroma）",
-    version="2.0.0",
+    version="0.1.0",
 )
 
 app.add_middleware(
@@ -42,6 +42,8 @@ app.include_router(stats.router)
 # 鉴权与知识库（RAG）
 app.include_router(auth.router)
 app.include_router(knowledge.router)
+# RAG 量化评估（0.8.0）
+app.include_router(eval_router.router)
 
 
 # 健康检查缓存：避免每次 /api/health 都探测 Ollama / Chroma，防止 AI 通道拖慢非 AI 接口
@@ -78,7 +80,7 @@ async def _background_rag_info() -> None:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # v2.5.2：启动阶段严禁同步调用 AI / Embedding / Ollama 探测，防止前端首个请求被阻塞
+    # 0.7.2：启动阶段严禁同步调用 AI / Embedding / Ollama 探测，防止前端首个请求被阻塞
     asyncio.create_task(_background_indexes())
     asyncio.create_task(_background_rag_info())
 

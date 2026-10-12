@@ -1,35 +1,258 @@
 # 更新日志（CHANGELOG）
 
+## 版本号命名规范修正说明（SemVer）
+
+> **为什么要改**：本项目此前使用 `v2.x.x` / `v3.0.0` 的版本号，**不符合 SemVer 语义化版本规范**：
+>
+> 1. 版本号前带了 `v` 前缀（规范明确禁止，Git tag 可保留，但文档里不应出现）；
+> 2. 项目尚处内部开发 / 培训阶段，**没有形成稳定的公共 API**，不应出现 ≥1.0.0 的主版本号；
+> 3. 主版本号从 2 起步，隐含"已界定公共 API"的语义，与实际情况不符。
+>
+> **修正原则**：主版本号从 0 开始（`0.x.x` 表示内部开发阶段），第一个可用版本从 `0.1.0` 起；
+> 新增功能（向前兼容）递增**次版本号 minor**，仅修 bug 递增**修订号 patch**；
+> 文档中的版本号本体**不带 `v` 前缀**，Git tag 保留 `v` 前缀（如 `git tag v0.8.0`）。
+
+### 新旧版本映射表
+
+| 旧版本号 | 新版本号 | 类型 |
+|---|---|---|
+| v2.0.0 | **0.1.0** | Naive RAG 基线（补写） |
+| v2.1.0 | **0.2.0** | 递归分块 + 混合检索 |
+| v2.2.0 | **0.3.0** | 父子块 |
+| v2.3.0 | **0.4.0** | Query 路由 + 防幻觉 Prompt |
+| v2.3.1 | **0.4.1** | 热修复（放宽路由 + 修正拒答） |
+| v2.4.0 | **0.5.0** | 多路召回 |
+| v2.4.1 | **0.6.0** | 检索前预处理 + 模块化多路召回 |
+| v2.5.0 | **0.7.0** | Rerank 精排 + 高级 RAG |
+| v2.5.1 | **0.7.1** | 热修复（LLM 通道 + README） |
+| v2.5.2 | **0.7.2** | 热修复（前端超时 + 登录阻塞） |
+| v3.0.0（本次） | **0.8.0** | RAG 量化评估模块 |
+| v2.6.0（路线图） | **0.9.0** | 并行召回 + CrossEncoder + Text-to-SQL（计划） |
+
+> 替换范围：`CHANGELOG.md` / `README.md` / 项目文档（简历、面经、行动方案）/ 全部 Python 与 TS 代码注释
+> / `backend/.env` 与 `.env.example` 注释。依赖清单（`frontend/package.json` 的 `^2.3.2` 等 npm 包版本）
+> **不在**替换范围内，避免误伤第三方依赖版本。
+>
+> **声明：从 0.8.0 起严格执行 SemVer**（MAJOR.MINOR.PATCH，仅在 patch 变更时递增修订号；
+> 形成公共 API 前主版本号保持为 0）。
+
+---
+
 ## 版本对照表
 
 | 版本 | 日期 | 分块策略 | 检索策略 | 交给 LLM 的上下文 | 状态 |
 |---|---|---|---|---|---|
-| **v2.0.0** | 2026-10-05 | 定长分块（500 字硬切，重叠 50） | 纯稠密向量检索（Chroma Top-K） | 500 字块（可能被切断） | ✅ Naive RAG 基线（补写） |
-| **v2.1.0** | 2026-10-06 | **递归分块** `RecursiveCharacterTextSplitter`（500 / 50） | **混合检索**：稠密 + 稀疏 → **RRF 融合 k=60** | 500 字块（语义完整） | ✅ Advanced RAG |
-| **v2.2.0** | 2026-10-07 | **父子块**：父块 500 字；子块 120 字（重叠 20） | 混合检索，**只索引子块**；子块命中 → 回填父块 | **父块**（500 字） | ✅ 已发布 |
-| **v2.3.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 已发布 |
-| **v2.3.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
-| **v2.4.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
-| **v2.4.1** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回） | ✅ 已发布 |
-| **v2.5.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 已发布 |
-| **v2.5.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
-| **v2.5.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次热修复 |
-| **v2.6.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
+| **0.1.0** | 2026-10-05 | 定长分块（500 字硬切，重叠 50） | 纯稠密向量检索（Chroma Top-K） | 500 字块（可能被切断） | ✅ Naive RAG 基线（补写） |
+| **0.2.0** | 2026-10-06 | **递归分块** `RecursiveCharacterTextSplitter`（500 / 50） | **混合检索**：稠密 + 稀疏 → **RRF 融合 k=60** | 500 字块（语义完整） | ✅ Advanced RAG |
+| **0.3.0** | 2026-10-07 | **父子块**：父块 500 字；子块 120 字（重叠 20） | 混合检索，**只索引子块**；子块命中 → 回填父块 | **父块**（500 字） | ✅ 已发布 |
+| **0.4.0** | 2026-10-08 | 父子块（不变） | 混合检索 + **Query 路由 + 防幻觉 Prompt** | 父块（经路由筛选） | ✅ 已发布 |
+| **0.4.1** | 2026-10-08 | 父子块（不变） | 混合检索 + **放宽路由 + 修正防幻觉拒答** | 父块（经路由筛选） | ✅ 已发布（热修复） |
+| **0.5.0** | 2026-10-08 | 父子块（不变） | **多路召回**：Query 分解 → 每条子查询混合检索 → 跨路 RRF 累加 → Rerank 精排 | 父块（经多路召回 + 精排） | ✅ 已发布 |
+| **0.6.0** | 2026-10-08 | 父子块（不变） | **检索前预处理**（重写/扩展/子查询）+ **模块化多路召回**（dense/bm25/hybrid 三通道） | 父块（经多路召回） | ✅ 已发布 |
+| **0.7.0** | 2026-10-08 | 父子块（不变） | 检索前 + 多路召回 + **Rerank 精排落地** + **Modular RAG（Self-RAG / Corrective RAG）** | 父块（经精排 + 反思/纠偏筛选） | ✅ 已发布 |
+| **0.7.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
+| **0.7.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
+| **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 本次发布 |
+| **0.9.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL | 父块（经重排筛选） | 🔜 计划 |
 
 ---
 
-## [2.5.2] - 2026-10-09 · 热修复：前端加载超时 + 登录无限 loading
+## [0.8.0] - 2026-10-12 · RAG 量化评估：一键评估 + 可视化 + 自动诊断 + 参数自调优
 
-> 主题：v2.5.1 切换 Ali OpenAI 兼容通道后，AI 调用耗时仍可能达到数秒；
+> 主题：按《企业级 RAG 落地优化与量化评估实战》第二至八章的方法论，
+> 把之前"靠手感调 RAG"的方式升级为 **评估先行 → 诊断驱动 → 数据闭环**：
+> 一键跑出三维九项本地指标，自动给出诊断与优化建议，并支持把建议**一键写回白名单参数**。
+
+---
+
+### 一、原有技术（0.7.2）及缺陷
+
+| 环节 | 0.7.2 的技术 | 存在的缺陷 |
+|---|---|---|
+| 效果判断 | 人工问几个问题，凭感觉判断"还行不行" | ① 缺少量化标准，**改 A 坏 B 无法察觉**；② 无法定位瓶颈在切片、召回还是生成 |
+| 优化方式 | 改完参数再手动重问 | ① 每次优化无法量化收益；② 没有基准线，不知道"变好了还是变差了" |
+| 历史记录 | 无 | ① 没有趋势数据，无法判断长期优化是否生效；② 演示 / 答辩拿不出数据佐证 |
+| 参数调整 | 人工改 `.env` | ① 容易误改非相关配置；② 改完想回退只能靠记忆 |
+| LLM 打分指标 | 直接调 LLM 打分 | ① 额度耗尽 / API 报错会直接把评估链路打断；② 思考版模型会成倍放大时延 |
+
+---
+
+### 二、改进技术及对应代码位置
+
+#### 1. `backend/app/services/eval/` 评估模块（8 个文件，单一职责）
+
+| 文件 | 类 | 职责 |
+|---|---|---|
+| `eval_config.py` | `RAGEvalConfig` | 评估配置：默认值来自 `settings`，支持前端传参覆盖（`SIM_THRESHOLD=0.65` / `TOP_K_FOR_EVAL` / `EVAL_DATA_DIR` …） |
+| `data_builder.py` | `BaseRAGRunner`（抽象）/ `ProjectRAGRunner`（适配）/ `EvalDataBuilder` | 加载 QA 语料 → 调 RAG 生成 answer + contexts → 补齐 **question / answer / contexts / ground_truth** 四字段 |
+| `metrics_local.py` | `LocalMetrics` | 纯本地指标：语义相似度、`context_precision`、`context_recall`、MRR、NDCG、HitRate |
+| `metrics_llm.py` | `LLMMetrics` | 可选 LLM 打分：Faithfulness / Answer Relevance / Answer Correctness，**默认关闭** |
+| `evaluator.py` | `EvalReport` / `RAGEvaluator` | 编排评估、按指标聚合（`skipna`）、综合评级（优秀/良好/合格/需优化） |
+| `diagnoser.py` | `DiagnosisItem` / `RAGDiagnoser` | 决策树规则：指标 → 问题 → 建议 → **可自动应用的参数变更** |
+| `report_generator.py` | `ReportGenerator` | Markdown 报告 + ECharts 数据（柱状/雷达/趋势）+ 落盘 JSON/MD |
+| `report_store.py` | `EvalReportStore` | 报告读写与按时间倒序列举（趋势图数据源） |
+
+关键实现（本地指标，**不调用 LLM 打分**，规避 API 报错）：
+
+```python
+def calc_context_precision(self, retrieved_contexts, ground_truth, threshold=None):
+    """召回片段中「与标准答案相关」的比例 → 越高说明噪声越少"""
+    # 每个召回片段与任一标准答案句做余弦相似度，>= 阈值即视为相关
+
+def calc_context_recall(self, retrieved_contexts, ground_truth, threshold=None):
+    """标准答案中被召回片段覆盖的比例 → 越高说明漏召回越少"""
+```
+
+诊断决策树（`diagnoser.py` 内置规则表严格对应《实战》第四章 3.2）：
+
+| 指标 | 阈值 | 自动给出的参数变更（白名单内） |
+|---|---|---|
+| `context_precision` < 0.6 | 0.6 | `CHUNK_SIZE` ↓、`RERANK_ENABLED=1`、`MULTI_RECALL_TOPK_PER_CHANNEL` ↓ |
+| `context_recall` < 0.7 | 0.7 | `MULTI_QUERY_ENABLED=1`、`QUERY_EXPANSION_ENABLED=1`、`MULTI_RECALL_TOPK_PER_CHANNEL` ↑ |
+| `mrr` < 0.5 | 0.5 | `RERANK_ENABLED=1`、`RERANK_MODEL=BAAI/bge-reranker-base` |
+| `faithfulness` < 0.7 | 0.7 | `ADVANCED_RAG_ENABLED=1`、`PROMPT_VERSION=strict` |
+| `answer_relevance` < 0.7 | 0.7 | `QUERY_REWRITE_ENABLED=1`、`QUERY_DECOMPOSE_ENABLED=1` |
+| `answer_correctness` < 0.6 | 0.6 | `ADVANCED_RAG_ENABLED=1`、`QUERY_REWRITE_ENABLED=1` |
+| `semantic_similarity` < 0.7 | 0.7 | `MULTI_QUERY_ENABLED=1`、`QUERY_REWRITE_ENABLED=1`、`CHUNK_OVERLAP` ↑ |
+
+#### 2. `backend/app/routers/eval.py`（6 + 2 个接口，全部仅 admin）
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/eval/run` | 一键运行评估 → 返回 aggregate / grade / details / chart_data / diagnoses |
+| `GET /api/eval/report/{report_id}` | 读取完整报告（含明细与诊断） |
+| `GET /api/eval/reports` | 历史报告列表（倒序，趋势图用） |
+| `POST /api/eval/apply-suggestion` | **一键应用建议**：白名单参数写回 `.env` |
+| `GET /api/eval/changes` | 最近 10 条参数变更日志 |
+| `POST /api/eval/rollback` | 回滚到最近一次备份 |
+| `GET /api/eval/datasets` | 列出 `data/eval/` 下可用数据集 |
+| `POST /api/eval/datasets` | 上传 JSON/CSV 评估集（校验 question + ground_truth） |
+
+#### 3. `backend/app/services/eval/auto_tuner.py`（自动调优）
+
+- **白名单机制**：只有 `PARAM_SPECS` 登记的参数允许被自动修改（`CHUNK_SIZE` / `CHUNK_OVERLAP` / `MULTI_RECALL_TOPK_PER_CHANNEL` / `RERANK_ENABLED` / `RERANK_MODEL` / `MULTI_QUERY_ENABLED` / `QUERY_REWRITE_ENABLED` / `QUERY_EXPANSION_ENABLED` / `QUERY_DECOMPOSE_ENABLED` / `ADVANCED_RAG_ENABLED` / `PROMPT_VERSION`）；
+- **取值收敛**：数值类参数按 `min/max/step` 收敛（`decrease` → `-step`，`increase` → `+step`）；
+- **安全网**：修改前备份 `backend/.env → backend/.env.bak.{timestamp}`，每次 apply 追加一条 `changes.log` 流水；
+- **可回滚**：`POST /api/eval/rollback` 优先回滚备份文件，无备份时按 `changes.log` 反向写回。
+
+#### 4. 前端 `frontend/src/views/admin/RAGEval.vue`
+
+- 顶部：数据集选择 + `top_k` / 相似度阈值 / LLM 指标开关 + 「一键运行评估」+ 数据集上传；
+- 中部：**九宫格指标卡片** + 柱状图（当前 vs 上一次）+ 雷达图（三维指标全景）+ 趋势图（历史综合得分）；
+- 底部：**诊断报告**（按风险等级排序，每条建议带「一键应用」按钮）+ 逐题明细表 + **变更日志时间线** + 一键回滚。
+
+#### 5. 配置与数据集
+
+| 文件 | 改动 |
+|---|---|
+| `backend/app/config.py` | 新增 `EVAL_ENABLED` / `EVAL_DATA_DIR` / `EVAL_REPORT_DIR` / `EVAL_LLM_METRICS_ENABLED` / `EVAL_SIM_THRESHOLD` / `EVAL_TOP_K` / `EVAL_MAX_SAMPLES` / `PROMPT_VERSION` / `AUTO_TUNE_ENABLED` / `AUTO_TUNE_WHITELIST` |
+| `data/eval/rag_demo_qa.json` | 6 条课堂案例语料（事实型 / 对比型） |
+| `data/eval/gaokao_qa.json` | 12 条高考场景语料（学费 / 分数线 / 位次 / 选科 / 批次 / 调剂） |
+
+---
+
+### 三、验证流程
+
+#### 1. 最小用例（一键评估）
+
+```bash
+# 登录拿 admin token，然后：
+POST /api/eval/run  { "dataset_id": "gaokao_qa.json" }
+```
+
+预期返回：
+
+```json
+{
+  "report_id": "20261012_153000",
+  "dataset_size": 12,
+  "grade": "需优化",
+  "aggregate": {
+    "context_precision": 0.41, "context_recall": 0.58, "mrr": 0.72,
+    "ndcg": 0.68, "hit_rate": 0.92, "semantic_similarity": 0.63, "overall": 0.657
+  },
+  "diagnoses": [
+    {
+      "suggestion_id": "context_precision",
+      "metric": "context_precision",
+      "score": 0.41, "threshold": 0.6, "level": "high",
+      "problem": "召回噪声过多：检索结果里大量片段与标准答案无关",
+      "suggestions": ["优化切片策略（减小 CHUNK_SIZE）", "调高重排序权重（开启 RERANK）", "精简 top_k 减少噪声"],
+      "param_changes": {"CHUNK_SIZE": "decrease", "RERANK_ENABLED": 1, "MULTI_RECALL_TOPK_PER_CHANNEL": "decrease"}
+    }
+  ]
+}
+```
+
+#### 2. 一键应用建议（参数变更写回验证）
+
+```bash
+POST /api/eval/apply-suggestion  { "report_id": "20261012_153000", "suggestion_id": "context_precision" }
+```
+
+返回与预期：
+
+```json
+{
+  "applied": true,
+  "need_restart": true,
+  "backup": "backend/.env.bak.20261012_153500",
+  "changes": [
+    { "name": "CHUNK_SIZE", "old_value": 500, "new_value": 400, "applied": true },
+    { "name": "RERANK_ENABLED", "old_value": true, "new_value": 1, "applied": true }
+  ],
+  "message": "已应用 2 项参数变更，重启服务后生效"
+}
+```
+
+> 注：`need_restart=true` —— 因为 `settings` 在进程启动时读取 `.env`，
+> 内存里的 `settings` 已同步更新（当前进程部分生效），**完整生效需重启服务**。
+
+#### 3. 回滚验证
+
+```bash
+POST /api/eval/rollback
+# → {"applied": true, "backup": "backend/.env.bak.20261012_153500", "message": "已回滚到备份 ...，重启服务后生效"}
+```
+
+#### 4. 回归验证
+
+```bash
+cd backend
+python smoke_test.py           # 14 个业务接口全部 200，AI 意图解析 3.4s、推荐理由 1.6s
+python test_advanced_rag.py    # 高级 RAG 用例仍通过
+cd ../frontend && npx tsc --noEmit   # 前端类型检查通过
+```
+
+> 评估链路自身不依赖 `smoke_test`，但评估会调用 `rag_service.search()` 与 `generate_answer()`，
+> 因此 **embedding 通道可用性直接决定 context 类指标**，Ali / Ollama 全部不可用时该指标会降为 0 并在诊断里体现。
+
+---
+
+### 四、后续演进方向（0.9.0）
+
+| 方向 | 说明 |
+|---|---|
+| 接入 Ragas 框架 | 用 ragas 的 `evaluate()` 对本地实现做交叉验证，确认两者趋势一致 |
+| A/B 测试框架 | 同一数据集跑两套配置，直接对比胜率而不是单次得分 |
+| 线上实时采样 | 从真实问答日志里采样评估集，形成持续闭环 |
+| 报告 diff | 两次运行做逐指标 diff，自动标注"哪项变好 / 哪项变差" |
+| 自动迭代到收敛 | 应用建议 → 重跑评估 → 未达标继续下一轮，直到评级进入"良好" |
+
+---
+
+## [0.7.2] - 2026-10-09 · 热修复：前端加载超时 + 登录无限 loading
+
+> 主题：0.7.1 切换 Ali OpenAI 兼容通道后，AI 调用耗时仍可能达到数秒；
 > 更关键的是**启动阶段 /health 同步探测 Ollama、前端 axios 默认超时 60000ms、AI 接口与业务接口共用同一把超时尺子**，
 > 导致首页地图与登录请求被长耗时或阻塞的 AI 通道拖慢，出现 `timeout of 60000ms exceeded`、登录按钮一直转圈。
 > 本次把 AI 调用彻底剥离出首页/登录的关键路径，并给前端超时分层。
 
 ---
 
-### 一、原有技术（v2.5.1）及缺陷
+### 一、原有技术（0.7.1）及缺陷
 
-| 环节 | v2.5.1 的技术 | 存在的缺陷 |
+| 环节 | 0.7.1 的技术 | 存在的缺陷 |
 |---|---|---|
 | 服务启动 | `main.py::on_startup()` 同步执行 `ensure_indexes()` + `rag_service.backend_info()` | 若 Chroma / DB 初始化慢，uvicorn 在 startup 事件结束**前不接收任何请求**，前端首屏等待 |
 | 健康检查 | `/api/health` 同步调用 `ollama_health()` + `backend_info()` | Ollama 未启动或 Ali 通道异常时，健康检查本身阻塞，可能拖慢前端全局状态探测 |
@@ -115,7 +338,7 @@ POST /api/ai/chat {"question":"福州大学至诚学院计算机专业学费是�
 
 ---
 
-### 四、后续演进方向（v2.6.0 及以后）
+### 四、后续演进方向（0.9.0 及以后）
 
 | 方向 | 说明 |
 |---|---|
@@ -126,18 +349,18 @@ POST /api/ai/chat {"question":"福州大学至诚学院计算机专业学费是�
 
 ---
 
-## [2.5.1] - 2026-10-09 · 热修复：LLM 通道 base_url/SDK 修正 + README 深度重构
+## [0.7.1] - 2026-10-09 · 热修复：LLM 通道 base_url/SDK 修正 + README 深度重构
 
-> 主题：v2.5.0 上线后**用户 AI 问答全部超时**。根因是 LLM 通道用错了 base_url 与调用方式：
+> 主题：0.7.0 上线后**用户 AI 问答全部超时**。根因是 LLM 通道用错了 base_url 与调用方式：
 > 限时模型 `qwen3.7-flash-2026-07-15` **必须**走 OpenAI 兼容接口且指向工作空间专属域名，
 > 不能用 `dashscope` Python SDK，也不能用通用域名 `https://dashscope.aliyuncs.com/compatible-mode/v1`。
 > 本次把 LLM / Embedding 统一收敛到一个通道模块，并顺手把整条问答链路从 198s 优化到 5.7s。
 
 ---
 
-### 一、原有技术（v2.5.0）及缺陷
+### 一、原有技术（0.7.0）及缺陷
 
-| 环节 | v2.5.0 的技术 | 存在的缺陷 |
+| 环节 | 0.7.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | LLM 通道 | `requests.post("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")`，Key 读 `DASHSCOPE_API_KEY` | ① **该模型不在这个通用域名上**，每次调用都要等满读超时才降级 → **所有 AI 问答超时**；<br>② Key 环境变量名与新的 `Ali_API_KEY` 不一致，配了也读不到；<br>③ 手写 HTTP，取值逻辑散落在多处 |
 | Embedding 通道 | 同一个通用域名 + requests | 同上；且没有维度对齐，换模型后与历史 768 维数据冲突会直接被 Chroma 拒绝 |
@@ -285,7 +508,7 @@ python test_llm_channel.py
 
 耗时对比：
 
-| 阶段 | v2.5.0（错误通道） | v2.5.1（修正 + 优化） |
+| 阶段 | 0.7.0（错误通道） | 0.7.1（修正 + 优化） |
 |---|---|---|
 | 同一问题端到端 | **198.00s**（多次超时后兜底） | **5.74s** |
 | 提速倍数 | — | **约 34 倍** |
@@ -306,7 +529,7 @@ GET  /api/knowledge/search?query=专升本&top_k=3   （需 Bearer Token）
 ```bash
 cd backend
 python smoke_test.py           # 14 个业务接口全部 200；AI 意图解析 3.43s、推荐理由 1.62s（原 4~10s）
-python test_advanced_rag.py    # v2.5.0 用例仍通过（强制本地兜底）
+python test_advanced_rag.py    # 0.7.0 用例仍通过（强制本地兜底）
 ```
 
 > 踩坑记录：用 PowerShell `Invoke-RestMethod` 发中文请求体时可能因编码导致服务端收到乱码，
@@ -314,7 +537,7 @@ python test_advanced_rag.py    # v2.5.0 用例仍通过（强制本地兜底）
 
 ---
 
-### 四、后续演进方向（v2.6.0）
+### 四、后续演进方向（0.9.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -326,17 +549,17 @@ python test_advanced_rag.py    # v2.5.0 用例仍通过（强制本地兜底）
 
 ---
 
-## [2.5.0] - 2026-10-08 · 检索后优化（Re-ranking）+ 高级 RAG（Self-RAG / Corrective RAG）
+## [0.7.0] - 2026-10-08 · 检索后优化（Re-ranking）+ 高级 RAG（Self-RAG / Corrective RAG）
 
-> 主题：把 v2.4.1 里**空转**的 `rerank()` 钩子真正落地，并按课堂案例
+> 主题：把 0.6.0 里**空转**的 `rerank()` 钩子真正落地，并按课堂案例
 > `01_检索后优化_重排序.py` / `02_self_RAG（python原生）.py` / `03_correctiveRAG（用python原生实现）.py`
 > 引入两条**高级 RAG 链路**，由 Modular RAG 路由按问题特征自动选择。
 
 ---
 
-### 一、原有技术（v2.4.1）及缺陷
+### 一、原有技术（0.6.0）及缺陷
 
-| 环节 | v2.4.1 的技术 | 存在的缺陷 |
+| 环节 | 0.6.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | 精排 | `rerank()` 是**空钩子**：`if not hits or not settings.RERANK_MODEL: return hits` | ① 未配置 CrossEncoder 模型时完全不生效；<br>② 排序完全由 RRF 决定，只考虑「排名」不考虑「语义贴合度」，Top-1 常不是最贴切的那条 |
 | 生成 | 检索完就把 Top-K 拼接送 LLM 一次性生成 | ① 不判断「要不要检索」「召回的文档有没有用」，噪声文档也进 Prompt；<br>② 生成后不自检，编造数字/遗漏侧面无法纠正 |
@@ -410,7 +633,7 @@ Self-RAG 的核心不是「多检索几次」，而是让模型**自己判断每
 }
 ```
 
-高级链路抛异常时 `except → pass`，**自动回落 v2.4.1 原有流程**。
+高级链路抛异常时 `except → pass`，**自动回落 0.6.0 原有流程**。
 
 #### 6. 新增配置（`app/config.py`）
 
@@ -461,12 +684,12 @@ python test_advanced_rag.py
 知识库：父块 4 个，子块 4 个
 
 【1】Rerank 精排：召回顺序 vs 精排后顺序
-  -- 召回 + 父块回填后（v2.4.1 终点）--
+  -- 召回 + 父块回填后（0.6.0 终点）--
     1. [召回分 0.1967] 福州大学至诚学院2025年在河南本科批物理类投档最低分为458分，对应全...
     2. [召回分 0.1915] 福州大学至诚学院是经教育部批准设立的独立学院，位于福建省福州市，2025...
     3. [召回分 0.1903] 福州大学至诚学院计算机科学与技术专业，学制4年，学费标准为23000元/...
     4. [召回分 0.1897] 河南省2025年本科批实行平行志愿，考生可填报48个院校专业组志愿，投档...
-  -- Rerank 精排后（v2.5.0）--
+  -- Rerank 精排后（0.7.0）--
     1. [精排分 0.9234] 福州大学至诚学院2025年在河南本科批物理类投档最低分为458分，对应全...
     2. [精排分 0.8723] 福州大学至诚学院是经教育部批准设立的独立学院，位于福建省福州市，2025...
     3. [精排分 0.8086] 福州大学至诚学院计算机科学与技术专业，学制4年，学费标准为23000元/...
@@ -480,21 +703,21 @@ python test_advanced_rag.py
   福州大学至诚学院是不是民办本科？... → self_rag
   河南本科批志愿怎么填报... → standard
 
-【3】v2.4.1（直接生成）vs v2.5.0（高级 RAG）
-  -- v2.4.1 --
+【3】0.6.0（直接生成）vs 0.7.0（高级 RAG）
+  -- 0.6.0 --
     根据检索上下文，福州大学至诚学院计算机专业2025年在河南本科批物理类的学费为23000元/年，对应全省位次约为112000名。
 
-  -- v2.5.0 strategy=self_rag --
+  -- 0.7.0 strategy=self_rag --
     步骤：['need_retrieve=True', 'retrieved=3', 'context_useful=True', 'generated', 'passed_check']   来源：['福大至诚招生.txt']
     回答：根据检索上下文，福州大学至诚学院2025年在河南本科批物理类投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年。
     耗时：26.1s
 
-  -- v2.5.0 strategy=corrective --
+  -- 0.7.0 strategy=corrective --
     步骤：['retrieved=3', 'relevant=2', 'generated']   来源：['福大至诚招生.txt']
     回答：…投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年，选科要求首选物理、再选化学。
     耗时：24.0s
 
-  -- v2.5.0 strategy=standard --
+  -- 0.7.0 strategy=standard --
     步骤：['retrieve', 'generate']   来源：['福大至诚招生.txt']
     回答：…投档最低分约为458分，对应全省位次约为112000名。计算机科学与技术专业学费标准为23000元/年。
     耗时：19.8s
@@ -526,8 +749,8 @@ POST /api/ai/chat {"question":"福州大学至诚学院是不是民办本科？"
 
 ```bash
 cd backend
-python test_multi_query.py            # v2.4.0 多路召回
-python test_query_preprocess_recall.py # v2.4.1 检索前 + 多路召回
+python test_multi_query.py            # 0.5.0 多路召回
+python test_query_preprocess_recall.py # 0.6.0 检索前 + 多路召回
 python smoke_rag.py                   # 登录 → 上传 → 检索 → RAG 问答 → 删除
 python smoke_test.py                  # 14 个业务接口
 ```
@@ -536,11 +759,11 @@ python smoke_test.py                  # 14 个业务接口
 > 1. 本机 `RERANK_MODEL` 留空，精排实际走 `EmbeddingReranker`（embedding 余弦），
 >    无需下载任何新模型；后续接入 BGE-Reranker 只需在 `.env` 填模型路径，**代码零改动**；
 > 2. 用例里把 DashScope Key 置空，**强制本地 Ollama 兜底**，避免依赖外网额度与网络抖动；
-> 3. 服务进程需要**重启**才能加载 v2.5.0 新模块（`uvicorn` 未开 `--reload`）。
+> 3. 服务进程需要**重启**才能加载 0.7.0 新模块（`uvicorn` 未开 `--reload`）。
 
 ---
 
-### 四、后续演进方向（v2.6.0）
+### 四、后续演进方向（0.9.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -551,16 +774,16 @@ python smoke_test.py                  # 14 个业务接口
 
 ---
 
-## [2.4.1] - 2026-10-08 · 检索前预处理 + 模块化多路召回（课堂案例风格重构）
+## [0.6.0] - 2026-10-08 · 检索前预处理 + 模块化多路召回（课堂案例风格重构）
 
 > 主题：按课堂案例（01_混合检索 / 02_多路召回 / 03_多路召回的封装 / 01_查询重写 / 02_查询扩展 / 03_子查询）
 > 把「检索前」与「检索中」拆成两个独立模块，面向对象封装，并接入项目检索入口。
 
 ---
 
-### 一、原有技术（v2.4.0）及缺陷
+### 一、原有技术（0.5.0）及缺陷
 
-| 环节 | v2.4.0 的技术 | 存在的缺陷 |
+| 环节 | 0.5.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | 检索前 | 只有 Query 分解（MULTI_QUERY_PROMPT），逻辑写在 `rag_service.py` 内部 | ① 缺少「查询重写」「查询扩展（Step-Back）」，口语化问题召回差；<br>② 预处理与检索耦合在一个文件，无法单独复用/替换 |
 | 检索中 | 多路召回逻辑内联在 `rag_service.multi_route_search()` | ① 通道（稠密/稀疏）写死，新增数据源要改主文件（违反开闭原则）；<br>② 只有 RRF 一种融合方式；<br>③ 无法单测单个通道 |
@@ -654,9 +877,9 @@ python test_query_preprocess_recall.py
 【2】检索中：三通道（dense, bm25, hybrid），语料 4 条，复用预计算向量：是
   RRF / 加权 / 轮询 三种融合均正常返回 Top3
 
-【3】v2.3.1 单路 vs v2.4.1 预处理 + 多路召回
-  覆盖语义侧面数：v2.3.1 = 3/3，v2.4.1 = 3/3   [通过]
-  （v2.4.1 三条全部 context_level=parent，学费/位次/学校三个侧面都召回）
+【3】0.4.1 单路 vs 0.6.0 预处理 + 多路召回
+  覆盖语义侧面数：0.4.1 = 3/3，0.6.0 = 3/3   [通过]
+  （0.6.0 三条全部 context_level=parent，学费/位次/学校三个侧面都召回）
 
 【4】降级验证：关闭开关 → 仍返回 3 条 parent 结果    [通过]
 ```
@@ -691,7 +914,7 @@ python smoke_test.py  # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-### 四、后续演进方向（v2.5.0）
+### 四、后续演进方向（0.7.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -703,16 +926,16 @@ python smoke_test.py  # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-## [2.4.0] - 2026-10-08 · 多路召回（Multi-Query Recall）：Query 分解 + 跨路 RRF 融合
+## [0.5.0] - 2026-10-08 · 多路召回（Multi-Query Recall）：Query 分解 + 跨路 RRF 融合
 
 > 主题：把「一条 Query 走一次混合检索」升级为「一条复杂 Query 拆成多条子查询、各走一次混合检索、再跨路 RRF 累加」，
 > 解决复合问题（同时问学校 + 学费 + 位次）召回不全的问题。
 
 ---
 
-### 一、原有技术（v2.3.1）及缺陷
+### 一、原有技术（0.4.1）及缺陷
 
-| 环节 | v2.3.1 的技术 | 存在的缺陷 |
+| 环节 | 0.4.1 的技术 | 存在的缺陷 |
 |---|---|---|
 | Query 处理 | 用户原始问题**原样**送入混合检索 | ① 复合问题（「XX学校XX专业2025年学费和位次」）语义被平均，各侧面都召回不准；<br>② 一次 embedding 只能表达一个语义方向，多实体问题顾此失彼 |
 | 召回路径 | 单条 Query → 稠密 + 稀疏 → 一条 RRF 融合链 | ① 只有 2 条排名列表参与融合，证据单薄；<br>② 只覆盖问题最突出的那一面，其他侧面掉出 Top-K |
@@ -791,7 +1014,7 @@ python test_multi_query.py
 
 【3】单路检索 vs 多路召回（Top-3）
   -- 单路（v2.3.x）--   RRF 0.03279 / 0.03175 / 0.03175
-  -- 多路召回（v2.4.0）-- RRF 0.13088 / 0.12827 / 0.12751（8 条排名列表累加）
+  -- 多路召回（0.5.0）-- RRF 0.13088 / 0.12827 / 0.12751（8 条排名列表累加）
   单路覆盖侧面数：3/3    多路覆盖侧面数：3/3   [通过]
 
 【4】完整流程 search()：多路 → RRF → Rerank → 父块回填
@@ -834,7 +1057,7 @@ python test_hybrid_search.py      # 混合检索对比用例：全部通过
 
 ---
 
-### 四、后续演进方向（v2.5.0）
+### 四、后续演进方向（0.7.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -846,17 +1069,17 @@ python test_hybrid_search.py      # 混合检索对比用例：全部通过
 
 ---
 
-## [2.3.1] - 2026-10-08 · 热修复：修正路由误拦截与防幻觉误拒答
+## [0.4.1] - 2026-10-08 · 热修复：修正路由误拦截与防幻觉误拒答
 
-> 主题：v2.3.0 上线后，发现「高考核心业务问题」被过度拦截/拒答
+> 主题：0.4.0 上线后，发现「高考核心业务问题」被过度拦截/拒答
 > （如「2025河南在福建招生的院校」「福州大学至诚学院计算机专业学费」均被误判为无关或拒答）。
 > 本次热修复放宽路由判定、修正防幻觉 Prompt、调整降级策略与采样参数。
 
 ---
 
-### 一、原有技术（v2.3.0）及缺陷
+### 一、原有技术（0.4.0）及缺陷
 
-| 环节 | v2.3.0 的技术 | 存在的缺陷 |
+| 环节 | 0.4.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | Query 路由 | `ROUTER_PROMPT` 关键词列表偏窄，仅含「高考志愿、院校报考、专业选择、分数线、学费、位次」 | ① 跨省招生计划问题（如「2025河南在福建招生的院校」）未命中关键词，被误判为 NO 拦截；<br>② Qwen3-1.7B 对长尾高考问题判定能力弱，容易漏判 |
 | 防幻觉 Prompt | `ANTI_HALLUCINATION_PROMPT` 使用「绝对铁律」+ `top_p=0.1` | ① 过度保守，上下文有数据时模型也不敢生成，直接套用拒答话术；<br>② 「找不到就拒答」被过度触发，导致「福州大学至诚学院计算机专业学费」被误拒 |
@@ -910,21 +1133,21 @@ python test_anti_hallucination.py
 【1】Query 意图路由（ROUTER_PROMPT, temperature=0.0, max_tokens=5）
   [通过] route_query(婚假几天)                       期望 拦截 → 实际 拦截
   [通过] route_query(今天天气怎么样)                 期望 拦截 → 实际 拦截
-  [通过] route_query(2025河南在福建招生的院校)       期望 放行 → 实际 放行   ← v2.3.1 修正
-  [通过] route_query(福州大学至诚学院计算机专业学费) 期望 放行 → 实际 放行   ← v2.3.1 修正
+  [通过] route_query(2025河南在福建招生的院校)       期望 放行 → 实际 放行   ← 0.4.1 修正
+  [通过] route_query(福州大学至诚学院计算机专业学费) 期望 放行 → 实际 放行   ← 0.4.1 修正
   [通过] route_query(河南本科批志愿怎么填报)         期望 放行 → 实际 放行
   [通过] route_query(郑州大学计算机专业学费多少)     期望 放行 → 实际 放行
 
 【2】上下文【有】学费（temperature=0.1, top_p=0.3）
   回答：福州大学至诚学院计算机科学与技术专业2025年在河南本科批物理类招生的学费标准为23000元/年。
   [通过] 回答中出现上下文里的真实学费 23000
-  [通过] 没有误触发拒答话术                                                ← v2.3.1 修正
+  [通过] 没有误触发拒答话术                                                ← 0.4.1 修正
 
 【3】上下文【无】学费 → 拒答/引导，且不编造数字
   回答：根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。
   [通过] 按话术引导    [通过] 没有编造数字
 
-【4】对照：v2.2.0 通用 Prompt（temperature=0.3, top_p=0.85）
+【4】对照：0.3.0 通用 Prompt（temperature=0.3, top_p=0.85）
   回答：郑州大学计算机科学与技术专业学费一般为**8000元/年**（编造）
 【5】结构化提取：{'school_name':'郑州大学','major_name':'计算机科学与技术','year':2025,'province':'河南省'}
 ```
@@ -960,7 +1183,7 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-### 四、后续演进方向（v2.4.0）
+### 四、后续演进方向（0.5.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -972,15 +1195,15 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-## [2.3.0] - 2026-10-08 · Query 路由与防幻觉 Prompt：解决无关问答与学费幻觉
+## [0.4.0] - 2026-10-08 · Query 路由与防幻觉 Prompt：解决无关问答与学费幻觉
 
-> 主题：在 v2.2.0 父子块基础上，增加 Query 意图路由与生成侧强约束，解决「婚假乱答」与「学费编造」两大幻觉问题。
+> 主题：在 0.3.0 父子块基础上，增加 Query 意图路由与生成侧强约束，解决「婚假乱答」与「学费编造」两大幻觉问题。
 
 ---
 
-### 一、原有技术（v2.2.0）及缺陷
+### 一、原有技术（0.3.0）及缺陷
 
-| 环节 | v2.2.0 的技术 | 存在的缺陷 |
+| 环节 | 0.3.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | Query 处理 | 所有问题直接进入 RAG 检索 | ① 无关问题（如「婚假几天」）强行检索知识库，LLM 生成无关回答；<br>② 没有意图分类，浪费检索资源 |
 | 生成约束 | 通用 Prompt「请根据上下文回答」 | ① Qwen3-1.7B 参数量小，指令遵循能力弱；<br>② 上下文中找不到数字时，模型调用预训练常识编造（实测把学费编造成 8000 元/年）；<br>③ 没有拒答机制 |
@@ -1018,7 +1241,7 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 | 技术 | Query 含「学费/分数线/位次」等强结构化关键词时，用 LLM 提取 JSON 条件，后续走 MySQL |
 | 代码位置 | **`backend/app/services/rag_service.py`** → `SQL_EXTRACT_PROMPT`、`extract_sql_filters()`、`STRUCTURED_KEYWORDS` |
 | 参数 | **temperature=0.0** |
-| 状态 | 已能正确提取 JSON，实际 Text-to-SQL 查询留到 v2.4.0 落地 |
+| 状态 | 已能正确提取 JSON，实际 Text-to-SQL 查询留到 0.5.0 落地 |
 
 #### 4. 配套改动
 
@@ -1054,15 +1277,15 @@ python test_anti_hallucination.py
   回答：根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。
   [通过] 按话术拒答   [通过] 没有编造数字
 
-【4】对照：v2.2.0 通用 Prompt（temperature=0.3, top_p=0.85）
+【4】对照：0.3.0 通用 Prompt（temperature=0.3, top_p=0.85）
   回答：郑州大学计算机科学与技术专业学费一般为**8000元/年**…
-  [通过] v2.2.0 会编造数字（说明改造必要性）
+  [通过] 0.3.0 会编造数字（说明改造必要性）
 
 【5】结构化提取预留（SQL_EXTRACT_PROMPT, temperature=0.0）
   {'school_name': '郑州大学', 'major_name': '计算机科学与技术', 'year': 2025, 'province': '河南省'}
 ```
 
-> 关键对照：同一问题「学费多少」，v2.2.0 编造 **8000 元/年**，v2.3.0 有资料时给 **5700 元/学年**（真实值）、无资料时拒答。
+> 关键对照：同一问题「学费多少」，0.3.0 编造 **8000 元/年**，0.4.0 有资料时给 **5700 元/学年**（真实值）、无资料时拒答。
 
 #### 2. 接口端到端验证
 
@@ -1093,7 +1316,7 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-### 四、后续演进方向（v2.4.0）
+### 四、后续演进方向（0.5.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -1106,16 +1329,16 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 
 ---
 
-## [2.2.0] - 2026-10-07 · 父子块检索（Parent-Child Chunking）：小块命中、大块生成
+## [0.3.0] - 2026-10-07 · 父子块检索（Parent-Child Chunking）：小块命中、大块生成
 
-> 主题：在 v2.1.0 的「递归分块 + BM25/RRF 混合检索」基础上叠加父子块结构。
+> 主题：在 0.2.0 的「递归分块 + BM25/RRF 混合检索」基础上叠加父子块结构。
 > 检索单元从 500 字缩小到 120 字（更聚焦），生成上下文仍用 500 字父块（更完整）。
 
 ---
 
-### 一、原有技术（v2.1.0）及缺陷
+### 一、原有技术（0.2.0）及缺陷
 
-| 环节 | v2.1.0 的技术 | 存在的缺陷 |
+| 环节 | 0.2.0 的技术 | 存在的缺陷 |
 |---|---|---|
 | 分块与索引 | 递归分块得到的 500 字块**直接**进向量库，检索单元 = 生成单元 | ① **检索粒度粗**：500 字块里塞了多个话题，短查询（「婚假几天」）的语义被无关内容稀释；<br>② **两难困境**：块调小 → 检索准但喂给 LLM 的上下文不完整；块调大 → 上下文全但召回不准；<br>③ 命中块里可能缺少答案的补充条件（如「需提前 5 个工作日申请」） |
 | 检索召回 | 稠密(Chroma) + 稀疏(BM25) → RRF 融合 k=60 | 混合检索已解决"字面量查不准"，但对"同一块内多话题稀释"无能为力 |
@@ -1132,7 +1355,7 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 | 父块 | 递归分块得到的 **500 字**块（语义完整，**只存 docstore，不进向量库**） |
 | 子块 | 父块内部再切一次的 **120 字**小块（重叠 20），**只有子块进向量库** |
 | ID 关联 | 父块 `file_{file_id}_parent_{父块序号}`；子块 `file_{file_id}_chunk_{父块序号}_{子块序号}`，子块 metadata 带 `parent_chunk_id` |
-| 检索流程 | 子块参与混合检索（BM25 + RRF 路径完全沿用 v2.1.0）→ 命中子块 → 按 `parent_chunk_id` 从 docstore 取回父块 → 父块交给 LLM |
+| 检索流程 | 子块参与混合检索（BM25 + RRF 路径完全沿用 0.2.0）→ 命中子块 → 按 `parent_chunk_id` 从 docstore 取回父块 → 父块交给 LLM |
 | 代码位置 | **`backend/app/services/rag_service.py`** |
 | - 常量 | `CHILD_CHUNK_SIZE=120`、`CHILD_CHUNK_OVERLAP=20`、`PARENT_STORE_FILE="parent_store.json"` |
 | - 子块切分 | `split_child_text()`（递归分块，依赖缺失时退化为定长切分） |
@@ -1152,7 +1375,7 @@ python smoke_test.py   # 志愿推荐等 14 个业务接口：全部 200
 
 #### 3. 依赖
 
-无新增依赖（复用 v2.1.0 的 `langchain-text-splitters` / `rank-bm25` / `jieba`）。
+无新增依赖（复用 0.2.0 的 `langchain-text-splitters` / `rank-bm25` / `jieba`）。
 
 ---
 
@@ -1168,10 +1391,10 @@ python test_parent_child.py
 实测输出（查询「婚假几天」，语料：招生政策 / 假期制度（干扰项） / 考勤办法（正确答案被无关内容包围））：
 
 ```
-【v2.1.0】向量库 = 3 个 500 字大块（无父子结构）
+【0.2.0】向量库 = 3 个 500 字大块（无父子结构）
   1. [RRF 0.03279] 上下文 159 字 | 学校教职工考勤管理办法…
 
-【v2.2.0】向量库 = 6 个 120 字子块，docstore = 3 个父块
+【0.3.0】向量库 = 6 个 120 字子块，docstore = 3 个父块
   -- 命中的子块（仅用于检索）--
     1. 116 字 | 学校教职工考勤管理办法：…教职工婚假为10天…
     2. 43 字  | 。婚假申请流程：需在休假前5个工作日提交书面申请…
@@ -1180,9 +1403,9 @@ python test_parent_child.py
     2. [parent] file_9002_parent_1 上下文 123 字
 
 对比结果（查询「婚假几天」）
-  A) v2.1.0 直接用大块检索     → Top1 159 字，命中「婚假」=是
-  B) v2.2.0 命中的子块（检索用）→ Top1 116 字，命中「婚假」=是，含审批条件「5个工作日」=否
-  C) v2.2.0 回填父块（交给LLM）→ Top1 159 字，粒度=parent，命中「婚假」=是，含审批条件「5个工作日」=是
+  A) 0.2.0 直接用大块检索     → Top1 159 字，命中「婚假」=是
+  B) 0.3.0 命中的子块（检索用）→ Top1 116 字，命中「婚假」=是，含审批条件「5个工作日」=否
+  C) 0.3.0 回填父块（交给LLM）→ Top1 159 字，粒度=parent，命中「婚假」=是，含审批条件「5个工作日」=是
 
   关键差异：B 只看到「婚假10天」这 116 字，C 通过父块拿回了同一段落里的
            「5个工作日提交申请」等完整条件 —— 即『小块命中、大块生成』。
@@ -1225,11 +1448,11 @@ python smoke_rag.py     # 登录 → 上传 → 检索 → RAG 问答 → 删除
 ```
 
 - 权限隔离不变：upload/list/detail/download/delete 仅 admin，search 对登录用户开放
-- v2.1.0 之前上传的历史数据没有 `parent_chunk_id` → 自动走降级分支返回子块，**不会报错**
+- 0.2.0 之前上传的历史数据没有 `parent_chunk_id` → 自动走降级分支返回子块，**不会报错**
 
 ---
 
-### 四、后续演进方向（v2.3.0）
+### 四、后续演进方向（0.4.0）
 
 | 方向 | 说明 |
 |---|---|
@@ -1241,7 +1464,7 @@ python smoke_rag.py     # 登录 → 上传 → 检索 → RAG 问答 → 删除
 
 ---
 
-## [2.1.0] - 2026-10-06 · RAG 管线进阶：递归分块 + 混合检索（Hybrid Search）
+## [0.2.0] - 2026-10-06 · RAG 管线进阶：递归分块 + 混合检索（Hybrid Search）
 
 > 主题：让「高考政策 / 志愿填报技巧」类问答从 **Naive RAG** 升级到 **Advanced RAG（混合检索）**。
 > 技术栈不变：FastAPI + Vue3 + Chroma + Ollama Qwen3 1.7B。

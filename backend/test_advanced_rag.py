@@ -1,10 +1,10 @@
-"""v2.5.0 最小验证用例：检索后精排（Rerank）+ 高级 RAG（Self-RAG / Corrective RAG）。
+"""0.7.0 最小验证用例：检索后精排（Rerank）+ 高级 RAG（Self-RAG / Corrective RAG）。
 
 运行：
     cd backend
     python test_advanced_rag.py
 
-对比 v2.4.1（检索 → 直接生成）与 v2.5.0（检索 → Rerank 精排 → Self-RAG/Corrective RAG）
+对比 0.6.0（检索 → 直接生成）与 0.7.0（检索 → Rerank 精排 → Self-RAG/Corrective RAG）
 在同一 Query 下的排序与回答差异。
 
 说明：本用例把 Ali_API_KEY 置空，**强制走本地 Ollama 兜底**，
@@ -57,12 +57,12 @@ def main() -> None:
     print("【1】Rerank 精排：召回顺序 vs 精排后顺序")
     print("=" * 78)
     hits = rag_service.search(COMPLEX_QUERY, top_k=4)
-    print("  -- 召回 + 父块回填后（v2.4.1 终点）--")
+    print("  -- 召回 + 父块回填后（0.6.0 终点）--")
     for i, h in enumerate(hits, 1):
         print(f"    {i}. [召回分 {h.get('rrf_score') or 0:.4f}] {h['text'][:36]}...")
 
     reranked = Reranker().rerank(COMPLEX_QUERY, list(hits))
-    print("  -- Rerank 精排后（v2.5.0）--")
+    print("  -- Rerank 精排后（0.7.0）--")
     for i, h in enumerate(reranked, 1):
         print(f"    {i}. [精排分 {h.get('rerank_score') or 0:.4f}] {h['text'][:36]}...")
 
@@ -79,18 +79,18 @@ def main() -> None:
 
     print()
     print("=" * 78)
-    print("【3】v2.4.1（直接生成）vs v2.5.0（高级 RAG）")
+    print("【3】0.6.0（直接生成）vs 0.7.0（高级 RAG）")
     print("=" * 78)
 
-    # v2.4.1：检索 → 拼接 → 生成
+    # 0.6.0：检索 → 拼接 → 生成
     ctx = "\n".join(h["text"] for h in hits)
     old_ans = rag_service.generate_answer(COMPLEX_QUERY, ctx)
-    print("  -- v2.4.1 --")
+    print("  -- 0.6.0 --")
     print(f"    {old_ans}")
 
-    # v2.5.0：按策略走高级链路
+    # 0.7.0：按策略走高级链路
     for strategy in ("self_rag", "corrective", "standard"):
-        print(f"\n  -- v2.5.0 strategy={strategy} --")
+        print(f"\n  -- 0.7.0 strategy={strategy} --")
         t0 = time.time()
         try:
             res = rag_service.answer_with_strategy(COMPLEX_QUERY, top_k=3, strategy=strategy)

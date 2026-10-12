@@ -30,7 +30,7 @@ export function deleteKnowledge(id: number) {
 }
 
 /** 检索：所有登录用户可用（考生端 RAG）
- * v2.5.2：检索涉及 embedding/LLM，使用独立长超时实例，避免阻塞短超时请求。
+ * 0.7.2：检索涉及 embedding/LLM，使用独立长超时实例，避免阻塞短超时请求。
  */
 export function searchKnowledge(query: string, topK = 5) {
   return httpAI<SearchResult>({ url: '/knowledge/search', params: { query, top_k: topK }, timeout: 30000 })

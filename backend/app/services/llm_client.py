@@ -1,4 +1,4 @@
-"""统一 LLM / Embedding 通道（v2.5.1 热修复核心）。
+"""统一 LLM / Embedding 通道（0.7.1 热修复核心）。
 
 ## 为什么必须改（背景）
 限时模型 `qwen3.7-flash-2026-07-15` **只能**走 OpenAI 兼容接口，且 base_url 必须是
@@ -8,7 +8,7 @@
 
 既**不能**用 `dashscope` Python SDK（`dashscope.Generation`），
 也**不能**用通用域名 `https://dashscope.aliyuncs.com/compatible-mode/v1`（该模型不在那上面）。
-v2.5.0 用的就是「通用域名 + requests 裸调」，结果所有 LLM 调用都要等到超时才降级 → **全部问答超时**。
+0.7.0 用的就是「通用域名 + requests 裸调」，结果所有 LLM 调用都要等到超时才降级 → **全部问答超时**。
 
 Key 统一读环境变量 `Ali_API_KEY`；向量模型 `text-embedding-v3` 与大语言模型
 共用同一个 Key 和同一个 base_url。
@@ -110,7 +110,7 @@ class BaseLLMChannel(abc.ABC):
     ) -> Optional[str]:
         """返回模型回复文本；不可用/失败返回 None（由门面决定降级）。
 
-        :param top_p: 核采样阈值，None 表示用通道自己的默认（保留 v2.3.1 兜底策略里调过的 0.3）
+        :param top_p: 核采样阈值，None 表示用通道自己的默认（保留 0.4.1 兜底策略里调过的 0.3）
         """
 
     def available(self) -> bool:
@@ -141,7 +141,7 @@ class BaseEmbeddingChannel(abc.ABC):
 class AliLLMChannel(BaseLLMChannel):
     """阿里云工作空间 LLM 通道：`openai.OpenAI` 客户端 + 专属 base_url。
 
-    与 v2.5.0 的区别就在两点：
+    与 0.7.0 的区别就在两点：
       1. base_url 从通用 dashscope 域名换成工作空间专属域名
       2. 取值从手写 HTTP 换成 SDK 的 response.choices[0].message.content
     """

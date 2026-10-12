@@ -1,4 +1,4 @@
-"""v2.4.0 最小验证用例：Query 分解 + 多路召回（Multi-Route Recall）。
+"""0.5.0 最小验证用例：Query 分解 + 多路召回（Multi-Route Recall）。
 
 运行：
     cd backend
@@ -89,7 +89,7 @@ def main() -> None:
         print(f"    {i}. [RRF {h['rrf_score']:.5f}] {h['text'][:36]}...")
 
     multi = rag_service.multi_route_search(COMPLEX_QUERY, top_k=3)
-    print("  -- 多路召回（v2.4.0）--")
+    print("  -- 多路召回（0.5.0）--")
     for i, h in enumerate(multi, 1):
         mq = "/".join(h.get("matched_queries", [])[:2])
         print(f"    {i}. [RRF {h['rrf_score']:.5f}] 命中子查询[{mq}] {h['text'][:36]}...")

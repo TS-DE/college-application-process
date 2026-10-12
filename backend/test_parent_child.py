@@ -1,13 +1,13 @@
-"""父子块最小验证用例：v2.1.0（500 字大块直接检索） vs v2.2.0（120 字子块命中 → 回填父块）。
+"""父子块最小验证用例：0.2.0（500 字大块直接检索） vs 0.3.0（120 字子块命中 → 回填父块）。
 
 运行：
     cd backend
     python test_parent_child.py
 
 对比点：查询「婚假几天」
-  - v2.1.0：向量库里是 500 字的父块，短查询被大块里的大量无关词稀释，召回不稳，
+  - 0.2.0：向量库里是 500 字的父块，短查询被大块里的大量无关词稀释，召回不稳，
             且返回的上下文就是那 500 字（里面混着别的话题）
-  - v2.2.0：向量库里是 120 字的子块，"婚假"语义聚焦 → 命中更准；
+  - 0.3.0：向量库里是 120 字的子块，"婚假"语义聚焦 → 命中更准；
             命中后回填父块，交给 LLM 的上下文仍然是完整的 500 字（含审批条件等细节）
 """
 import sys
@@ -16,8 +16,8 @@ sys.path.insert(0, ".")
 
 from app.services import rag_service
 
-V21_COLLECTION = "test_pc_v21"   # v2.1.0 基线：只索引 500 字父块
-V22_COLLECTION = "test_pc_v22"   # v2.2.0：只索引 120 字子块 + docstore 存父块
+V21_COLLECTION = "test_pc_v21"   # 0.2.0 基线：只索引 500 字父块
+V22_COLLECTION = "test_pc_v22"   # 0.3.0：只索引 120 字子块 + docstore 存父块
 
 QUERY = "婚假几天"
 
@@ -25,8 +25,8 @@ QUERY = "婚假几天"
 #   P1：招生政策（完全无关）
 #   P2：假期制度（语义上和"婚假几天"很近，但只讲年休假/探亲假 —— 干扰项）
 #   P3：考勤办法（正确答案「婚假 10 天」被埋在大量考勤内容中间）
-# v2.1.0 用 480 字整块做向量 → P3 的向量被"打卡/迟到"稀释，容易被 P2 抢走第一；
-# v2.2.0 用 120 字子块做向量 → 命中"婚假"那一小子块，再回填父块拿到完整上下文。
+# 0.2.0 用 480 字整块做向量 → P3 的向量被"打卡/迟到"稀释，容易被 P2 抢走第一；
+# 0.3.0 用 120 字子块做向量 → 命中"婚假"那一小子块，再回填父块拿到完整上下文。
 PARAGRAPHS = [
     "河南省2025年普通高校招生工作规定，本科批实行平行志愿，考生可填报四十八个院校专业组志愿，"
     "每个院校专业组志愿包含若干个专业以及是否服从专业调剂选项。投档规则为分数优先、遵循志愿、"
@@ -45,7 +45,7 @@ PARAGRAPHS = [
 
 
 def build_v21():
-    """v2.1.0：递归分块得到 500 字块，块直接进向量库（无父子结构）。"""
+    """0.2.0：递归分块得到 500 字块，块直接进向量库（无父子结构）。"""
     rag_service.settings.CHROMA_COLLECTION = V21_COLLECTION
     rag_service._collection = None
     col = rag_service.collection()
@@ -60,7 +60,7 @@ def build_v21():
 
 
 def build_v22():
-    """v2.2.0：500 字父块存 docstore，120 字子块进向量库。"""
+    """0.3.0：500 字父块存 docstore，120 字子块进向量库。"""
     rag_service.settings.CHROMA_COLLECTION = V22_COLLECTION
     rag_service._collection = None
     col = rag_service.collection()
@@ -81,18 +81,18 @@ def main() -> None:
     print(f"查询：{QUERY}")
     print("=" * 78)
 
-    # ---------- v2.1.0 ----------
+    # ---------- 0.2.0 ----------
     col21, chunks21 = build_v21()
-    print(f"\n【v2.1.0】向量库 = {len(chunks21)} 个 500 字大块（无父子结构）")
+    print(f"\n【0.2.0】向量库 = {len(chunks21)} 个 500 字大块（无父子结构）")
     r21 = rag_service.HybridRetrieval(col21, k=60, top_k=3)
     hits21 = r21.search(QUERY, 3)
     for i, h in enumerate(hits21, 1):
         print(f"  {i}. [RRF {h['rrf_score']:.5f}] 上下文 {len(h['text'])} 字 | {h['text'][:34]}...")
     top21 = hits21[0]["text"] if hits21 else ""
 
-    # ---------- v2.2.0 ----------
+    # ---------- 0.3.0 ----------
     col22, parents22, child_cnt = build_v22()
-    print(f"\n【v2.2.0】向量库 = {child_cnt} 个 120 字子块，docstore = {len(parents22)} 个父块")
+    print(f"\n【0.3.0】向量库 = {child_cnt} 个 120 字子块，docstore = {len(parents22)} 个父块")
     r22 = rag_service.HybridRetrieval(col22, k=60, top_k=3)
     child_hits = r22.search(QUERY, 3)
     print("  -- 命中的子块（仅用于检索）--")
@@ -112,11 +112,11 @@ def main() -> None:
     print("\n" + "=" * 78)
     print("对比结果（查询「婚假几天」）")
     print("=" * 78)
-    print(f"  A) v2.1.0 直接用大块检索    → Top1 {len(top21)} 字，命中「婚假」={'是' if '婚假' in top21 else '否'}")
-    print(f"  B) v2.2.0 命中的子块（检索用）→ Top1 {len(child_top)} 字，"
+    print(f"  A) 0.2.0 直接用大块检索    → Top1 {len(top21)} 字，命中「婚假」={'是' if '婚假' in top21 else '否'}")
+    print(f"  B) 0.3.0 命中的子块（检索用）→ Top1 {len(child_top)} 字，"
           f"命中「婚假」={'是' if '婚假' in child_top else '否'}，"
           f"含审批条件「5个工作日」={'是' if '5个工作日' in child_top else '否'}")
-    print(f"  C) v2.2.0 回填父块（交给LLM）→ Top1 {len(top22)} 字，粒度={final22[0]['context_level'] if final22 else '-'}，"
+    print(f"  C) 0.3.0 回填父块（交给LLM）→ Top1 {len(top22)} 字，粒度={final22[0]['context_level'] if final22 else '-'}，"
           f"命中「婚假」={'是' if '婚假' in top22 else '否'}，"
           f"含审批条件「5个工作日」={'是' if '5个工作日' in top22 else '否'}")
     print()

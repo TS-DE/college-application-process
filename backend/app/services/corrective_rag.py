@@ -82,7 +82,7 @@ class CorrectiveRAG:
         return "IRRELEVANT" not in out and "RELEVANT" in out
 
     def _filter_relevant(self, query: str, hits: List[Dict], relevant: List[str], relevant_hits: List[Dict]) -> None:
-        """并发执行相关性判断（v2.5.1 提速），结果按原始顺序追加到传入容器。"""
+        """并发执行相关性判断（0.7.1 提速），结果按原始顺序追加到传入容器。"""
         if not hits:
             return
         if len(hits) == 1:
@@ -127,7 +127,7 @@ class CorrectiveRAG:
             result.answer = "根据现有资料，未查询到具体信息，建议查阅学校官方招生简章。"
             return result
 
-        # ② 相关性过滤（v2.5.1：各文档互不依赖，并发判断）
+        # ② 相关性过滤（0.7.1：各文档互不依赖，并发判断）
         relevant: List[str] = []
         relevant_hits: List[Dict] = []
         self._filter_relevant(query, hits, relevant, relevant_hits)

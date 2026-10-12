@@ -1,4 +1,4 @@
-"""v2.5.1 最小用例：验证 LLM / Embedding 通道是否修正。
+"""0.7.1 最小用例：验证 LLM / Embedding 通道是否修正。
 
 ① Ali LLM 通道（OpenAI 兼容）能否在秒级返回
 ② Ali Embedding 通道能否按指定维度返回向量（对齐已有集合维度）

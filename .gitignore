@@ -20,3 +20,13 @@ backend/*.db
 .vscode/
 *.log
 _assistant_docs/
+
+# RAG 评估产物（可重现，不入库）
+rag_eval_out/
+rag_eval_embedding_cache.json
+rag_eval_details_*.json
+
+# 0.8.0 量化评估：评估报告与参数备份（可重现，不入库）
+data/eval_reports/
+backend/.env.bak.*
+# 注意：*.log 已被上方忽略（含 backend/app/services/eval/changes.log）

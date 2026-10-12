@@ -36,6 +36,7 @@
       </el-descriptions>
       <div class="actions">
         <el-button type="primary" @click="$router.push('/admin/knowledge')">进入知识库管理</el-button>
+        <el-button type="success" @click="$router.push('/admin/rag-eval')">进入 RAG 量化评估</el-button>
         <el-button @click="store.loadBackendInfo()">刷新状态</el-button>
       </div>
     </el-card>

@@ -15,7 +15,7 @@ async def recommend(payload: RecommendIn) -> RecommendOut:
     """生成冲/稳/保三档志愿推荐。
 
     规则引擎负责位次换算与分档，AI 只负责（可选的）推荐理由润色。
-    v2.5.2：改为 async，整体放入线程池执行，避免 AI 润色阻塞主事件循环。
+    0.7.2：改为 async，整体放入线程池执行，避免 AI 润色阻塞主事件循环。
     """
     from app.services.recommend_service import recommend as _recommend
 
@@ -52,7 +52,7 @@ async def batch_ai_reasons(payload: Dict) -> Dict:
     """对已生成的推荐条目批量补充 AI 理由。
 
     入参：{ "student": {...}, "items": [ { ...推荐条目 } ], "limit": 10 }
-    v2.5.2：改为 async + 线程池，避免阻塞非 AI 接口。
+    0.7.2：改为 async + 线程池，避免阻塞非 AI 接口。
     """
     from app.services.ai_service import ai_enabled, recommend_reason
 

@@ -1,4 +1,4 @@
-"""大模型服务（v2.5.1：Ali OpenAI 兼容通道 + Ollama 本地兜底）。
+"""大模型服务（0.7.1：Ali OpenAI 兼容通道 + Ollama 本地兜底）。
 
 通道统一由 `app/services/llm_client.py` 编排（迪米特法则：本模块不知道背后是谁在回答）：
     ① Ali OpenAI 兼容接口（base_url=ALI_BASE_URL，model=ALI_LLM_MODEL）
@@ -74,14 +74,14 @@ def ask(
     temperature: float = 0.3,
     top_p: float = 0.85,
 ) -> Optional[str]:
-    """统一 LLM 调用入口（v2.5.1 热修复）。
+    """统一 LLM 调用入口（0.7.1 热修复）。
 
     通道顺序（由 llm_client 编排，调用方无感知）：
         ① Ali OpenAI 兼容接口 —— base_url=settings.ALI_BASE_URL，model=settings.ALI_LLM_MODEL
         ② 本地 Ollama 兜底   —— settings.OLLAMA_FALLBACK_MODEL
     两级都失败返回 None，由各业务函数的规则兜底接住，链路不中断。
 
-    v2.3.0 起支持按场景指定采样参数：
+    0.4.0 起支持按场景指定采样参数：
       - 意图路由：temperature=0.0（要确定性二分类）
       - 防幻觉生成：temperature=0.1, top_p=0.1（压低随机性，减少编造）
     """
