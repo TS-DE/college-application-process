@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 import requests
@@ -1222,3 +1223,235 @@ def extract_sql_filters(query: str) -> Optional[Dict]:
         return json.loads(raw[start : end + 1])
     except Exception:  # noqa: BLE001 解析失败按未提取处理
         return None
+
+
+# ============================================================
+# 0.9.0 知识图谱双通道：向量 + 图谱在 rag_service 层「优先级 + Token 配额」融合
+# ============================================================
+#
+# ## 为什么不做分数融合（RRF 不适用）
+# 图谱结果是对/错的**精确事实**（学费 18000、最低分 512），向量结果是**相似度文本**
+# （"该校学费适中，性价比高"）。二者量纲不可比：把 0.91 的向量相似度和一条 100% 正确的
+# 图谱事实一起排序是没有意义的。因此 rag_service 扮演「中枢神经」，用两级策略融合：
+#
+#   Level 1 优先级：图谱上下文排在前面，Prompt 明确声明「图谱为权威事实，冲突时以图谱为准」
+#   Level 2 配额  ：总上下文预算 4000 token，图谱最多 60%、向量最多 40%；
+#                   某一路没用满时，剩余额度让给另一路（避免浪费预算）
+#
+# ## 第一版刻意不做 Level 3 串行筛选
+# 「图谱不完整时才查向量」会把两路从并行变成串行，延迟翻倍；0.9.0 先只做 Level 1 + 2，
+# Level 3 留到 1.0.0（见 CHANGELOG 演进方向）。
+from dataclasses import dataclass, field  # noqa: E402
+
+# 双通道融合后的 Prompt（Level 1 优先级在这里落地）
+GRAPH_FUSION_PROMPT = """你是高考志愿填报助手。请根据以下两段背景回答用户问题。
+
+{priority_hint}
+
+【图谱事实】（权威精确数据）：
+{graph_context}
+
+【向量背景】（语义文本补充）：
+{vector_context}
+
+用户提问：{question}
+
+回答要求：
+1. 优先使用【图谱事实】中的结构化数据（分数线、学费、选科要求、招生人数）
+2. 【向量背景】用于补充政策、介绍、背景类信息
+3. 两段背景都没有相关信息时，回答"根据现有资料未查询到具体信息，建议查阅学校官方招生简章"
+4. 禁止编造两段背景中不存在的数字
+"""
+
+# Token ↔ 字符换算：1 token ≈ 1.5 个中文字符（本项目统一用这个经验值做预算估算）
+CHARS_PER_TOKEN = 1.5
+# 融合总预算（token），图谱 60% / 向量 40%
+TOTAL_CONTEXT_TOKENS = 4000
+
+# 实际使用的融合策略名（透传给前端，便于评估模块做对比）
+FUSION_STRATEGY = "priority_quota"
+
+
+@dataclass
+class HybridResult:
+    """双通道检索 + 融合后的结果（交给 ai.py 生成最终回答）。"""
+
+    graph_context: str = ""
+    vector_context: str = ""
+    graph_hit: bool = False
+    vector_hit: bool = False
+    fusion_strategy: str = FUSION_STRATEGY
+    priority_hint: str = ""
+    graph_cypher: str = ""
+    graph_entities: List[Dict] = field(default_factory=list)
+    graph_error: str = ""
+    sources: List[str] = field(default_factory=list)
+
+
+def _truncate_by_tokens(text: str, max_tokens: int) -> str:
+    """按 token 预算截断文本（1 token ≈ 1.5 中文字符）。"""
+    if not text:
+        return ""
+    max_chars = int(max_tokens * CHARS_PER_TOKEN)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + " …（上下文已按 Token 配额截断）"
+
+
+def _build_priority_hint(graph_hit: bool, vector_hit: bool) -> str:
+    """Level 1 优先级提示语：明确告诉 LLM 两段背景谁权威、冲突时听谁的。"""
+    if graph_hit and vector_hit:
+        return (
+            "【图谱事实】为权威精确数据，与【向量背景】冲突时以图谱为准。"
+            "【向量背景】用于补充政策、介绍类信息。"
+        )
+    if graph_hit:
+        return "本次仅检索到【图谱事实】，请严格基于其回答，禁止编造。"
+    if vector_hit:
+        return "本次仅检索到【向量背景】，请基于其回答，找不到信息时明确说明。"
+    return "两路均未检索到相关信息，请返回预设拒答话术。"
+
+
+# 图谱引擎进程内单例：None=未初始化 / False=初始化失败（不再重试）/ GraphQueryEngine=可用
+_graph_engine = None
+
+
+def _get_graph_engine():
+    """懒加载图谱引擎（进程内复用），并把 LLM 通道注入实体抽取器。
+
+    依赖倒置：EntityExtractor / CypherGenerator 只依赖注入进来的 llm_chat 函数，
+    不 import 具体 LLM 模块；图谱不可用时返回 None，由调用方走纯向量链路。
+    """
+    global _graph_engine
+    if _graph_engine is not None:
+        return _graph_engine or None
+    try:
+        from app.services.graph import build_default_engine
+
+        _graph_engine = build_default_engine()
+    except Exception as exc:  # noqa: BLE001 图谱模块整体不可用 → 走纯向量链路
+        logger.info("[GRAPH] 图谱引擎初始化失败，降级为纯向量 RAG：%s", exc.__class__.__name__)
+        _graph_engine = False
+    return _graph_engine or None
+
+
+def search_with_graph(query: str, top_k: int = 5) -> HybridResult:
+    """双通道并行检索 + 「优先级 + Token 配额」融合（0.9.0 中枢神经）。
+
+    流程：
+      ① 并行：图谱通道（GraphQueryEngine.query）‖ 向量通道（search()）
+             用 ThreadPoolExecutor 而非 asyncio.gather：两条链路内部都是同步阻塞调用
+             （Neo4j bolt / Chroma / HTTP），线程池在无 GPU 的 i5 机器上更稳。
+      ② Level 1 优先级：图谱上下文在前、向量在后，并生成 priority_hint。
+      ③ Level 2 配额  ：总预算 4000 token，图谱 60% / 向量 40%，未用满的额度让给另一路。
+
+    任一路失败都只让那一路为空，另一路照常工作（图谱挂了 = 退化成原来的纯向量 RAG）。
+    """
+    result = HybridResult()
+
+    def _graph_channel():
+        engine = _get_graph_engine()
+        if engine is None:
+            return None
+        return engine.query(query)
+
+    graph_out = None
+    hits: List[Dict] = []
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_graph = pool.submit(_graph_channel)
+            future_vector = pool.submit(search, query, top_k)
+            graph_out = future_graph.result()
+            hits = future_vector.result() or []
+    except Exception as exc:  # noqa: BLE001 并行调度本身出错也不能中断问答
+        logger.info("[GRAPH] 双通道并行调度异常：%s", exc.__class__.__name__)
+        try:  # 兜底：至少把向量通道补回来
+            hits = search(query, top_k) or []
+        except Exception:  # noqa: BLE001
+            hits = []
+
+    # ---- 图谱通道结果 ----
+    if graph_out is not None:
+        result.graph_hit = graph_out.hit
+        result.graph_context = graph_out.context or ""
+        result.graph_cypher = graph_out.cypher or ""
+        result.graph_entities = graph_out.entities or []
+        result.graph_error = graph_out.error or ""
+
+    # ---- 向量通道结果（沿用 ai.py 原有的 sources 收集口径）----
+    if hits:
+        result.vector_hit = True
+        result.vector_context = "\n".join(
+            f"[{(h.get('metadata') or {}).get('filename') or '知识库'}] {h.get('text', '')}"
+            for h in hits
+        )
+        result.sources = sorted({
+            (h.get("metadata") or {}).get("filename") or "知识库" for h in hits
+        })
+
+    # ---- Level 2 Token 配额融合（含额度互让）----
+    graph_budget = int(TOTAL_CONTEXT_TOKENS * 0.6)
+    vector_budget = int(TOTAL_CONTEXT_TOKENS * 0.4)
+    graph_used = int(len(result.graph_context) / CHARS_PER_TOKEN)
+    if graph_used < graph_budget:                      # 图谱没用满 → 剩余让给向量
+        vector_budget += graph_budget - graph_used
+    elif result.vector_context:
+        spare = max(0, TOTAL_CONTEXT_TOKENS - graph_used)  # 图谱超配 → 向量只能用总量剩余
+        vector_budget = min(vector_budget, spare)
+    result.graph_context = _truncate_by_tokens(result.graph_context, graph_budget)
+    result.vector_context = _truncate_by_tokens(result.vector_context, vector_budget)
+
+    # ---- Level 1 优先级提示 ----
+    result.priority_hint = _build_priority_hint(result.graph_hit, result.vector_hit)
+
+    logger.info(
+        "[GRAPH] 融合完成 strategy=%s graph_hit=%s(%d 字符) vector_hit=%s(%d 字符)",
+        result.fusion_strategy, result.graph_hit, len(result.graph_context),
+        result.vector_hit, len(result.vector_context),
+    )
+    return result
+
+
+def answer_with_graph(query: str, top_k: int = 5) -> Dict:
+    """双通道问答主流程：融合检索 → GRAPH_FUSION_PROMPT → 生成。
+
+    返回 dict 直接给路由层（含 graph_hit / vector_hit / fusion_strategy / graph_cypher，
+    便于前端调试与评估模块统计图谱命中率）。
+    """
+    hybrid = search_with_graph(query, top_k=top_k)
+
+    # 两路都没命中：不走 LLM 生成，直接给保守话术，省一次网络往返
+    if not hybrid.graph_hit and not hybrid.vector_hit:
+        return {
+            "answer": "根据现有资料未查询到具体信息，建议查阅学校官方招生简章。",
+            "source": "graph+vector:empty",
+            "sources": [],
+            "graph_hit": False,
+            "vector_hit": False,
+            "fusion_strategy": hybrid.fusion_strategy,
+            "graph_cypher": "",
+            "graph_error": hybrid.graph_error,
+        }
+
+    prompt = GRAPH_FUSION_PROMPT.format(
+        priority_hint=hybrid.priority_hint,
+        graph_context=hybrid.graph_context or "（无）",
+        vector_context=hybrid.vector_context or "（无）",
+        question=query,
+    )
+    from app.services.ai_service import ask
+
+    answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=400, timeout=60)
+    if not answer:
+        raise RuntimeError("大模型响应超时")
+
+    return {
+        "answer": answer,
+        "source": "graph+vector",
+        "sources": hybrid.sources,
+        "graph_hit": hybrid.graph_hit,
+        "vector_hit": hybrid.vector_hit,
+        "fusion_strategy": hybrid.fusion_strategy,
+        "graph_cypher": hybrid.graph_cypher,
+        "graph_error": hybrid.graph_error,
+    }

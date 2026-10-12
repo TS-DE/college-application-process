@@ -37,6 +37,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 | 数据库 | MySQL（`gaokao`） | 录取 / 计划 / 一分一段 / 用户 / 知识文件 | ★ `backend/.env`（DB_*） |
 | 鉴权 | JWT（python-jose）+ bcrypt（passlib） | `admin` / `student` 两种角色 | ★ `backend/app/utils/security.py` |
 | 向量库 | Chroma `PersistentClient` | 集合 `gaokao_knowledge`，落盘 `backend/chroma_db/` | ★ `CHROMA_DB_PATH` / `CHROMA_COLLECTION` |
+| 图数据库 | Neo4j + py2neo | 0.9.0 知识图谱通道：院校/专业/专业组/省份/批次/选科/分数段 八类节点 | ★ `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `GRAPH_ENABLED` |
 | 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash-2026-07-15`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
 | LLM 兜底 | Ollama `qwen3:1.7b` | Ali 不可用自动降级，离线可跑 | ★ `OLLAMA_FALLBACK_MODEL` / `OLLAMA_URL` |
 | Embedding | Ali `text-embedding-v3` | 与 LLM 共用同一个 Key 与 base_url，维度对齐已有集合 | ★ `ALI_EMBED_MODEL` / `ALI_EMBED_DIMENSION` |
@@ -49,7 +50,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 |---|---|
 | `backend/.env`（由 `.env.example` 复制） | 数据库连接、<b>Ali_API_KEY</b>、ALI_BASE_URL、模型名、开关 |
 | `backend/app/config.py` | 所有配置项的**读取入口**与默认值（`_env()` + 极简 dotenv 加载） |
-| `backend/requirements.txt` | Python 依赖（0.7.1 起：`openai>=1.0`，移除 `dashscope`） |
+| `backend/requirements.txt` | Python 依赖（0.7.1 起：`openai>=1.0`，移除 `dashscope`；0.9.0 起新增 `py2neo`） |
 | `frontend/vite.config.ts` | 端口 5173、`/api` 代理、别名 `@` |
 | `frontend/tsconfig.json` | TS 编译选项、`paths` 别名 |
 | `frontend/.npmrc.local` | npm 代理走不通时用 `npm i --userconfig .npmrc.local` |
@@ -67,7 +68,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 
 ```
 gaokao_project/
-├── backend/                      <span style="color:#888">// FastAPI 服务：业务规则 + RAG + AI</span>
+├── backend/                      <span style="color:#888">// FastAPI 服务：业务规则 + RAG + 知识图谱 + AI</span>
 ├── frontend/                     <span style="color:#888">// Vue3 + TS 单页应用</span>
 ├── gaokao_data/                  <span style="color:#888">// 原始录取数据（MySQL 建库用）</span>
 ├── data/                         <span style="color:#888">// 0.8.0：RAG 量化评估数据与报告产出</span>
@@ -83,7 +84,7 @@ gaokao_project/
 ```
 backend/
 ├── app/
-│   ├── main.py                   <span style="color:#888">// FastAPI 入口：注册 8 个路由、CORS、SPA 回退、启动时补索引</span>
+│   ├── main.py                   <span style="color:#888">// FastAPI 入口：注册 9 个路由、CORS、SPA 回退、启动时补索引</span>
 │   ├── config.py                 <span style="color:#888">// 全局配置：DB / Ollama / Ali / Chroma / JWT / RAG 开关</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
 │   ├── database.py               <span style="color:#888">// 引擎、表反射、`fetch_all/fetch_one/fetch_*_params`、幂等建索引</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   ├── models/                   <span style="color:#888">// 动态表解析 + ORM 模型（与 SQL 表一一对应）</span>
@@ -95,7 +96,7 @@ backend/
 │   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   └── user.py               <span style="color:#888">// 登录注册入参、UserInfo</span>
 │   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
-│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答，0.7.0 起返回 strategy/steps）、parse-intent、recommend-reason、status</span>
+│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答；0.9.0 新增 use_graph 开关，返回 graph_hit/vector_hit/fusion_strategy/graph_cypher）、parse-intent、recommend-reason、status</span>
 │   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
 │   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
@@ -109,7 +110,15 @@ backend/
 │   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── ai_service.py         <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
 │   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()/answer_with_graph() 双通道融合</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── graph/                 <span style="color:#888">// 0.9.0 知识图谱通道（7 个文件，单一职责；与向量通道平级，融合在 rag_service 层）</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 图谱通道</span>
+│   │   │   ├── ontology.py       <span style="color:#888">// 本体常量：8 类节点标签 / 8 类关系 / 属性键；中文标签的 Cypher 转义只此一处</span>
+│   │   │   ├── graph_store.py    <span style="color:#888">// GraphStore：Neo4j 连接 + execute_cypher + get_schema + get_node_properties；失败抛 GraphConnectionError</span>
+│   │   │   ├── entity_extractor.py <span style="color:#888">// EntityExtractor：LLM 抽取 + 词典匹配双路混合（词典优先）+ 简称→全称消歧；default_llm_chat 默认通道</span>
+│   │   │   ├── cypher_generator.py <span style="color:#888">// CypherGenerator：实体 + 问题 → Cypher；Schema 动态注入 + 4 条高考 Few-shot + 只读保护 + build_params</span>
+│   │   │   ├── graph_query_engine.py <span style="color:#888">// GraphQueryEngine：图谱通道唯一入口（合成复用前三个类）；GraphResult 数据类 + build_default_engine() 工厂</span>
+│   │   │   ├── graph_builder.py  <span style="color:#888">// GraphBuilder：MySQL → Neo4j 离线构建，全部 MERGE 幂等；`python -m app.services.graph.graph_builder --year 2025`</span>
+│   │   │   └── __init__.py       <span style="color:#888">// 统一导出；GraphBuilder 用 __getattr__ 懒加载（在线问答链路用不到）</span>
 │   │   ├── query_rewrite.py      <span style="color:#888">// 检索前：重写 / 扩展(Step-Back) / 子查询分解（线程池并发）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── retrieval.py          <span style="color:#888">// 检索中：DenseChannel / BM25Channel / HybridSearch / MultiRecall（三通道 × 多 Query）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── reranker.py           <span style="color:#888">// 检索后：CrossEncoder / Embedding 余弦 / Noop 三种精排 + 失败降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
@@ -140,6 +149,7 @@ backend/
 ├── smoke_rag.py                  <span style="color:#888">// RAG 全链路冒烟：登录 → 上传 → 检索 → 问答 → 删除</span>
 ├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
 ├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
+├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
 ├── test_multi_query.py           <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF</span>
 ├── test_parent_child.py          <span style="color:#888">// 0.3.0：父子块检索</span>
@@ -154,12 +164,12 @@ frontend/
 ├── src/
 │   ├── main.ts                   <span style="color:#888">// 应用入口：createApp + Pinia + Router + ElementPlus + 图标全局注册</span>
 │   ├── App.vue                   <span style="color:#888">// 根布局：Navbar + RouterView</span>
-│   ├── router/index.ts           <span style="color:#888">// 8 条路由 + 全局守卫（admin 路由校验 role）</span>
+│   ├── router/index.ts           <span style="color:#888">// 9 条路由 + 全局守卫（admin 路由校验 role）</span>
 │   ├── api/                      <span style="color:#888">// 所有 HTTP 请求集中在此（组件不写 URL）</span>
 │   │   ├── request.ts            <span style="color:#888">// axios 实例（baseURL=/api, timeout=60s）+ Token 注入 + 401/403 处理</span>
 │   │   ├── recommend.ts          <span style="color:#888">// recommend / scoreCheck / controlLines / listUniversities / listMajors / majorCountByProvince</span>
 │   │   ├── knowledge.ts          <span style="color:#888">// upload / list / detail / delete / search / ragStatus</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── ai.ts                 <span style="color:#888">// chat（timeout 120s）/ aiStatus / parseIntent</span>
+│   │   ├── ai.ts                 <span style="color:#888">// chat（timeout 120s，0.9.0 起支持 use_graph 参数）/ aiStatus / parseIntent</span>
 │   │   ├── auth.ts               <span style="color:#888">// login / register / fetchMe</span>
 │   │   └── eval.ts               <span style="color:#888">// 0.8.0：runEval / getReport / listReports / applySuggestion / listChanges / rollback / datasets</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── stores/
@@ -336,7 +346,7 @@ GET  /api/stats/major-count-by-province  routers/stats.py → 各省在豫招生
 | `Home.vue` → `loadGeoJson()` L108 | GET | 静态 `/china.json` | 无（ECharts registerMap） |
 | `University.vue` → `load()` L118 | GET | `/api/universities` | `province,year,category,batch,keyword,school_province,rank,page` |
 | `University.vue` → `openMajors()` L139 | GET | `/api/majors` | `university_name,category,batch,…` |
-| `AiChat.vue` → `send()` L68 | POST | `/api/ai/chat` | `{question, use_rag, top_k}`（timeout 120s） |
+| `AiChat.vue` → `send()` L68 | POST | `/api/ai/chat` | `{question, use_rag, top_k, use_graph}`（timeout 120s；0.9.0 起 `use_graph` 默认 true，开启时响应新增 `graph_hit/vector_hit/fusion_strategy/graph_cypher`） |
 | `AiChat.vue` → `knowledgeStore.search()` | GET | `/api/knowledge/search` | `query, top_k=3` |
 | `Knowledge.vue` → `viewDetail()` L68 | GET | `/api/knowledge/detail/{id}` | path `id` |
 | `Knowledge.vue` → `store.remove(id)` L77 | DELETE | `/api/knowledge/delete/{id}` | path `id` |
@@ -535,7 +545,12 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 | `reranker.py` | `rag_service.rerank()` | `rag_service.get_embedding()` |
 | `self_rag.py` | `rag_service.answer_with_strategy()` | `llm_client` + 注入进来的 `retriever/generator`（= `rag_service.search/generate_answer`） |
 | `corrective_rag.py` | `rag_service.answer_with_strategy()` | 同上 |
-| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` |
+| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` + `services/graph/*`（0.9.0 双通道） |
+| `graph/graph_store.py` | `graph/graph_query_engine.py`、`graph/graph_builder.py` | `py2neo.Graph` → Neo4j |
+| `graph/entity_extractor.py` | `graph/graph_query_engine.py`、`graph_builder`（不直接） | `ai_service.ask`（经 `default_llm_chat`）+ MySQL 词典 |
+| `graph/cypher_generator.py` | `graph/graph_query_engine.py` | 同上 |
+| `graph/graph_query_engine.py` | `rag_service._get_graph_engine()`、`test_graph_rag.py` | `EntityExtractor` + `CypherGenerator` + `GraphStore`（合成复用） |
+| `graph/graph_builder.py` | 命令行 `python -m app.services.graph.graph_builder` | `GraphStore` + `app.database` + `app.models.dataset` |
 
 ### 4.4 主链三：RAG 量化评估（0.8.0）
 
@@ -584,6 +599,79 @@ graph TD
 > 设计要点：评估器通过 `BaseRAGRunner` 抽象依赖 RAG 系统（依赖倒置），
 > 因此用 Mock 跑测试、或将来替换检索引擎，都不需要改评估代码。
 
+### 4.5 主链四：知识图谱双通道问答（0.9.0）
+
+入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat`（`use_graph=true`）
+
+```mermaid
+graph TD
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["routers/ai.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
+    B -->|"是"| C["rag_service.<b>answer_with_graph()</b>"]
+    B -->|"否（向后兼容）"| Z["rag_service.answer_with_strategy()<br/>0.8.0 纯向量链路，行为不变"]
+
+    C --> D["rag_service.<b>search_with_graph()</b><br/>ThreadPoolExecutor(max_workers=2) 并行"]
+    D --> D1["图谱通道<br/>GraphQueryEngine.query()"]
+    D --> D2["向量通道<br/>rag_service.search()<br/>检索前 + 多路召回 + Rerank"]
+
+    D1 --> E1["EntityExtractor.extract()<br/>LLM 抽取 + 词典匹配（词典优先）"]
+    E1 --> E2["canonicalize()<br/>简称 → 词典全称<br/>「计算机」→「计算机科学与技术」"]
+    E2 --> E3["GraphStore.get_schema()"]
+    E3 --> E4["CypherGenerator.generate()<br/>Schema 注入 + 高考 Few-shot + 只读保护"]
+    E4 --> E5["GraphStore.execute_cypher()<br/>build_params() 绑定 $类型_序号 占位符"]
+    E5 --> E6["_format_records() → 自然语言上下文"]
+    E6 --> G[("Neo4j<br/>bolt://localhost:7687")]
+
+    D2 --> F2["Chroma + BM25 → RRF → Rerank<br/>→ 父子块回填 → vector_context"]
+
+    E6 --> H["<b>Level 1 优先级</b><br/>graph_context 在前 + priority_hint"]
+    F2 --> H
+    H --> I["<b>Level 2 Token 配额</b><br/>总预算 4000 token<br/>图谱 60% / 向量 40%（未用满互让）"]
+    I --> J["GRAPH_FUSION_PROMPT.format()<br/>temperature=0.1 / top_p=0.3"]
+    J --> K["ai_service.ask()<br/>Ali → Ollama 兜底"]
+    K --> L["返回 graph_hit / vector_hit<br/>/ fusion_strategy / graph_cypher"]
+
+    style D fill:#e3f2fd,stroke:#1976d2
+    style E1 fill:#e3f2fd,stroke:#0d47a1
+    style H fill:#fff3cd,stroke:#d32f2f
+    style I fill:#fff3cd,stroke:#d32f2f
+```
+
+**离线构建（图谱数据来源）**：
+
+```bash
+cd backend
+python -m app.services.graph.graph_builder --year 2025 --batch 本科批
+```
+
+| 步骤 | 数据来源 | 写入 |
+|---|---|---|
+| 院校 / 专业 / 专业组 / 省份 / 批次 / 选科 / 分数段 节点 | `major_admission_2025_henan`、`enrollment_plan_2025_henan` 的 DISTINCT 列 | `MERGE`（幂等） |
+| `OPENS` / `ADMITS` | `major_admission` 的 min_score / min_rank | 边上带 year / province / batch / category |
+| `TUITION` / `ENROLLS` | `enrollment_plan` 的 tuition / plan_count / duration / subject_req | 同上 |
+| `RANKS` | `school_admission` 的院校投档线 | 院校 → 分数段 |
+| `LOCATED_IN` / `BELONGS_TO` / `REQUIRES` | `school_province` 列 / `major_group` / `subject_req` | 结构关系 |
+
+**为什么不做分数融合（RRF 不适用）**：
+
+| 通道 | 结果形态 | 可排序性 |
+|---|---|---|
+| 图谱 | **对/错的精确事实**（学费 23000、最低分 512） | 无分数概念，只有命中/未命中 |
+| 向量 | **相似度文本**（"该校学费适中，性价比高"） | 有 0~1 相似度，但不保证数字正确 |
+
+二者量纲不可比，把 0.91 的向量相似度和一条 100% 正确的图谱事实一起排序没有意义。
+因此 `rag_service` 扮演「中枢神经」，用 **Level 1 优先级 + Level 2 Token 配额** 融合，
+第一版刻意不做 Level 3 串行筛选（会把两路从并行变串行，延迟翻倍），留到 1.0.0。
+
+**降级矩阵**：
+
+| 情况 | `graph_hit` | `vector_hit` | 行为 |
+|---|---|---|---|
+| 两路都命中 | true | true | 图谱在前 + 冲突以图谱为准 |
+| 仅图谱命中 | true | false | 严格基于图谱，禁止编造 |
+| 仅向量命中 | false | true | 基于向量背景，找不到就明说 |
+| 两路都没命中 | false | false | 直接返回预设拒答话术，不调 LLM |
+| py2neo 未安装 / Neo4j 未启动 | false | true | `graph_error` 记录原因，退化为纯向量 RAG，**不报错** |
+
 ---
 
 ## 五、接口清单
@@ -594,7 +682,7 @@ graph TD
 |---|---|---|---|---|
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.0 起 `use_graph=true` 叠加知识图谱双通道，响应新增 `graph_hit/vector_hit/fusion_strategy/graph_cypher`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路** | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
