@@ -38,6 +38,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 | 鉴权 | JWT（python-jose）+ bcrypt（passlib） | `admin` / `student` 两种角色 | ★ `backend/app/utils/security.py` |
 | 向量库 | Chroma `PersistentClient` | 集合 `gaokao_knowledge`，落盘 `backend/chroma_db/` | ★ `CHROMA_DB_PATH` / `CHROMA_COLLECTION` |
 | 图数据库 | Neo4j + py2neo | 0.9.0 知识图谱通道：院校/专业/专业组/省份/批次/选科/分数段 八类节点 | ★ `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `GRAPH_ENABLED` |
+| 结构化查询 | SQLAlchemy Core + 参数化绑定 | 0.9.1 MySQL 通道：学费/分数线/位次/选科/招生计划按 intents 分组查询 | ★ `MYSQL_QUERY_ENABLED` / `MYSQL_MAX_ROWS` |
 | 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash-2026-07-15`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
 | LLM 兜底 | Ollama `qwen3:1.7b` | Ali 不可用自动降级，离线可跑 | ★ `OLLAMA_FALLBACK_MODEL` / `OLLAMA_URL` |
 | Embedding | Ali `text-embedding-v3` | 与 LLM 共用同一个 Key 与 base_url，维度对齐已有集合 | ★ `ALI_EMBED_MODEL` / `ALI_EMBED_DIMENSION` |
@@ -110,7 +111,8 @@ backend/
 │   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── ai_service.py         <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
 │   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()/answer_with_graph() 双通道融合</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（学费/分数线/位次/选科/招生计划），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
 │   │   ├── graph/                 <span style="color:#888">// 0.9.0 知识图谱通道（7 个文件，单一职责；与向量通道平级，融合在 rag_service 层）</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 图谱通道</span>
 │   │   │   ├── ontology.py       <span style="color:#888">// 本体常量：8 类节点标签 / 8 类关系 / 属性键；中文标签的 Cypher 转义只此一处</span>
 │   │   │   ├── graph_store.py    <span style="color:#888">// GraphStore：Neo4j 连接 + execute_cypher + get_schema + get_node_properties；失败抛 GraphConnectionError</span>
@@ -150,6 +152,7 @@ backend/
 ├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
 ├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
 ├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
+├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
 ├── test_multi_query.py           <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF</span>
 ├── test_parent_child.py          <span style="color:#888">// 0.3.0：父子块检索</span>
@@ -545,7 +548,8 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 | `reranker.py` | `rag_service.rerank()` | `rag_service.get_embedding()` |
 | `self_rag.py` | `rag_service.answer_with_strategy()` | `llm_client` + 注入进来的 `retriever/generator`（= `rag_service.search/generate_answer`） |
 | `corrective_rag.py` | `rag_service.answer_with_strategy()` | 同上 |
-| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` + `services/graph/*`（0.9.0 双通道） |
+| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` + `services/graph/*` + `services/sql_query_engine.py`（0.9.1 三路） |
+| `sql_query_engine.py` | `rag_service.answer_with_hybrid()`（经线程池并行调用）、`test_hybrid_rag.py` | `app.database.SessionLocal` + `app.models.dataset.table_name` |
 | `graph/graph_store.py` | `graph/graph_query_engine.py`、`graph/graph_builder.py` | `py2neo.Graph` → Neo4j |
 | `graph/entity_extractor.py` | `graph/graph_query_engine.py`、`graph_builder`（不直接） | `ai_service.ask`（经 `default_llm_chat`）+ MySQL 词典 |
 | `graph/cypher_generator.py` | `graph/graph_query_engine.py` | 同上 |
@@ -599,19 +603,22 @@ graph TD
 > 设计要点：评估器通过 `BaseRAGRunner` 抽象依赖 RAG 系统（依赖倒置），
 > 因此用 Mock 跑测试、或将来替换检索引擎，都不需要改评估代码。
 
-### 4.5 主链四：知识图谱双通道问答（0.9.0）
+### 4.5 主链四：三路融合检索问答（0.9.1）
 
 入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat`（`use_graph=true`）
 
 ```mermaid
 graph TD
     A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["routers/ai.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
-    B -->|"是"| C["rag_service.<b>answer_with_graph()</b>"]
+    B -->|"是"| C["rag_service.<b>answer_with_hybrid()</b><br/>0.9.1 三路融合"]
     B -->|"否（向后兼容）"| Z["rag_service.answer_with_strategy()<br/>0.8.0 纯向量链路，行为不变"]
 
-    C --> D["rag_service.<b>search_with_graph()</b><br/>ThreadPoolExecutor(max_workers=2) 并行"]
-    D --> D1["图谱通道<br/>GraphQueryEngine.query()"]
-    D --> D2["向量通道<br/>rag_service.search()<br/>检索前 + 多路召回 + Rerank"]
+    C --> S1["<b>Step 1 意图识别</b><br/>detect_structured_intent()"]
+    S1 -->|"返回 intents 列表"| S2["<b>Step 2 三路并行</b><br/>ThreadPoolExecutor(max_workers=3)"]
+
+    S2 --> D1["图谱通道<br/>GraphQueryEngine.query()"]
+    S2 --> D2["MySQL 通道<br/>MySQLQueryEngine.query_structured()<br/>仅 intents 非空时执行"]
+    S2 --> D3["向量通道<br/>rag_service.search()<br/>检索前 + 多路召回 + Rerank"]
 
     D1 --> E1["EntityExtractor.extract()<br/>LLM 抽取 + 词典匹配（词典优先）"]
     E1 --> E2["canonicalize()<br/>简称 → 词典全称<br/>「计算机」→「计算机科学与技术」"]
@@ -619,24 +626,57 @@ graph TD
     E3 --> E4["CypherGenerator.generate()<br/>Schema 注入 + 高考 Few-shot + 只读保护"]
     E4 --> E5["GraphStore.execute_cypher()<br/>build_params() 绑定 $类型_序号 占位符"]
     E5 --> E6["_format_records() → 自然语言上下文"]
-    E6 --> G[("Neo4j<br/>bolt://localhost:7687")]
+    E6 --> G1[("Neo4j<br/>bolt://localhost:7687")]
 
-    D2 --> F2["Chroma + BM25 → RRF → Rerank<br/>→ 父子块回填 → vector_context"]
+    D2 --> M1["extract_sql_filters()<br/>LLM 提取 school_name / major_name / year"]
+    M1 --> M2["按 intents 拆两组<br/>enrollment_plan(学费/计划)<br/>+ major_admission(分数/位次/选科)"]
+    M2 --> M3["参数化查询 :school / :major<br/>LIMIT MYSQL_MAX_ROWS"]
+    M3 --> M4["按模板生成中文句子<br/>「…专业2025年学费为23000元/年。」"]
+    M4 --> G2[("MySQL<br/>major_admission / enrollment_plan")]
 
-    E6 --> H["<b>Level 1 优先级</b><br/>graph_context 在前 + priority_hint"]
-    F2 --> H
-    H --> I["<b>Level 2 Token 配额</b><br/>总预算 4000 token<br/>图谱 60% / 向量 40%（未用满互让）"]
-    I --> J["GRAPH_FUSION_PROMPT.format()<br/>temperature=0.1 / top_p=0.3"]
-    J --> K["ai_service.ask()<br/>Ali → Ollama 兜底"]
-    K --> L["返回 graph_hit / vector_hit<br/>/ fusion_strategy / graph_cypher"]
+    D3 --> F3["Chroma + BM25 → RRF → Rerank<br/>→ 父子块回填 → vector_context<br/>按 VECTOR_MAX_TOKENS 裁剪"]
 
-    style D fill:#e3f2fd,stroke:#1976d2
-    style E1 fill:#e3f2fd,stroke:#0d47a1
+    E6 --> H["<b>Step 3 优先级融合</b><br/>图谱 > MySQL > 向量<br/>（不是分数融合）"]
+    M4 --> H
+    F3 --> H
+
+    H --> I{"三路是否都为空？"}
+    I -->|"是"| J1["直接返回拒答话术<br/>不调用大模型"]
+    I -->|"否"| J2["<b>Step 5 生成</b><br/>build_hybrid_prompt()<br/>HYBRID_FUSION_PROMPT"]
+    J2 --> K["ai_service.ask()<br/>temperature=0.1 / top_p=0.3"]
+    K --> L["返回 graph_hit / mysql_hit / vector_hit<br/>/ fusion_strategy / graph_cypher"]
+
+    style S2 fill:#e3f2fd,stroke:#1976d2
+    style D1 fill:#e3f2fd,stroke:#0d47a1
+    style D2 fill:#e3f2fd,stroke:#0d47a1
     style H fill:#fff3cd,stroke:#d32f2f
     style I fill:#fff3cd,stroke:#d32f2f
 ```
 
-**离线构建（图谱数据来源）**：
+**为什么不做分数融合（RRF 不适用）**：
+
+| 通道 | 结果形态 | 可排序性 |
+|---|---|---|
+| 图谱 | **对/错的精确事实**（学费 23000、最低分 512） | 无分数概念，只有命中/未命中 |
+| MySQL | **对/错的精确事实**（字段值） | 无分数概念，只有命中/未命中 |
+| 向量 | **相似度文本**（"该校学费适中，性价比高"） | 有 0~1 相似度，但不保证数字正确 |
+
+三者量纲不可比，把 0.91 的向量相似度和一条 100% 正确的结构化事实一起排序没有意义。
+因此 `rag_service` 扮演「中枢神经」，按 **图谱 > MySQL > 向量** 的顺序排列上下文，
+并在 Prompt 里声明权威关系；第一版刻意不做 Level 3 串行筛选，留到 0.10.0。
+
+**降级矩阵**：
+
+| 情况 | `graph_hit` | `mysql_hit` | `vector_hit` | 行为 |
+|---|---|---|---|---|
+| 三路都命中 | true | true | true | 图谱在前、MySQL 次之，政策文本仅作补充 |
+| 仅 MySQL 命中 | false | true | false | 严格基于数据库精确值，禁止编造 |
+| 仅向量命中 | false | false | true | 基于政策文本回答，找不到数字就明说 |
+| 三路都没命中 | false | false | false | 直接返回预设拒答话术，不调 LLM |
+| py2neo 未安装 / Neo4j 未启动 | false | — | — | `graph_error` 记录原因，其余两路照常 |
+| MySQL 查询异常 | — | false | — | `mysql_error` 记录原因，其余两路照常 |
+
+**图谱数据来源（离线构建）**：
 
 ```bash
 cd backend
@@ -651,27 +691,6 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 | `RANKS` | `school_admission` 的院校投档线 | 院校 → 分数段 |
 | `LOCATED_IN` / `BELONGS_TO` / `REQUIRES` | `school_province` 列 / `major_group` / `subject_req` | 结构关系 |
 
-**为什么不做分数融合（RRF 不适用）**：
-
-| 通道 | 结果形态 | 可排序性 |
-|---|---|---|
-| 图谱 | **对/错的精确事实**（学费 23000、最低分 512） | 无分数概念，只有命中/未命中 |
-| 向量 | **相似度文本**（"该校学费适中，性价比高"） | 有 0~1 相似度，但不保证数字正确 |
-
-二者量纲不可比，把 0.91 的向量相似度和一条 100% 正确的图谱事实一起排序没有意义。
-因此 `rag_service` 扮演「中枢神经」，用 **Level 1 优先级 + Level 2 Token 配额** 融合，
-第一版刻意不做 Level 3 串行筛选（会把两路从并行变串行，延迟翻倍），留到 1.0.0。
-
-**降级矩阵**：
-
-| 情况 | `graph_hit` | `vector_hit` | 行为 |
-|---|---|---|---|
-| 两路都命中 | true | true | 图谱在前 + 冲突以图谱为准 |
-| 仅图谱命中 | true | false | 严格基于图谱，禁止编造 |
-| 仅向量命中 | false | true | 基于向量背景，找不到就明说 |
-| 两路都没命中 | false | false | 直接返回预设拒答话术，不调 LLM |
-| py2neo 未安装 / Neo4j 未启动 | false | true | `graph_error` 记录原因，退化为纯向量 RAG，**不报错** |
-
 ---
 
 ## 五、接口清单
@@ -682,7 +701,7 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 |---|---|---|---|---|
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.0 起 `use_graph=true` 叠加知识图谱双通道，响应新增 `graph_hit/vector_hit/fusion_strategy/graph_cypher`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路** | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |

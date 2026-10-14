@@ -1134,6 +1134,52 @@ SQL_EXTRACT_PROMPT = """你是一个高考数据提取器。请从用户的问�
 # 命中这些关键词时，优先考虑走 MySQL 结构化查询而不是 RAG（0.4.0 预留）
 STRUCTURED_KEYWORDS = ("学费", "分数线", "位次", "录取分", "招生人数", "计划数")
 
+# ============================================================
+# 0.9.1 结构化意图识别：先判断「是不是字段型问题」，再决定要不要查 MySQL
+# ============================================================
+#
+# ## 为什么需要这一层
+# 0.9.0 的检索分发只看 use_graph 开关，无论问什么都走「图谱 + 向量」。
+# 但「学费多少」「最低分多少」这类**字段型问题**的精确值就在 MySQL 的
+# major_admission_{year}_henan 表里，绕道去 Chroma 翻 PDF 只会得到相似文本，
+# 找不到就拒答。所以在并行检索之前必须先识别意图。
+#
+# ## 设计约束（单一职责）
+# detect_structured_intent() 只做「意图识别」，不做查询、不碰数据库；
+# 真正的查询由 services/sql_query_engine.py 的 MySQLQueryEngine 负责。
+STRUCTURED_INTENT_KEYWORDS: Dict[str, List[str]] = {
+    # 意图名 -> 触发关键词（命中任一即认为用户问了这个字段）
+    "tuition": ["学费", "费用", "多少钱", "收费"],
+    "min_score": ["分数线", "最低分", "录取分", "投档线", "多少分"],
+    "min_rank": ["位次", "排名", "最低位次"],
+    "subject_req": ["选科", "选考", "科目要求", "首选", "再选"],
+    "plan_count": ["招生计划", "招多少人", "招生人数", "计划数"],
+}
+
+# 意图名 -> 输出给 LLM 的中文行模板（MySQLQueryEngine 复用同一套 key）
+STRUCTURED_INTENT_TEMPLATES: Dict[str, str] = {
+    "tuition": "{school}{major}专业{year}年学费为{value}元/年。",
+    "subject_req": "{school}{major}专业选科要求：{value}。",
+    "min_score": "{school}{major}专业{year}年最低录取分{value}分。",
+    "min_rank": "{school}{major}专业{year}年最低位次{value}。",
+    "plan_count": "{school}{major}专业{year}年招生计划{value}人。",
+}
+
+
+def detect_structured_intent(query: str) -> List[str]:
+    """判断问题属于哪几类结构化查询（可多类命中）。
+
+    :param query: 用户原始问题
+    :return: 意图名列表，如 ["tuition", "subject_req"]；空列表表示不是结构化问题，
+             调用方应直接走向量检索（政策 / 流程 / 介绍类问题）。
+
+    例：「福州大学至诚学院计算机专业学费是多少？选科要求是什么？」
+        → ["tuition", "subject_req"]
+    例：「河南本科批志愿怎么填报？」→ []
+    """
+    q = query or ""
+    return [intent for intent, words in STRUCTURED_INTENT_KEYWORDS.items() if any(w in q for w in words)]
+
 # 路由被拦截时返回给用户的固定话术（与放宽后的路由口径保持一致）
 OFF_TOPIC_ANSWER = (
     "抱歉，我是高考志愿填报助手，只回答与【高考、志愿填报、院校、专业、招生、录取、"
@@ -1455,3 +1501,260 @@ def answer_with_graph(query: str, top_k: int = 5) -> Dict:
         "graph_cypher": hybrid.graph_cypher,
         "graph_error": hybrid.graph_error,
     }
+
+
+# ============================================================
+# 0.9.1 三路融合：图谱 + MySQL + 向量，按「图谱 > MySQL > 向量」优先级分发
+# ============================================================
+#
+# ## 修复的问题（0.9.0 缺陷）
+# 0.9.0 的 answer_with_graph() 只有「图谱 + 向量」两路：
+#   · 学费 / 分数线 / 位次 / 选科 / 招生人数这些**字段型事实**的精确值在 MySQL 里，
+#     系统却绕道去 Chroma 翻 PDF，翻不到就拒答；
+#   · extract_sql_filters() 从 0.4.0 起就预留了，但从未真正接到 MySQL 查询；
+#   · 图谱通道异常时 except → pass 直接落到纯向量，中间没有 MySQL 兜底。
+#
+# ## 核心原则：结构化事实 > 非结构化文档
+# 三路**并联**（不是二选一），各管一段：
+#   图谱通道（Neo4j）  适合关系型问题：「XX 学校开设了哪些专业」
+#   MySQL 通道        适合字段型问题：「XX 专业 2025 年学费」
+#   向量通道（Chroma） 适合政策 / 流程 / 介绍类问题
+#
+# ## 优先级融合（不做分数融合）
+# 图谱与 MySQL 返回的都是「对/错的精确事实」，向量返回的是「相似度文本」，
+# 三者量纲不可比，因此按 图谱 > MySQL > 向量 的顺序排列上下文，
+# 并在 Prompt 里声明权威关系，而不是把相似度和精确值一起排序。
+#
+# ## 失败处理
+# 任一路异常只跳过该路，其余两路继续；三路都空 → 返回拒答话术，
+# 绝不允许本地模型用预训练知识编造数字。
+HYBRID_FUSION_PROMPT = """你是高考志愿填报助手。请严格根据以下背景回答用户问题。
+
+【优先级声明】
+{priority_hint}
+
+【图谱事实】（权威精确数据）：
+{graph_context}
+
+【数据库精确值】（权威精确数据）：
+{mysql_context}
+
+【政策/介绍文本】（用于补充说明，不作为数字依据）：
+{vector_context}
+
+用户提问：{question}
+
+回答要求：
+1. 优先使用【图谱事实】和【数据库精确值】中的结构化数据（学费、分数线、位次、选科、招生人数）
+2. 【政策/介绍文本】用于补充政策、流程、背景类信息，不用于数字依据
+3. 如果两段权威数据冲突，以【图谱事实】为准
+4. 所有背景都没有相关信息时，必须回答"根据现有资料未查询到具体信息，建议查阅学校官方招生简章"
+5. 禁止使用预训练知识补充任何数字
+6. 禁止使用"通常、大概、一般来说"来推测数字
+"""
+
+
+def build_hybrid_prompt(
+    priority_hint: str,
+    graph_context: str,
+    mysql_context: str,
+    vector_context: str,
+    question: str,
+) -> str:
+    """拼接三路融合 Prompt（单一职责：只负责组装，不负责检索与生成）。
+
+    priority_hint 由调用方根据三路命中情况动态生成，见 _build_hybrid_priority_hint()。
+    """
+    return HYBRID_FUSION_PROMPT.format(
+        priority_hint=priority_hint,
+        graph_context=graph_context or "（无）",
+        mysql_context=mysql_context or "（无）",
+        vector_context=vector_context or "（无）",
+        question=question,
+    )
+
+
+def _build_hybrid_priority_hint(graph_hit: bool, mysql_hit: bool, vector_hit: bool) -> str:
+    """按三路命中组合生成优先级声明（Prompt 的 Level 1 优先级在这里落地）。"""
+    if graph_hit and mysql_hit:
+        return "图谱事实和数据库精确值均为权威数据，冲突时以图谱为准。"
+    if graph_hit and vector_hit:
+        return "图谱事实为权威数据，政策文本用于补充说明。"
+    if mysql_hit and vector_hit:
+        return "数据库精确值为权威数据，政策文本用于补充说明。"
+    if graph_hit:
+        return "本次仅检索到图谱事实，请严格基于其回答，禁止编造。"
+    if mysql_hit:
+        return "本次仅检索到数据库精确值，请严格基于其回答，禁止编造。"
+    if vector_hit:
+        return "本次仅检索到政策文本，请基于其回答；找不到具体数字时明确说明，禁止编造。"
+    return "三路均未检索到相关信息，请返回预设拒答话术，禁止编造。"
+
+
+def answer_with_hybrid(question: str, top_k: int = 5) -> Dict:
+    """三路融合问答主流程：图谱 + MySQL + 向量并行检索，按优先级分发。
+
+    流程：
+      Step 1  detect_structured_intent() 判断是不是字段型问题（决定 MySQL 路是否参与）
+      Step 2  ThreadPoolExecutor(max_workers=3) 三路并行
+      Step 3  按 图谱 > MySQL > 向量 拼接上下文，向量按 VECTOR_MAX_TOKENS 裁剪
+      Step 4  三路都空 → 直接返回拒答，不调用大模型（省一次网络往返，也防止编造）
+      Step 5  build_hybrid_prompt() → ask() 生成
+
+    :param question: 用户问题
+    :param top_k:    向量通道召回条数
+    :return:         见模块 docstring 的返回结构；任一路异常只跳过该路
+    """
+    # ---- Step 1：结构化意图识别 ----
+    intents = detect_structured_intent(question)
+
+    # ---- Step 2：三路并行（任一路异常只让该路为空，不影响其他路）----
+    graph_context, graph_cypher, graph_error = "", "", ""
+    mysql_context, mysql_error = "", ""
+    vector_text, vector_hit = "", False
+    sources: List[str] = ["Neo4j 图谱"]  # 占位会在下面按命中情况重建
+
+    def _graph_channel():
+        engine = _get_graph_engine()
+        return engine.query(question) if engine is not None else None
+
+    def _mysql_channel():
+        if not intents or not settings.MYSQL_QUERY_ENABLED:
+            return None
+        from app.services.sql_query_engine import MySQLQueryEngine
+
+        filters = rag_service_extract_sql_filters(question) or {}
+        filters["intents"] = intents
+        return MySQLQueryEngine().query_structured(filters)
+
+    def _vector_channel():
+        hits = search(question, top_k) or []
+        if not hits:
+            return "", []
+        text = "\n".join(
+            f"[{(h.get('metadata') or {}).get('filename') or '知识库'}] {h.get('text', '')}"
+            for h in hits
+        )
+        names = sorted({(h.get("metadata") or {}).get("filename") or "知识库" for h in hits})
+        return text, names
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        future_graph = pool.submit(_graph_channel)
+        future_mysql = pool.submit(_mysql_channel)
+        future_vector = pool.submit(_vector_channel)
+
+        try:
+            graph_out = future_graph.result()
+        except Exception as exc:  # noqa: BLE001 图谱路异常 → 该路置空
+            graph_out, graph_error = None, f"图谱通道异常：{exc.__class__.__name__}"
+        try:
+            mysql_out = future_mysql.result()
+        except Exception as exc:  # noqa: BLE001 MySQL 路异常 → 该路置空
+            mysql_out, mysql_error = None, f"MySQL 通道异常：{exc.__class__.__name__}"
+        try:
+            vector_text, vector_names = future_vector.result()
+            vector_error = ""
+        except Exception as exc:  # noqa: BLE001 向量路异常 → 该路置空
+            vector_text, vector_names = "", []
+            vector_error = f"向量通道异常：{exc.__class__.__name__}"
+
+    graph_hit = bool(graph_out is not None and graph_out.hit)
+    if graph_out is not None:
+        graph_context = graph_out.context or ""
+        graph_cypher = graph_out.cypher or ""
+        graph_error = graph_out.error or graph_error
+
+    mysql_hit = bool(mysql_out is not None and mysql_out.get("hit"))
+    if mysql_out is not None:
+        mysql_context = mysql_out.get("context") or ""
+        mysql_error = mysql_out.get("error") or mysql_error
+
+    vector_hit = bool(vector_text)
+    if vector_hit:
+        # Level 2 配额：向量上下文按 VECTOR_MAX_TOKENS 裁剪（图谱 / MySQL 是精确值，不裁）
+        vector_text = _truncate_by_tokens(vector_text, settings.VECTOR_MAX_TOKENS)
+
+    # ---- Step 3：按优先级拼接（图谱 > MySQL > 向量）----
+    contexts: List[str] = []
+    if graph_hit:
+        contexts.append("【图谱事实】（权威精确数据）：\n" + graph_context)
+    if mysql_hit:
+        contexts.append("【数据库精确值】（权威精确数据）：\n" + mysql_context)
+    if vector_hit:
+        contexts.append("【政策/介绍文本】（用于补充说明，不作为数字依据）：\n" + vector_text)
+
+    # ---- 来源去重（图谱 / MySQL / 文件名）----
+    sources = []
+    if graph_hit:
+        sources.append("Neo4j 图谱")
+    if mysql_hit:
+        sources.append("MySQL 招生数据")
+    sources.extend(vector_names if vector_hit else [])
+
+    # ---- Step 4：三路都空 → 拒答，不调大模型 ----
+    if not contexts:
+        return {
+            "answer": "根据现有资料未查询到具体信息，建议查阅学校官方招生简章。",
+            "source": "hybrid_empty",
+            "sources": [],
+            "graph_hit": False,
+            "mysql_hit": False,
+            "vector_hit": False,
+            "fusion_strategy": FUSION_STRATEGY,
+            "graph_cypher": "",
+            "graph_error": graph_error,
+            "mysql_error": mysql_error,
+            "vector_error": vector_error,
+        }
+
+    # ---- Step 5：组装 Prompt 并生成 ----
+    priority_hint = _build_hybrid_priority_hint(graph_hit, mysql_hit, vector_hit)
+    prompt = build_hybrid_prompt(
+        priority_hint=priority_hint,
+        graph_context=graph_context if graph_hit else "",
+        mysql_context=mysql_context if mysql_hit else "",
+        vector_context=vector_text if vector_hit else "",
+        question=question,
+    )
+
+    from app.services.ai_service import ask
+
+    answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=500, timeout=60)
+    if not answer:
+        raise RuntimeError("大模型响应超时")
+
+    logger.info(
+        "[HYBRID] 三路融合完成 strategy=%s graph_hit=%s mysql_hit=%s vector_hit=%s intents=%s",
+        FUSION_STRATEGY, graph_hit, mysql_hit, vector_hit, intents,
+    )
+    return {
+        "answer": answer,
+        "source": f"hybrid:{FUSION_STRATEGY}",
+        "sources": sources,
+        "graph_hit": graph_hit,
+        "mysql_hit": mysql_hit,
+        "vector_hit": vector_hit,
+        "fusion_strategy": FUSION_STRATEGY,
+        "graph_cypher": graph_cypher,
+        "graph_error": graph_error,
+        "mysql_error": mysql_error,
+        "vector_error": vector_error,
+    }
+
+
+def rag_service_extract_sql_filters(question: str) -> Optional[Dict]:
+    """0.4.0 预留函数的薄封装：提取 MySQL 查询条件（school_name / major_name / year）。
+
+    单独包一层是为了让 answer_with_hybrid() 里的 _mysql_channel 闭包
+    不直接依赖模块级函数名，便于测试时替换（依赖倒置）。
+    """
+    return extract_sql_filters(question)
+
+
+def answer_with_graph(question: str, top_k: int = 5) -> dict:
+    """0.9.0 兼容别名：内部转发到 answer_with_hybrid（三路融合）。
+
+    保留是为了不让 0.9.0 的调用方（测试脚本、外部脚本）报 AttributeError；
+    新代码请直接调用 answer_with_hybrid()。
+    """
+    return answer_with_hybrid(question, top_k)
