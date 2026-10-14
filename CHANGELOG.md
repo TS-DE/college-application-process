@@ -53,8 +53,151 @@
 | **0.7.1** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.7.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
-| **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 本次发布 |
+| **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 已发布 |
+| **0.9.1** | 2026-10-14 | 父子块（不变） | + 三路融合检索（图谱 + MySQL + 向量），按「图谱 > MySQL > 向量」优先级分发 | 父块 + 图谱三元组 + **MySQL 精确值** | ✅ 本次热修复 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.9.1] - 2026-10-14 · 热修复：三路融合检索（图谱 + MySQL + 向量）按优先级分发
+
+### 一、原有技术（0.9.0）及缺陷
+
+| 环节 | 0.9.0 的技术 | 存在的缺陷 |
+|---|---|---|
+| 检索分发 | `answer_with_graph()` 只做「图谱 + 向量」两路 | ① 缺 MySQL 这一路：学费 / 分数线 / 位次 / 选科 / 招生人数的精确值明明在 MySQL 里，却绕道去 Chroma 翻 PDF，翻不到就拒答；② 用户体验差 |
+| 结构化意图 | 无 | 无论问什么都只走 Chroma，没有「先判断是不是结构化查询」这一层 |
+| 图谱异常降级 | `except → pass` 直接落到纯向量 | 中间没有 MySQL 兜底 |
+| 防幻觉 Prompt | `GRAPH_FUSION_PROMPT` 只声明「图谱为准」 | 没有针对 MySQL 精确值的优先级声明，也没有对「三路都空必须拒答」的强约束 |
+
+**实测对照**（同一问题「福州大学至诚学院计算机专业学费是多少？选科要求是什么？」）：
+
+| 链路 | 回答 |
+|---|---|
+| 0.9.0 图谱 + 向量 | 拒答（Chroma 里只有 PDF 文本，没有精确学费） |
+| 0.9.1 图谱 + MySQL + 向量 | 学费 **23000 元/年**；选科要求：首选物理，再选化学 |
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新增结构化意图识别（`rag_service.py`）
+
+```python
+STRUCTURED_INTENT_KEYWORDS = {
+    "tuition":     ["学费", "费用", "多少钱", "收费"],
+    "min_score":   ["分数线", "最低分", "录取分", "投档线", "多少分"],
+    "min_rank":    ["位次", "排名", "最低位次"],
+    "subject_req": ["选科", "选考", "科目要求", "首选", "再选"],
+    "plan_count":  ["招生计划", "招多少人", "招生人数", "计划数"],
+}
+
+def detect_structured_intent(query: str) -> list[str]: ...
+```
+
+单一职责：只做「是不是字段型问题」的判断，不查库、不检索。返回空列表表示走向量通道。
+
+#### 2. 新增 MySQL 结构化查询引擎（`services/sql_query_engine.py`）
+
+`MySQLQueryEngine.query_structured(filters)` 按 intents 分组查询后合并成自然语言：
+
+| 意图 | 数据表 | 输出示例 |
+|---|---|---|
+| `tuition` / `plan_count` | `enrollment_plan_{year}_henan` | `{学校}{专业}专业2025年学费为23000元/年。` |
+| `subject_req` / `min_score` / `min_rank` | `major_admission_{year}_henan` | `{学校}{专业}专业2025年最低录取分460分。` |
+
+> **表结构说明**：本项目字段拆在两张表里（投档事实在 `major_admission`，招生计划在 `enrollment_plan`），
+> 与任务书假设的单表不同，故按真实 schema 拆成两组查询后合并，而不是做一张大 JOIN
+> （录取行与计划行数量级不同，JOIN 会产生笛卡尔积噪声）。
+
+安全设计：表名来自 `app.models.dataset.table_name()` 固定模板且年份只接受 4 位数字；
+查询条件一律参数化绑定（`:school` / `:major`），不字符串拼接；DB 异常一律返回 `hit=False` 不向上抛。
+
+#### 3. 新增三路融合主函数（`rag_service.answer_with_hybrid()`）
+
+```
+Step 1  detect_structured_intent()          判断是不是字段型问题
+Step 2  ThreadPoolExecutor(max_workers=3)   三路并行
+          · GraphQueryEngine.query()        → Neo4j
+          · MySQLQueryEngine.query_structured() → MySQL（仅 intents 非空时）
+          · rag_service.search()            → Chroma
+Step 3  按 图谱 > MySQL > 向量 拼接上下文，向量按 VECTOR_MAX_TOKENS 裁剪
+Step 4  三路都空 → 直接返回拒答，不调大模型
+Step 5  build_hybrid_prompt() → ask() 生成
+```
+
+任一路异常只跳过该路，其余两路继续；三路都异常才返回 `hybrid_empty`。
+
+#### 4. Prompt 强化防幻觉（`HYBRID_FUSION_PROMPT` / `build_hybrid_prompt()`）
+
+新增 6 条硬约束：优先用结构化数据、政策文本不作数字依据、冲突以图谱为准、
+三路都空必须拒答、**禁止用预训练知识补数字**、**禁止用「通常/大概」推测数字**。
+`priority_hint` 按命中组合动态生成（图谱+MySQL / 仅图谱 / 仅 MySQL / 图谱+向量 / MySQL+向量 / 仅向量）。
+
+#### 5. 接口分发修正（`routers/ai.py`）
+
+`_chat_sync()` 的图谱分支由 `answer_with_graph()` 改为 `answer_with_hybrid()`，
+响应新增 `mysql_hit` 与 `mysql_error` 字段；`use_graph=false` 路径保持 0.8.0 行为不变（向后兼容）。
+
+#### 6. 配置项（`config.py` 新增）
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `MYSQL_QUERY_ENABLED` | `1` | MySQL 路总开关，关闭后只走图谱 + 向量 |
+| `MYSQL_MAX_ROWS` | `5` | MySQL 单次查询最大返回行数 |
+
+### 三、验证流程
+
+#### 1. 最小用例
+
+```bash
+cd backend
+python test_hybrid_rag.py           # 桩版 6 个用例，不连库不调 LLM
+python test_hybrid_rag.py --real    # 真实链路：连 MySQL
+```
+
+桩版输出（节选）：
+
+```
+用例 1：结构化意图识别
+  福州大学至诚学院计算机专业学费是多少？选科要求是什么？ → ['tuition', 'subject_req']
+  非结构化问题 → []
+用例 2：MySQLQueryEngine.query_structured
+  hit=True
+    福州大学至诚学院计算机科学与技术专业2025年学费为23000元/年。
+    福州大学至诚学院计算机科学与技术专业选科要求：首选物理再选化学。
+  参数化校验通过：school=%福州大学至诚学院% major=%计算机% limit=5
+  两表拆分：enrollment_plan(学费/计划) + major_admission(分数线/位次/选科)
+用例 3：仅 MySQL 命中（三路融合）
+  source=hybrid:priority_quota graph_hit=False mysql_hit=True vector_hit=False
+用例 4：三路全空（hybrid_empty）
+  source=hybrid_empty
+  answer=根据现有资料未查询到具体信息，建议查阅学校官方招生简章。
+```
+
+#### 2. 接口级验证（`POST /api/ai/chat`，`use_rag=true, use_graph=true`）
+
+| 问题 | `source` | `mysql_hit` | `vector_hit` | 回答 |
+|---|---|---|---|---|
+| 福州大学至诚学院计算机专业学费是多少？选科要求是什么？ | `hybrid:priority_quota` | **true** | true | 学费 **23000 元/年**；选科要求：首选物理，再选化学 |
+| 福州大学至诚学院计算机专业2025年在河南的录取最低分和位次是多少？ | `hybrid:priority_quota` | **true** | true | 最低录取分 **460 分**，最低位次 **287531** |
+| 河南本科批志愿怎么填报？ | `hybrid:priority_quota` | false | true | 基于政策文本回答平行志愿填报规则 |
+| 纯向量兼容（`use_graph=false`） | `advanced:corrective` | — | — | 与 0.8.0 行为一致 |
+
+#### 3. 回归验证
+
+```bash
+cd backend
+python smoke_test.py        # 业务接口全部 200
+python smoke_rag.py         # chat: source=hybrid:priority_quota，RAG SMOKE DONE
+```
+
+### 四、后续演进方向（0.10.0）
+
+| 方向 | 说明 |
+|---|---|
+| Level 3 串行筛选 | 图谱 / MySQL 能完整回答时跳过向量检索，进一步降噪降延迟 |
+| 图谱 Schema 自动扩展 | 从 MySQL 元数据自动推断新节点 / 关系 |
+| MySQL 查询结果纳入评估 | 在 0.8.0 的评估体系里增加 `mysql_hit_rate` 指标 |
+| 表格结构化处理 | 分数线表 → 自然语言三元组，供图谱与评估共用 |
 
 ---
 

@@ -183,6 +183,14 @@ class Settings:
     GRAPH_LLM_EXTRACT_ENABLED: bool = _env("GRAPH_LLM_EXTRACT_ENABLED", "1") not in {"0", "false", "False"}
     GRAPH_DICT_EXTRACT_ENABLED: bool = _env("GRAPH_DICT_EXTRACT_ENABLED", "1") not in {"0", "false", "False"}
 
+    # ---------------- 0.9.1 三路融合（图谱 + MySQL + 向量） ----------------
+    # MySQL 结构化查询总开关：关闭后 answer_with_hybrid 只走「图谱 + 向量」两路。
+    # 开启时，学费 / 分数线 / 位次 / 选科 / 招生人数这类字段型问题直接查
+    # major_admission_{year}_henan 拿精确值，不再绕道 Chroma 翻 PDF。
+    MYSQL_QUERY_ENABLED: bool = _env("MYSQL_QUERY_ENABLED", "1") not in {"0", "false", "False"}
+    # MySQL 单次查询最大返回行数（限制上下文长度，避免一次回传过多行）
+    MYSQL_MAX_ROWS: int = int(_env("MYSQL_MAX_ROWS", "5"))
+
     @property
     def DATABASE_URL(self) -> str:
         pwd = quote_plus(self.DB_PASSWORD)

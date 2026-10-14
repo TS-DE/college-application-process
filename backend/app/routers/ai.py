@@ -83,9 +83,13 @@ async def chat(payload: dict) -> dict:
 def _chat_sync(payload: dict) -> dict:
     """原 /chat 同步实现，独立出来便于在线程池中运行。
 
-    0.9.0：新增 `use_graph` 开关（默认 true）。开启且 `GRAPH_ENABLED=1` 时先走
+    0.9.0：新增 `use_graph` 开关（默认 true）。开启且 `GRAPH_ENABLED=1` 时走
     「图谱 + 向量」双通道优先级融合（`rag_service.answer_with_graph`），
     任一路失败都会自动降级；`use_graph=false` 时保持 0.8.0 的纯向量行为不变。
+
+    0.9.1：图谱分支升级为「图谱 + MySQL + 向量」三路融合
+    （`rag_service.answer_with_hybrid`），按「图谱 > MySQL > 向量」优先级分发，
+    响应新增 `mysql_hit` 字段。
     """
     from app.services import rag_service
     from app.services.ai_service import ai_enabled, ask
@@ -107,24 +111,26 @@ def _chat_sync(payload: dict) -> dict:
             "sources": [],
         }
 
-    # ---- 0.9.0 ③ 知识图谱双通道：use_graph=true 时走「图谱 + 向量」优先级融合 ----
+    # ---- 0.9.1 ③ 三路融合：use_graph=true 时走「图谱 + MySQL + 向量」优先级分发 ----
     # 与下面的纯向量链路完全隔离：use_graph=false 时行为与 0.8.0 一致（向后兼容）
     use_graph = bool(payload.get("use_graph", True)) and rag_service.settings.GRAPH_ENABLED
     if use_rag and use_graph:
         try:
-            hybrid = rag_service.answer_with_graph(question, top_k=int(payload.get("top_k") or 5))
+            hybrid = rag_service.answer_with_hybrid(question, top_k=int(payload.get("top_k") or 5))
             return {
                 "answer": hybrid["answer"],
                 "source": hybrid["source"],
                 "sources": hybrid["sources"],
-                # 双通道调试/统计字段（前端可展示「图谱命中 / 向量命中 / 实际 Cypher」）
+                # 三路调试/统计字段（前端可展示「图谱命中 / 数据库命中 / 向量命中 / 实际 Cypher」）
                 "graph_hit": hybrid["graph_hit"],
+                "mysql_hit": hybrid["mysql_hit"],
                 "vector_hit": hybrid["vector_hit"],
                 "fusion_strategy": hybrid["fusion_strategy"],
-                "graph_cypher": hybrid["graph_cypher"],
+                "graph_cypher": hybrid.get("graph_cypher", ""),
                 "graph_error": hybrid.get("graph_error", ""),
+                "mysql_error": hybrid.get("mysql_error", ""),
             }
-        except Exception:  # noqa: BLE001 图谱链路异常 → 回落下面的纯向量流程
+        except Exception:  # noqa: BLE001 三路链路异常 → 回落下面的纯向量流程
             pass
 
     # ---- 0.7.0 ② Modular RAG：按 Query 特征走 Self-RAG / Corrective RAG / 标准 RAG ----
