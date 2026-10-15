@@ -109,21 +109,40 @@ _collection_dim_cache: Optional[int] = None
 
 
 def _collection_dimension() -> Optional[int]:
-    """读取已有集合里第一条向量的维度（结果缓存一次，避免每次都查库）。
+    """读取集合被 pin 住的向量维度（结果缓存一次，避免每次都查库）。
 
-    用途：写入/查询前把 Ali embedding 的维度对齐到已有集合，
+    用途：写入/查询前把 Ali embedding 的维度对齐到集合，
     否则 text-embedding-v3 默认 128 维会与历史 768 维数据冲突，Chroma 直接拒绝写入。
+
+    取值顺序（★ 顺序是关键，0.9.1 修复的 bug 就出在这里）：
+      ① `col._model.dimension`：Chroma 1.x 会把集合维度 pin 在集合元数据里，
+         **即使集合被删空也依然保留 768**。
+         旧实现只读「第一条向量的长度」，文件全部删除后读不到 → 回落到
+         `ALI_EMBED_DIMENSION`(128) → 上传时报
+         "Collection expecting embedding with dimension of 768, got 128"。
+      ② 第一条向量的长度：兼容不暴露 `_model` 的旧版 chromadb；
+      ③ None：由调用方回落到 `ALI_EMBED_DIMENSION`（仅全新集合时才是对的）。
     """
     global _collection_dim_cache
     if _collection_dim_cache is not None:
         return _collection_dim_cache
+    dim: Optional[int] = None
     try:
         col = _get_collection()
-        data = col.get(include=["embeddings"], limit=1) if col else None
-        emb = (data or {}).get("embeddings")
-        _collection_dim_cache = len(emb[0]) if emb is not None and len(emb) else None
+        if col is not None:
+            # ① 集合 pin 住的维度（删空后依然有效，优先用它）
+            pinned = getattr(getattr(col, "_model", None), "dimension", None)
+            if isinstance(pinned, int) and pinned > 0:
+                dim = pinned
+            # ② 退化方案：读第一条向量的长度
+            if dim is None:
+                data = col.get(include=["embeddings"], limit=1)
+                emb = (data or {}).get("embeddings")
+                if emb is not None and len(emb) and emb[0] is not None:
+                    dim = len(emb[0])
     except Exception:  # noqa: BLE001 查不到就按配置走
-        _collection_dim_cache = None
+        dim = None
+    _collection_dim_cache = dim
     return _collection_dim_cache
 
 
@@ -308,14 +327,28 @@ def drop_parents_by_file(file_id: int) -> int:
 # ---------------- 写入 / 删除 / 检索 ----------------
 
 def add_document(doc_id: str, text: str, metadata: dict, embedding: Optional[List[float]] = None) -> bool:
-    """写入单个切片；embedding 为 None 时内部再计算一次。"""
+    """写入单个切片；embedding 为 None 时内部再计算一次。
+
+    0.9.1：Chroma 拒绝维度不符的写入时会抛一段很难懂的原文字符串
+    （"Collection expecting embedding with dimension of 768, got 128"），
+    这里捕获后转成带处理建议的中文错误并抛出，让上传接口返回可读提示。
+    """
     col = _get_collection()
     if col is None or not text:
         return False
     vec = embedding if embedding is not None else get_embedding(text)
     if vec is None:
         return False
-    col.add(ids=[doc_id], embeddings=[vec], documents=[text], metadatas=[metadata])
+    try:
+        col.add(ids=[doc_id], embeddings=[vec], documents=[text], metadatas=[metadata])
+    except Exception as exc:  # noqa: BLE001 维度不符等写入错误 → 转成可读错误
+        expected = _collection_dimension()
+        if expected and len(vec) != expected:
+            raise RuntimeError(
+                f"向量维度不匹配：集合要求 {expected} 维，实际生成 {len(vec)} 维。"
+                f"请检查 ALI_EMBED_DIMENSION 配置或清空 chroma_db 目录后重新上传。"
+            ) from exc
+        raise
     return True
 
 

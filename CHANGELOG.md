@@ -146,6 +146,32 @@ Step 5  build_hybrid_prompt() → ask() 生成
 
 ### 三、验证流程
 
+#### 0. 热修复：上传向量化维度不匹配（0.9.1 内追加）
+
+**现象**：后台上传知识库文件时报
+`解析或向量化失败：Collection expecting embedding with dimension of 768, got 128`。
+
+**根因**：Chroma 1.x 会把集合维度 pin 在集合元数据 `col._model.dimension` 里，
+**即使集合被删空也依然保留 768**；而 `rag_service._collection_dimension()`
+旧实现只读「第一条向量的长度」，文件全部删除后读不到 → 回落到
+`ALI_EMBED_DIMENSION`(128) → Chroma 按 768 校验、我们产出 128，写入被拒。
+
+**修复**（`rag_service.py`，两处）：
+
+| 位置 | 改动 |
+|---|---|
+| `_collection_dimension()` | 取值顺序改为 ① `col._model.dimension`（删空后仍有效）→ ② 第一条向量长度（兼容旧版 chromadb）→ ③ `None`（回落到配置） |
+| `add_document()` | 捕获 Chroma 写入异常，若为维度不符则抛出带处理建议的中文错误，而不是把 Chroma 原文直接抛给前端 |
+
+**验证**：
+
+```
+collection dim = 768（修复前为 None）
+requesting dimensions = 768
+embedding len = 768
+POST /api/knowledge/upload → {"code":200,"msg":"上传并向量化成功","status":"已向量化","chunk_count":2}
+```
+
 #### 1. 最小用例
 
 ```bash
