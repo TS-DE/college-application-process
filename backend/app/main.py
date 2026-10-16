@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import settings
-from app.database import TableNotFound, ensure_indexes
+from app.database import TableNotFound, ensure_columns, ensure_indexes
 from app.routers import ai, auth, eval as eval_router, knowledge, meta, recommend, stats, student, university
 
 app = FastAPI(
@@ -55,11 +55,15 @@ _HEALTH_TTL_SECONDS = 5.0
 
 
 async def _background_indexes() -> None:
-    """后台补建索引，不阻塞服务启动。"""
+    """后台补建索引 + 补列，不阻塞服务启动。"""
     try:
         created = await run_in_threadpool(ensure_indexes)
         if created:
             print(f"[startup] 已创建索引：{', '.join(created)}")
+        # 0.10.0：knowledge_files 新增 ocr_used / image_count，老库需要幂等补列
+        added = await run_in_threadpool(ensure_columns)
+        if added:
+            print(f"[startup] 已补列：{', '.join(added)}")
     except Exception as exc:  # noqa: BLE001
         print(f"[startup] 索引检查跳过：{exc}")
 

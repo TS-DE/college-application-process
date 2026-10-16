@@ -100,6 +100,45 @@ _INDEXES: Dict[str, str] = {
 }
 
 
+# 业务表的「补列」迁移：项目没有 Base.metadata.create_all，新加的列必须幂等 ALTER
+# key = 表名，value = [(列名, 列定义 SQL), ...]
+_COLUMN_MIGRATIONS: Dict[str, List[tuple]] = {
+    "knowledge_files": [
+        ("ocr_used", "INT DEFAULT 0"),
+        ("image_count", "INT DEFAULT 0"),
+    ],
+}
+
+
+def ensure_columns() -> List[str]:
+    """为业务表补齐新增列（幂等，启动时调用）。
+
+    MySQL 不支持 `ADD COLUMN IF NOT EXISTS`，因此先查 information_schema 再决定是否 ALTER。
+    单列失败不影响其他列（老库可能已有部分列）。
+    """
+    added: List[str] = []
+    with engine.begin() as conn:
+        for table, columns in _COLUMN_MIGRATIONS.items():
+            existing = {
+                r[0] for r in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = :db AND table_name = :t"
+                    ),
+                    {"db": settings.DB_NAME, "t": table},
+                )
+            }
+            for name, ddl in columns:
+                if name in existing:
+                    continue
+                try:
+                    conn.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{name}` {ddl}"))
+                    added.append(f"{table}.{name}")
+                except Exception:  # noqa: BLE001 补列失败不阻塞启动
+                    pass
+    return added
+
+
 def ensure_indexes(kinds: Sequence[str] = tuple(_INDEXES.keys())) -> List[str]:
     """为已导入的表补索引（幂等）。TEXT 列必须指定前缀长度。"""
     created: List[str] = []

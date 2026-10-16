@@ -111,6 +111,19 @@ def _chat_sync(payload: dict) -> dict:
             "sources": [],
         }
 
+    # ---- 0.10.0 ② 多模态「以文搜图」：命中关键词才走，未命中/未命中图都回落三路融合 ----
+    # 只做以文搜图（文字问题 → 检索图片 → VLM 解读），不做以图搜文与图文混合融合
+    if use_rag and rag_service.should_use_multimodal(question):
+        mm = rag_service.answer_with_multimodal(question)
+        if mm:
+            return {
+                "answer": mm["answer"],
+                "source": mm["source"],
+                "sources": mm["sources"],
+                "image_hit": mm["image_hit"],
+                "images": mm["images"],
+            }
+
     # ---- 0.9.1 ③ 三路融合：use_graph=true 时走「图谱 + MySQL + 向量」优先级分发 ----
     # 与下面的纯向量链路完全隔离：use_graph=false 时行为与 0.8.0 一致（向后兼容）
     use_graph = bool(payload.get("use_graph", True)) and rag_service.settings.GRAPH_ENABLED

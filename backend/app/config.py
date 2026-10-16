@@ -191,6 +191,44 @@ class Settings:
     # MySQL 单次查询最大返回行数（限制上下文长度，避免一次回传过多行）
     MYSQL_MAX_ROWS: int = int(_env("MYSQL_MAX_ROWS", "5"))
 
+    # ---------------- 0.10.0 OCR 预处理（扫描件 PDF） ----------------
+    # OCR 总开关：关闭后扫描件 PDF 仍按原方式提取（提不到文字就只能切出极少片段）
+    OCR_ENABLED: bool = _env("OCR_ENABLED", "1") not in {"0", "false", "False"}
+    # 首选 OCR 模型（阿里云 OpenAI 兼容接口）；不可用（如额度耗尽）时自动回落到
+    # MULTIMODAL_VLM_MODEL 指定的视觉模型，两条路都走同一个 Ali Key 与 base_url
+    OCR_MODEL: str = _env("OCR_MODEL", "qwen-vl-ocr")
+    # 扫描件判定阈值：每页平均字符数低于该值即认为是扫描件，触发 OCR
+    OCR_SCANNED_THRESHOLD: int = int(_env("OCR_SCANNED_THRESHOLD", "50"))
+    # 单次 OCR 最多处理的页数（防止超大 PDF 把上传接口拖到超时）
+    OCR_MAX_PAGES: int = int(_env("OCR_MAX_PAGES", "50"))
+    # OCR 并发页数：每页都要走一次视觉模型调用，串行太慢（实测单页 20-35 秒）
+    OCR_CONCURRENCY: int = int(_env("OCR_CONCURRENCY", "4"))
+
+    # ---------------- 0.10.0 多模态「以文搜图」 ----------------
+    # 触发关键词：问题命中任一关键词才走图像检索通道，其余问题仍走三路融合
+    # 注：除任务给定词表外补了「课程」——「XX 专业有哪些课程」这类问题的答案通常在
+    # 培养方案 / 课程体系图里，不加这个词就以文搜图永远触发不了。
+    # 触发但搜不到图时会自动回落三路融合，不会误伤纯文本问题。
+    MULTIMODAL_TRIGGER_KEYWORDS: str = _env(
+        "MULTIMODAL_TRIGGER_KEYWORDS",
+        "图,图片,照片,截图,图表,课程表,培养方案,校园,环境,长什么样,课程体系,学分结构,流程图,课程",
+    )
+    # 多模态总开关：关闭后 answer_with_multimodal 直接返回 None，回落到三路融合
+    MULTIMODAL_ENABLED: bool = _env("MULTIMODAL_ENABLED", "1") not in {"0", "false", "False"}
+    # 图像向量集合名（与文本集合 gaokao_knowledge 分开，独立向量空间）
+    IMAGE_COLLECTION: str = _env("IMAGE_COLLECTION", "gaokao_images")
+    # 图像编码器优先级：clip 优先用 Chinese-CLIP（需额外安装），不可用则用
+    # caption 方案（视觉模型生成图注 → 文本向量编码，无需本地模型）
+    IMAGE_ENCODER: str = _env("IMAGE_ENCODER", "auto")
+    # 多模态问答用的视觉语言模型（阿里云 OpenAI 兼容，支持图文输入）
+    MULTIMODAL_VLM_MODEL: str = _env("MULTIMODAL_VLM_MODEL", "qwen3.7-flash-2026-07-15")
+    # 单张图片送 VLM 前的最长边（像素）：控制 base64 体积与调用耗时
+    IMAGE_MAX_SIDE: int = int(_env("IMAGE_MAX_SIDE", "1024"))
+    # 单个文件最多提取并入库多少张图片（防止图多的 PDF 把上传拖到超时）
+    MULTIMODAL_MAX_IMAGES: int = int(_env("MULTIMODAL_MAX_IMAGES", "30"))
+    # 图像检索默认返回条数
+    MULTIMODAL_TOP_K: int = int(_env("MULTIMODAL_TOP_K", "3"))
+
     @property
     def DATABASE_URL(self) -> str:
         pwd = quote_plus(self.DB_PASSWORD)

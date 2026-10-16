@@ -15,6 +15,10 @@ class KnowledgeFileOut(BaseModel):
     status: Optional[str] = None
     uploaded_by: Optional[int] = None
     uploader_name: Optional[str] = None
+    # 0.10.0 OCR：是否走了 OCR 兜底（扫描件 PDF 为 1）
+    ocr_used: Optional[int] = None
+    # 0.10.0 多模态：入库的图片数量
+    image_count: Optional[int] = None
 
     class Config:
         from_attributes = True

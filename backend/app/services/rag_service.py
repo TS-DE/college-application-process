@@ -1791,3 +1791,91 @@ def answer_with_graph(question: str, top_k: int = 5) -> dict:
     新代码请直接调用 answer_with_hybrid()。
     """
     return answer_with_hybrid(question, top_k)
+
+
+# ============================================================
+# 0.10.0 多模态「以文搜图」
+# ============================================================
+#
+# ## 设计边界
+# 本次只做**以文搜图**：文字问题 → 检索图片 → 视觉模型解读成文字回答。
+# 不做以图搜文，也不做图文混合融合（那是 0.11.0 的候选方向）。
+#
+# ## 为什么用关键词触发而不是所有问题都试
+# 图像检索要额外跑一次编码 + 一次 Chroma 查询，给每个问题都做一遍是纯浪费。
+# 只有问题里出现「图 / 照片 / 课程表 / 培养方案 / 校园 / 长什么样」这类词，
+# 才说明用户想看图，此时才走图像通道；否则直接走 0.9.1 的三路融合。
+#
+# ## 合成复用
+# 具体能力全部在 services/multimodal/ 里，这里只做「判断要不要用」与「转发」，
+# 不重复实现编码、存储、检索（迪米特法则 + 单一职责）。
+_multimodal_retriever = None
+
+
+def _get_multimodal_retriever():
+    """懒加载图像检索器（进程内复用）；不可用时返回 None。"""
+    global _multimodal_retriever
+    if _multimodal_retriever is not None:
+        return _multimodal_retriever or None
+    try:
+        from app.services.multimodal import ImageRetriever
+
+        _multimodal_retriever = ImageRetriever()
+    except Exception as exc:  # noqa: BLE001 多模态模块整体不可用 → 回落到三路融合
+        logger.info("[MM] 图像检索器初始化失败，回落到三路融合：%s", exc.__class__.__name__)
+        _multimodal_retriever = False
+    return _multimodal_retriever or None
+
+
+def should_use_multimodal(question: str) -> bool:
+    """是否应该走图像检索通道（委托给 ImageRetriever.should_trigger）。
+
+    多模态总开关关闭、模块不可用、或问题没命中关键词时都返回 False。
+    """
+    if not settings.MULTIMODAL_ENABLED:
+        return False
+    retriever = _get_multimodal_retriever()
+    if retriever is None:
+        return False
+    try:
+        return retriever.should_trigger(question)
+    except Exception:  # noqa: BLE001 判断失败按不走多模态处理
+        return False
+
+
+def answer_with_multimodal(question: str, top_k: int = 3) -> Optional[Dict]:
+    """多模态问答：以文搜图 + 视觉模型解读。
+
+    流程：Chinese-CLIP（或图注向量）编码问题 → 查 Chroma gaokao_images
+          → 命中图片交给 qwen3.7-flash 解读 → 生成文字回答。
+
+    :return: {"answer", "source": "multimodal:image", "images": [...], "image_hit": bool}
+             未命中图片 / 模块不可用 / VLM 失败时返回 None，
+             由 routers/ai.py 回落到 0.9.1 的三路融合（保证问答不中断）。
+    """
+    retriever = _get_multimodal_retriever()
+    if retriever is None:
+        return None
+    try:
+        result = retriever.answer(question, top_k=top_k)
+    except Exception as exc:  # noqa: BLE001 多模态链路异常 → 回落三路融合
+        logger.info("[MM] 多模态问答异常，回落三路融合：%s", exc.__class__.__name__)
+        return None
+
+    if not result or not result.get("image_hit"):
+        return None
+
+    logger.info(
+        "[MM] 以文搜图命中 %d 张：%s",
+        len(result.get("images") or []), question[:40],
+    )
+    return {
+        "answer": result["answer"],
+        "source": "multimodal:image",
+        "sources": [
+            f"{(im.get('filename') or '图片')}#P{im.get('page') or '?'}"
+            for im in (result.get("images") or [])
+        ],
+        "image_hit": True,
+        "images": result.get("images") or [],
+    }

@@ -10,7 +10,9 @@ export function uploadKnowledge(file: File) {
     method: 'POST',
     data: form,
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000
+    // 0.10.0：扫描件 PDF 要走 OCR（每页约 20-35 秒，4 路并发），
+    // 19 页的《高考志愿录取顺序.pdf》约需 2-3 分钟，超时从 2 分钟放宽到 10 分钟
+    timeout: 600000
   })
 }
 

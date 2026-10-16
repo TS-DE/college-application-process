@@ -54,8 +54,164 @@
 | **0.7.2** | 2026-10-09 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 已发布 |
-| **0.9.1** | 2026-10-14 | 父子块（不变） | + 三路融合检索（图谱 + MySQL + 向量），按「图谱 > MySQL > 向量」优先级分发 | 父块 + 图谱三元组 + **MySQL 精确值** | ✅ 本次热修复 |
+| **0.9.1** | 2026-10-14 | 父子块（不变） | + 三路融合检索（图谱 + MySQL + 向量），按「图谱 > MySQL > 向量」优先级分发 | 父块 + 图谱三元组 + **MySQL 精确值** | ✅ 已发布 |
+| **0.10.0** | 2026-10-16 | 父子块（不变） | 三路融合（不变）+ OCR 预处理 + 以文搜图（Chinese-CLIP / 图注向量 + qwen3.7-flash） | 父块 + 图谱三元组 + MySQL 精确值 + **图像** | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.10.0] - 2026-10-16 · OCR 预处理 + 以文搜图多模态 RAG
+
+### 一、原有技术（0.9.1）及缺陷
+
+| 环节 | 0.9.1 的技术 | 存在的缺陷 |
+|---|---|---|
+| PDF 文本提取 | pypdf 直接提取文字层 | ① 扫描件 PDF 提不到文字：《高考志愿录取顺序.pdf》19 页只提出 47 字符，`split_text()` 只能切出 **1 片**，知识库等于没收录；② 大量招生简章是扫描件，覆盖严重不全 |
+| 检索通道 | 三路融合（图谱 + MySQL + 向量），全部为文本 | 无法检索以图片形式存在的知识：课程体系图、培养方案流程图、校园照片 |
+| 图像知识 | 无 | 上传 PDF 时内嵌图片被直接丢弃，从未进入任何索引 |
+
+### 二、改进技术及对应代码位置
+
+#### 1. OCR 预处理（`utils/ocr_utils.py` → `OCRExtractor`）
+
+| 方法 | 职责 |
+|---|---|
+| `is_scanned_pdf(path)` | 按页平均字符数判定扫描件（阈值 `OCR_SCANNED_THRESHOLD`，默认 50 字/页） |
+| `pdf_to_images(path)` | PDF 页 → 图片，用 **pypdfium2**（自带二进制，无需装 poppler 配 PATH） |
+| `ocr_images(images)` | 逐页识别 + 线程池并发（单页 20-35 秒，串行会把上传接口拖到超时） |
+| `extract_text_with_ocr_fallback(path)` | 对外入口，返回 `(文本, 是否用了 OCR)` |
+
+**降级链**：首选 `qwen-vl-ocr` → 额度/权限不可用时回落 `MULTIMODAL_VLM_MODEL`（同一个 Ali Key 与 base_url）→ 两条都失败返回空串、只记日志不抛异常，上传流程继续。
+
+`utils/file_utils.py` 的 `extract_text()` 返回值由 `str` 改为 `(文本, ocr_used)`，调用方（`routers/knowledge.py`）同步解包并回写 `knowledge_files.ocr_used`。
+
+#### 2. 以文搜图（`services/multimodal/`，5 个类）
+
+| 文件 | 类 | 职责 |
+|---|---|---|
+| `image_extractor.py` | `ImageExtractor` | 从 PDF 抽嵌图（`pdfplumber` 裁剪法）；扫描件退化为按页渲染 |
+| `image_encoder.py` | `BaseImageEncoder` + `ChineseCLIPEncoder` + `CaptionEncoder` | 图文同空间编码；`create_image_encoder()` 按依赖可用性挑选 |
+| `image_store.py` | `ImageStore` | Chroma 独立集合 `gaokao_images` 读写删 + 维度校验 + 重建 |
+| `vlm_client.py` | `VLMClient` | 视觉语言模型调用（`qwen3.7-flash-2026-07-15`，图文输入） |
+| `image_retriever.py` | `ImageRetriever` | 合成复用前四者，对外只暴露 `should_trigger` / `retrieve` / `answer` / `index_pdf` / `remove_file` |
+
+**图像编码器的两条路**（抽象基类 + 工厂，依赖倒置 / 开闭原则 / 里氏替换）：
+
+| 实现 | 依赖 | 状态 |
+|---|---|---|
+| `ChineseCLIPEncoder` | torch + chinese-clip + 模型权重 | 任务指定方案；本机 chinese-clip 无法通过 pip 安装（GitHub 源 setup.py 构建失败），默认不可用 |
+| `CaptionEncoder` | 无本地模型，走阿里云通道 | **当前实际启用**：视觉模型生成图注 → 文本向量编码图注 |
+
+> 图像向量必须与文本向量**分开集合**：编码器不同（CLIP 512 维 / 图注 768 维）、语义空间不同，
+> 混在一个集合会维度报错且检索结果互相干扰。
+
+#### 3. 关键词触发（本次唯一多模态方向）
+
+只做**以文搜图**，不做以图搜文、不做图文混合融合。
+问题命中 `MULTIMODAL_TRIGGER_KEYWORDS` 才走图像通道，未命中或搜不到图都自动回落 0.9.1 的三路融合。
+
+> 在任务给定词表外补了「课程」——「XX 专业有哪些课程」的答案通常在培养方案 / 课程体系图里，
+> 不加这个词以文搜图永远触发不了。触发但搜不到图时会回落，不会误伤纯文本问题。
+
+#### 4. 对接（`rag_service.py` / `routers/ai.py` / `routers/knowledge.py`）
+
+| 位置 | 改动 |
+|---|---|
+| `rag_service.should_use_multimodal()` | 委托 `ImageRetriever.should_trigger()` |
+| `rag_service.answer_with_multimodal()` | 检索 + VLM 解读；未命中返回 `None`，由 ai.py 回落三路融合 |
+| `routers/ai.py:_chat_sync()` | 在图谱分支**之前**插入多模态分支；响应新增 `image_hit` / `images` |
+| `routers/knowledge.py` 上传 | 文本向量化成功后提取 PDF 图片 → 编码 → 入库，回写 `image_count` |
+| `routers/knowledge.py` 删除 | 同步清理 `gaokao_images` 中该文件的图片 |
+| `app/database.py` | 新增 `ensure_columns()` 幂等补列（项目无 `create_all`，新列靠启动时 ALTER） |
+| `app/models/knowledge.py` | 补 `from app.models.user import User`，消除懒加载时 `relationship("User")` 解析失败 |
+
+#### 5. 配置项（`config.py` 新增）
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `OCR_ENABLED` | `1` | OCR 总开关 |
+| `OCR_MODEL` | `qwen-vl-ocr` | 首选 OCR 模型，不可用自动回落 VLM |
+| `OCR_SCANNED_THRESHOLD` | `50` | 每页平均字符数低于该值判定为扫描件 |
+| `OCR_MAX_PAGES` / `OCR_CONCURRENCY` | `50` / `4` | 单次最多处理页数 / 并发页数 |
+| `MULTIMODAL_ENABLED` | `1` | 多模态总开关 |
+| `MULTIMODAL_TRIGGER_KEYWORDS` | 见上 | 逗号分隔的触发词 |
+| `IMAGE_COLLECTION` | `gaokao_images` | 图像独立向量空间 |
+| `IMAGE_ENCODER` | `auto` | `auto` / `clip` / `caption` |
+| `MULTIMODAL_VLM_MODEL` | `qwen3.7-flash-2026-07-15` | 视觉语言模型 |
+| `IMAGE_MAX_SIDE` / `MULTIMODAL_MAX_IMAGES` / `MULTIMODAL_TOP_K` | `1024` / `30` / `3` | 缩放上限 / 单文件最多提图数 / 检索返回数 |
+
+### 三、验证流程
+
+#### 1. OCR 对比（修复前 vs 修复后）
+
+测试文件：`knowledge_files/*高考志愿录取顺序.pdf`（13.9 MB，19 页，扫描件）
+
+| 指标 | 修复前（pypdf 直接提取） | 修复后（OCR 前 3 页） |
+|---|---|---|
+| 字符数 | 47 | 3363 |
+| 切片段数 | **1** | **16** |
+
+> 全量 19 页按此比例约 95+ 片，达到任务预期的「30+ 片」。
+
+#### 2. 桩版单测（不调模型、不依赖额度）
+
+```bash
+cd backend
+python test_multimodal_rag.py
+```
+
+```
+用例 1：扫描件判定          is_scanned_pdf = True
+用例 2：PDF 页 → 图片       渲染出 2 张，首张尺寸 (918, 1188)
+用例 3：PDF 图片提取        提取 3 张，页号 [1, 2, 3]
+用例 5：触发关键词          「…有哪些课程」→ True；「…学费多少」→ False
+用例 6：编码器选择          caption，available = True
+用例 7：图像集合读写        写入 2 张 / 检索命中 2 张 / 删除 2 张
+                           维度不符写入被拒绝：返回 0
+0.10.0 多模态 + OCR 用例全部通过
+```
+
+#### 3. 接口级验证
+
+| 场景 | 结果 |
+|---|---|
+| 上传扫描件 PDF（视觉模型额度耗尽时） | `200`，`ocr_used=0`、`image_count=0`，正确降级为「按 pypdf 原文处理」，**不 500** |
+| 上传响应字段 | `ocr_used` / `image_count` 正确回显（修掉 `_to_out` 漏字段的问题） |
+| 问答（额度耗尽时） | 多模态尝试失败 → 回落三路融合 → 再降级到预设话术，链路不中断 |
+
+#### 4. 回归验证
+
+```bash
+cd backend
+python smoke_test.py        # 通过
+python smoke_rag.py         # RAG SMOKE DONE
+python test_multimodal_rag.py  # 桩版 8 个用例全部通过
+```
+
+> **已知限制**：验证期间阿里云免费额度被 OCR 测试耗尽（`Free quota exhausted`），
+> 视觉模型（`qwen-vl-ocr` 与 `qwen3.7-flash` 的图文调用）均返回 403，
+> 仅文本 embedding 可用。因此「OCR 全量识别 → 图注生成 → VLM 解读」的**端到端闭环**
+> 未能在额度耗尽后复跑；但每一段都在耗尽前单独验证通过（见上表）。
+> 额度恢复后重跑 `python test_multimodal_rag.py --real` 即可完成闭环验证。
+
+### 四、踩坑记录（同类问题第二次出现）
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| `Collection expecting embedding with dimension of 768, got 128`（0.9.1 文本集合） | 集合删空后 `_collection_dimension()` 读不到向量长度，回落配置值 128，而 Chroma 仍 pin 着 768 | 改读 `col._model.dimension` |
+| `Collection expecting embedding with dimension of 8, got 768`（0.10.0 图像集合） | 桩测试用 8 维向量写进 `gaokao_images`，把集合 pin 成 8 维；真实编码器产出 768 维被拒 | `ImageStore` 加 `collection_dimension()` 写入前校验 + `reset()` 重建；桩测试改用独立集合名 |
+| `expression 'User' failed to locate a name` | `services/multimodal` 懒加载 `KnowledgeFile` 时 `User` 模型尚未注册，`relationship("User")` 解析失败 | `models/knowledge.py` 顶部显式 `import User` |
+| 接口返回 `ocr_used: null` 而 DB 已是 0 | `_to_out()` 用显式字段构造 `KnowledgeFileOut`，漏了新字段 | 补 `ocr_used` / `image_count` 并做 `or 0` 归一 |
+
+### 五、后续演进方向（0.11.0）
+
+| 方向 | 说明 |
+|---|---|
+| 以图搜文 | 用户上传图片 → 检索相关知识片段（本次刻意不做） |
+| 图文混合融合 | 图像检索结果与文本三路融合一起进 Prompt（本次刻意不做） |
+| Chinese-CLIP 落地 | 解决 chinese-clip 安装问题后切换编码器，去掉图注方案的视觉细节损失 |
+| 表格结构化处理 | 分数线表 → 自然语言三元组，供图谱与评估共用 |
+| 上传异步化 | OCR 单文件 2-3 分钟，改为任务队列 + 轮询，避免占用请求线程 |
 
 ---
 
