@@ -39,6 +39,9 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 | 向量库 | Chroma `PersistentClient` | 集合 `gaokao_knowledge`，落盘 `backend/chroma_db/` | ★ `CHROMA_DB_PATH` / `CHROMA_COLLECTION` |
 | 图数据库 | Neo4j + py2neo | 0.9.0 知识图谱通道：院校/专业/专业组/省份/批次/选科/分数段 八类节点 | ★ `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` / `GRAPH_ENABLED` |
 | 结构化查询 | SQLAlchemy Core + 参数化绑定 | 0.9.1 MySQL 通道：学费/分数线/位次/选科/招生计划按 intents 分组查询 | ★ `MYSQL_QUERY_ENABLED` / `MYSQL_MAX_ROWS` |
+| 图像编码 | Chinese-CLIP（首选）/ 图注向量（兜底） | 0.10.0 以文搜图：图文同空间编码，装不上 CLIP 时用视觉模型生成图注再编码 | ★ `IMAGE_ENCODER` / `IMAGE_COLLECTION` |
+| OCR | 阿里云 `qwen-vl-ocr`（回落 VLM） | 0.10.0 扫描件 PDF 预处理：页间并发识别后走文本 RAG | ★ `OCR_ENABLED` / `OCR_MODEL` / `OCR_SCANNED_THRESHOLD` |
+| PDF 提图 / 渲染 | pdfplumber + pypdfium2 | 0.10.0 抽嵌图与 PDF 页转图；pypdfium2 自带二进制，无需装 poppler | ★ `MULTIMODAL_MAX_IMAGES` |
 | 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash-2026-07-15`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
 | LLM 兜底 | Ollama `qwen3:1.7b` | Ali 不可用自动降级，离线可跑 | ★ `OLLAMA_FALLBACK_MODEL` / `OLLAMA_URL` |
 | Embedding | Ali `text-embedding-v3` | 与 LLM 共用同一个 Key 与 base_url，维度对齐已有集合 | ★ `ALI_EMBED_MODEL` / `ALI_EMBED_DIMENSION` |
@@ -85,7 +88,7 @@ gaokao_project/
 ```
 backend/
 ├── app/
-│   ├── main.py                   <span style="color:#888">// FastAPI 入口：注册 9 个路由、CORS、SPA 回退、启动时补索引</span>
+│   ├── main.py                   <span style="color:#888">// FastAPI 入口：注册 9 个路由、CORS、SPA 回退、启动时补索引与补列</span>
 │   ├── config.py                 <span style="color:#888">// 全局配置：DB / Ollama / Ali / Chroma / JWT / RAG 开关</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
 │   ├── database.py               <span style="color:#888">// 引擎、表反射、`fetch_all/fetch_one/fetch_*_params`、幂等建索引</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   ├── models/                   <span style="color:#888">// 动态表解析 + ORM 模型（与 SQL 表一一对应）</span>
@@ -113,6 +116,12 @@ backend/
 │   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（学费/分数线/位次/选科/招生计划），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
+│   │   ├── multimodal/            <span style="color:#888">// 0.10.0 以文搜图（5 个类，合成复用；图像独立向量空间 gaokao_images）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 多模态</span>
+│   │   │   ├── image_extractor.py <span style="color:#888">// ImageExtractor：pdfplumber 抽 PDF 嵌图；扫描件退化为按页渲染（pypdfium2）</span>
+│   │   │   ├── image_encoder.py  <span style="color:#888">// BaseImageEncoder 抽象 + ChineseCLIPEncoder / CaptionEncoder + create_image_encoder() 工厂</span>
+│   │   │   ├── image_store.py    <span style="color:#888">// ImageStore：Chroma gaokao_images 读写删 + 维度校验 + reset() 重建</span>
+│   │   │   ├── vlm_client.py     <span style="color:#888">// VLMClient：qwen3.7-flash 图文输入，多模态问答</span>
+│   │   │   └── image_retriever.py <span style="color:#888">// ImageRetriever：合成复用前四者；should_trigger / retrieve / answer / index_pdf / remove_file</span>
 │   │   ├── graph/                 <span style="color:#888">// 0.9.0 知识图谱通道（7 个文件，单一职责；与向量通道平级，融合在 rag_service 层）</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 图谱通道</span>
 │   │   │   ├── ontology.py       <span style="color:#888">// 本体常量：8 类节点标签 / 8 类关系 / 属性键；中文标签的 Cypher 转义只此一处</span>
 │   │   │   ├── graph_store.py    <span style="color:#888">// GraphStore：Neo4j 连接 + execute_cypher + get_schema + get_node_properties；失败抛 GraphConnectionError</span>
@@ -137,7 +146,8 @@ backend/
 │   │   │   ├── report_store.py   <span style="color:#888">// EvalReportStore：报告读写与倒序列举（趋势图）</span>
 │   │   │   └── auto_tuner.py     <span style="color:#888">// AutoTuner：白名单参数写回 .env + 备份 + 回滚 + changes.log</span>
 │   └── utils/
-│       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取、20MB 限制</span>
+│       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取（0.10.0 起返回 (文本, ocr_used)）、20MB 限制</span>
+│       ├── ocr_utils.py          <span style="color:#888">// 0.10.0 OCRExtractor：扫描件判定 / PDF 转图 / 页间并发 OCR / OCR 兜底入口</span>
 │       └── security.py           <span style="color:#888">// bcrypt 哈希校验 + JWT 签发/解析</span>
 ├── sql/
 │   ├── 03_knowledge.sql          <span style="color:#888">// 旧版 knowledge_files（历史归档）</span>
@@ -152,6 +162,7 @@ backend/
 ├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
 ├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
 ├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
+├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
 ├── test_multi_query.py           <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF</span>
@@ -555,6 +566,8 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 | `graph/cypher_generator.py` | `graph/graph_query_engine.py` | 同上 |
 | `graph/graph_query_engine.py` | `rag_service._get_graph_engine()`、`test_graph_rag.py` | `EntityExtractor` + `CypherGenerator` + `GraphStore`（合成复用） |
 | `graph/graph_builder.py` | 命令行 `python -m app.services.graph.graph_builder` | `GraphStore` + `app.database` + `app.models.dataset` |
+| `multimodal/image_retriever.py` | `rag_service.answer_with_multimodal()`、`routers/knowledge.py`、`test_multimodal_rag.py` | `ImageExtractor` + `BaseImageEncoder` + `ImageStore` + `VLMClient`（合成复用） |
+| `utils/ocr_utils.py` | `utils/file_utils._maybe_ocr()`、`test_multimodal_rag.py` | `openai.OpenAI`（Ali）+ `pypdfium2` + `pypdf` |
 
 ### 4.4 主链三：RAG 量化评估（0.8.0）
 
@@ -612,6 +625,9 @@ graph TD
     A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["routers/ai.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
     B -->|"是"| C["rag_service.<b>answer_with_hybrid()</b><br/>0.9.1 三路融合"]
     B -->|"否（向后兼容）"| Z["rag_service.answer_with_strategy()<br/>0.8.0 纯向量链路，行为不变"]
+
+    B -.->|"0.10.0 命中多模态关键词"| MM["rag_service.<b>answer_with_multimodal()</b><br/>以文搜图"]
+    MM -->|"未命中图片 / VLM 失败"| C
 
     C --> S1["<b>Step 1 意图识别</b><br/>detect_structured_intent()"]
     S1 -->|"返回 intents 列表"| S2["<b>Step 2 三路并行</b><br/>ThreadPoolExecutor(max_workers=3)"]
@@ -691,6 +707,38 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 | `RANKS` | `school_admission` 的院校投档线 | 院校 → 分数段 |
 | `LOCATED_IN` / `BELONGS_TO` / `REQUIRES` | `school_province` 列 / `major_group` / `subject_req` | 结构关系 |
 
+### 4.6 主链五：多模态「以文搜图」问答（0.10.0）
+
+入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat`（问题命中触发关键词时）
+
+```mermaid
+graph TD
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat"| B["routers/ai.py:_chat_sync()"]
+    B --> C{"rag_service.should_use_multimodal()<br/>命中「图/课程/培养方案/校园」等关键词？"}
+    C -->|"未命中"| Z["回落 0.9.1 三路融合<br/>图谱 + MySQL + 向量"]
+    C -->|"命中"| D["rag_service.answer_with_multimodal()"]
+
+    D --> E["ImageRetriever.retrieve()<br/>编码问题 → 查 Chroma gaokao_images"]
+    E --> F["BaseImageEncoder.encode_text()<br/>ChineseCLIPEncoder / CaptionEncoder"]
+    F --> G["ImageStore.search_by_text()<br/>独立向量空间，与文本集合分开"]
+    G --> H{"是否命中图片？"}
+    H -->|"否"| Z
+    H -->|"是"| I["VLMClient.generate_with_images()<br/>qwen3.7-flash 图文输入"]
+    I --> J{"VLM 是否返回内容？"}
+    J -->|"否"| Z
+    J -->|"是"| K["返回 answer + images<br/>source = multimodal:image<br/>image_hit = true"]
+
+    style C fill:#fff3cd,stroke:#d32f2f
+    style H fill:#fff3cd,stroke:#d32f2f
+    style J fill:#fff3cd,stroke:#d32f2f
+```
+
+**图像入库（上传时）**：`routers/knowledge.py` 文本向量化成功后 → `ImageExtractor.extract_images()` 抽嵌图（扫描件按页渲染兜底）→ `ImageEncoder.encode_image()` 编码 → `ImageStore.add_images()` 写入 `gaokao_images` → 回写 `knowledge_files.image_count`。删除文件时同步清理。
+
+**OCR 预处理（上传时前置）**：`utils/file_utils.extract_text()` 对 PDF 先按页平均字符数判定是否扫描件 → 是则 `OCRExtractor` 用 `qwen-vl-ocr`（不可用回落 `qwen3.7-flash`）页间并发识别 → 识别结果再走原有 `split_text()` 切片流程，并回写 `knowledge_files.ocr_used`。
+
+**为什么图像用独立集合**：图像编码器与文本编码器不同（Chinese-CLIP 512 维 / 图注向量 768 维），语义空间也不同；混在一个集合会维度报错，且检索结果互相干扰。切换编码器前必须调用 `ImageStore.reset()` 重建集合并重新上传文件。
+
 ---
 
 ## 五、接口清单
@@ -701,7 +749,7 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 |---|---|---|---|---|
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路** | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
