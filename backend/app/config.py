@@ -86,14 +86,16 @@ class Settings:
     OLLAMA_BASE_URL: str = _env("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_EMBED_MODEL: str = _env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
     # ---------------- 0.7.1 LLM / Embedding 统一通道（★ 热修复） ----------------
-    # 说明：限时模型 qwen3.7-flash-2026-07-15 只能走 OpenAI 兼容接口，
-    #       base_url 必须是「工作空间专属域名」，不能是通用 dashscope 域名，也不能用 dashscope SDK。
+    # 说明：必须走 OpenAI 兼容接口，base_url 是「工作空间专属域名」，
+    #       不能是通用 dashscope 域名，也不能用 dashscope SDK。
+    # 0.10.0：模型由限时版 qwen3.7-flash-2026-07-15 换成 qwen3.7-flash
+    #       （前者的免费额度已耗尽，后者继续可用且同样支持图文输入）。
     ALI_API_KEY: str = _env("Ali_API_KEY", "")
     ALI_BASE_URL: str = _env(
         "ALI_BASE_URL",
         "https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     )
-    ALI_LLM_MODEL: str = _env("ALI_LLM_MODEL", "qwen3.7-flash-2026-07-15")
+    ALI_LLM_MODEL: str = _env("ALI_LLM_MODEL", "qwen3.7-flash")
     # 向量模型与大语言模型共用同一个 Key 和同一个 base_url
     ALI_EMBED_MODEL: str = _env("ALI_EMBED_MODEL", "text-embedding-v3")
     # text-embedding-v3 支持指定维度；实际维度会由 rag_service 对齐已有 Chroma 集合
@@ -235,7 +237,9 @@ class Settings:
     # caption 方案（视觉模型生成图注 → 文本向量编码，无需本地模型）
     IMAGE_ENCODER: str = _env("IMAGE_ENCODER", "auto")
     # 多模态问答用的视觉语言模型（阿里云 OpenAI 兼容，支持图文输入）
-    MULTIMODAL_VLM_MODEL: str = _env("MULTIMODAL_VLM_MODEL", "qwen3.7-flash-2026-07-15")
+    # 多模态问答用的视觉语言模型（支持图文输入）
+    # 0.10.0：由限时版 qwen3.7-flash-2026-07-15 换成 qwen3.7-flash（前者额度已耗尽）
+    MULTIMODAL_VLM_MODEL: str = _env("MULTIMODAL_VLM_MODEL", "qwen3.7-flash")
     # 单张图片送 VLM 前的最长边（像素）：控制 base64 体积与调用耗时
     IMAGE_MAX_SIDE: int = int(_env("IMAGE_MAX_SIDE", "1024"))
     # 单个文件最多提取并入库多少张图片（防止图多的 PDF 把上传拖到超时）

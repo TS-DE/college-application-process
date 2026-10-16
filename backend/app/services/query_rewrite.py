@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Optional
 def default_chat_model() -> str:
     """当前生效的大语言模型名。
 
-    优先级：环境变量 ALI_LLM_MODEL → settings.ALI_LLM_MODEL（默认 qwen3.7-flash-2026-07-15）。
+    优先级：环境变量 ALI_LLM_MODEL → settings.ALI_LLM_MODEL（默认 qwen3.7-flash）。
     真正的调用不在本文件：通道选择与降级都由 `app/services/llm_client.py` 负责（单一职责）。
     """
     from app.config import settings
@@ -38,7 +38,7 @@ def default_chat_model() -> str:
     return os.getenv("ALI_LLM_MODEL") or settings.ALI_LLM_MODEL
 
 
-DEFAULT_CHAT_MODEL = "qwen3.7-flash-2026-07-15"
+DEFAULT_CHAT_MODEL = "qwen3.7-flash"
 
 
 def get_api_key() -> str:

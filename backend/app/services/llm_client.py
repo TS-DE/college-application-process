@@ -1,13 +1,16 @@
 """统一 LLM / Embedding 通道（0.7.1 热修复核心）。
 
 ## 为什么必须改（背景）
-限时模型 `qwen3.7-flash-2026-07-15` **只能**走 OpenAI 兼容接口，且 base_url 必须是
+本项目的阿里云模型**只能**走 OpenAI 兼容接口，且 base_url 必须是
 工作空间专属域名：
 
     https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 
 既**不能**用 `dashscope` Python SDK（`dashscope.Generation`），
-也**不能**用通用域名 `https://dashscope.aliyuncs.com/compatible-mode/v1`（该模型不在那上面）。
+也**不能**用通用域名 `https://dashscope.aliyuncs.com/compatible-mode/v1`（这些模型不在那上面）。
+
+0.10.0：模型由限时版 `qwen3.7-flash-2026-07-15` 换成 `qwen3.7-flash`
+（前者免费额度已耗尽；新模型同样支持图文输入，多模态问答不受影响）。
 0.7.0 用的就是「通用域名 + requests 裸调」，结果所有 LLM 调用都要等到超时才降级 → **全部问答超时**。
 
 Key 统一读环境变量 `Ali_API_KEY`；向量模型 `text-embedding-v3` 与大语言模型

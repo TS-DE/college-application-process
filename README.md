@@ -42,7 +42,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 | 图像编码 | Chinese-CLIP（首选）/ 图注向量（兜底） | 0.10.0 以文搜图：图文同空间编码，装不上 CLIP 时用视觉模型生成图注再编码 | ★ `IMAGE_ENCODER` / `IMAGE_COLLECTION` |
 | OCR | 阿里云 `qwen-vl-ocr`（回落 VLM） | 0.10.0 扫描件 PDF 预处理：页间并发识别后走文本 RAG | ★ `OCR_ENABLED` / `OCR_MODEL` / `OCR_SCANNED_THRESHOLD` |
 | PDF 提图 / 渲染 | pdfplumber + pypdfium2 | 0.10.0 抽嵌图与 PDF 页转图；pypdfium2 自带二进制，无需装 poppler | ★ `MULTIMODAL_MAX_IMAGES` |
-| 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash-2026-07-15`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
+| 大语言模型 | **阿里云 OpenAI 兼容接口** | `qwen3.7-flash`，专用工作空间域名 | ★ `Ali_API_KEY` / `ALI_BASE_URL` / `ALI_LLM_MODEL` |
 | LLM 兜底 | Ollama `qwen3:1.7b` | Ali 不可用自动降级，离线可跑 | ★ `OLLAMA_FALLBACK_MODEL` / `OLLAMA_URL` |
 | Embedding | Ali `text-embedding-v3` | 与 LLM 共用同一个 Key 与 base_url，维度对齐已有集合 | ★ `ALI_EMBED_MODEL` / `ALI_EMBED_DIMENSION` |
 | Embedding 兜底 | Ollama `nomic-embed-text` | 768 维，离线可用 | ★ `OLLAMA_EMBED_MODEL` |
@@ -807,7 +807,7 @@ Ali_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 # ★ 必须是「工作空间专属域名」，不能用通用 dashscope 域名，也不能用 dashscope SDK
 ALI_BASE_URL=https://ws-66jxf85tc3oa6b98.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-ALI_LLM_MODEL=qwen3.7-flash-2026-07-15
+ALI_LLM_MODEL=qwen3.7-flash
 
 # 向量模型与大语言模型共用同一个 Key 和同一个 base_url
 ALI_EMBED_MODEL=text-embedding-v3
