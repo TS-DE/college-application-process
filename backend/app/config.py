@@ -191,18 +191,32 @@ class Settings:
     # MySQL 单次查询最大返回行数（限制上下文长度，避免一次回传过多行）
     MYSQL_MAX_ROWS: int = int(_env("MYSQL_MAX_ROWS", "5"))
 
-    # ---------------- 0.10.0 OCR 预处理（扫描件 PDF） ----------------
+    # ---------------- 0.10.0 OCR 专用通道（base_url 与文本通道不同） ----------------
     # OCR 总开关：关闭后扫描件 PDF 仍按原方式提取（提不到文字就只能切出极少片段）
     OCR_ENABLED: bool = _env("OCR_ENABLED", "1") not in {"0", "false", "False"}
     # 首选 OCR 模型（阿里云 OpenAI 兼容接口）；不可用（如额度耗尽）时自动回落到
-    # MULTIMODAL_VLM_MODEL 指定的视觉模型，两条路都走同一个 Ali Key 与 base_url
+    # MULTIMODAL_VLM_MODEL 指定的视觉模型
     OCR_MODEL: str = _env("OCR_MODEL", "qwen-vl-ocr")
+    # ★ OCR 通道的 base_url 与文本 LLM 的 ALI_BASE_URL **不是同一个**，
+    #   用错会一直 404 / 401。qwen-vl-ocr 走的是独立的 MaaS 域名。
+    OCR_BASE_URL: str = _env(
+        "OCR_BASE_URL",
+        "https://maas.qianwenaiapi.com/compatible-mode/v1",
+    )
+    # OCR 通道与文本 / Embedding / VLM 通道**共用同一个 Ali_API_KEY**，
+    # 不再单独读取 OCR_API_KEY / DASHSCOPE_API_KEY（环境变量里已删除）。
+    # 这里保留 OCR_API_KEY 读取只是为了兼容历史配置，默认可留空。
+    OCR_API_KEY: str = _env("OCR_API_KEY", _env("Ali_API_KEY", ""))
     # 扫描件判定阈值：每页平均字符数低于该值即认为是扫描件，触发 OCR
     OCR_SCANNED_THRESHOLD: int = int(_env("OCR_SCANNED_THRESHOLD", "50"))
+    # OCR 单次请求超时（秒）：单页识别 20-35 秒，给足余量避免读超时
+    OCR_TIMEOUT: float = float(_env("OCR_TIMEOUT", "60"))
     # 单次 OCR 最多处理的页数（防止超大 PDF 把上传接口拖到超时）
     OCR_MAX_PAGES: int = int(_env("OCR_MAX_PAGES", "50"))
     # OCR 并发页数：每页都要走一次视觉模型调用，串行太慢（实测单页 20-35 秒）
     OCR_CONCURRENCY: int = int(_env("OCR_CONCURRENCY", "4"))
+    # 单页识别失败时的重试次数：重试 1 次后仍失败就跳过该页，**禁止无限重试**
+    OCR_PAGE_RETRY: int = int(_env("OCR_PAGE_RETRY", "1"))
 
     # ---------------- 0.10.0 多模态「以文搜图」 ----------------
     # 触发关键词：问题命中任一关键词才走图像检索通道，其余问题仍走三路融合

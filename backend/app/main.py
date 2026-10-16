@@ -82,11 +82,30 @@ async def _background_rag_info() -> None:
         print(f"[startup] RAG 初始化跳过：{exc}")
 
 
+def _log_ocr_channel() -> None:
+    """0.10.0：启动时明确打印 OCR 通道的 base_url 与模型名，便于排查配置是否配对。
+
+    OCR 通道与文本 LLM 通道的 base_url **不是同一个域名**（用错会一直 404/401），
+    而 ocr_utils 是懒加载，不在启动时 import，所以这里显式打印。
+    """
+    if not settings.OCR_ENABLED:
+        print("[startup] OCR: 已关闭（OCR_ENABLED=0）")
+        return
+    print(
+        f"[startup] OCR: base_url={settings.OCR_BASE_URL} model={settings.OCR_MODEL} "
+        f"fallback={settings.MULTIMODAL_VLM_MODEL}@ALI_BASE_URL "
+        f"timeout={settings.OCR_TIMEOUT}s retry={settings.OCR_PAGE_RETRY} "
+        f"key={'set' if settings.OCR_API_KEY else 'EMPTY'}"
+    )
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     # 0.7.2：启动阶段严禁同步调用 AI / Embedding / Ollama 探测，防止前端首个请求被阻塞
     asyncio.create_task(_background_indexes())
     asyncio.create_task(_background_rag_info())
+    # 0.10.0：打印 OCR 通道配置（base_url 与文本通道不同，是最常见的配错点）
+    _log_ocr_channel()
 
 
 async def _refresh_health() -> None:

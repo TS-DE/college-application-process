@@ -13,13 +13,18 @@ pypdf 对这类文件只能提出每页 1 个字符（页码），`split_text()`
   · `extract_text_with_ocr_fallback()`  对外唯一入口，返回 (文本, 是否用了 OCR)
 
 ## 降级策略（任何一步失败都不抛异常）
-  · OCR 模型不可用（首选 qwen-vl-ocr，额度耗尽时自动回落到 MULTIMODAL_VLM_MODEL）
-  · 两条路都失败 → 返回空字符串，日志记录，上传流程继续（不会 500）
+  · OCR 模型不可用（首选 qwen-vl-ocr，失败时重试一次，仍失败则回落到
+    MULTIMODAL_VLM_MODEL 指定的视觉模型）
+  · 两条路都失败 → 返回空字符串，日志明确打印「OCR 失败：{error}」，上传流程继续（不会 500）
   · 页数超过 OCR_MAX_PAGES → 只处理前 N 页，避免上传接口被拖到超时
+  · **禁止在循环里无限重试同一张图**：单页最多重试 OCR_PAGE_RETRY 次（默认 1 次）
 
-## 为什么用 pypdfium2 而不是 pdf2image
-`pdf2image` 依赖系统级 poppler（Windows 上要单独装并配 PATH），
-而 `pypdfium2` 是 pdfplumber 的传递依赖、自带二进制，装完即用。
+## 通道说明（★ 容易踩坑）
+OCR 通道与文本 LLM 通道的 base_url **不是同一个**：
+  · 文本 LLM / Embedding / VLM → `settings.ALI_BASE_URL`
+  · OCR（qwen-vl-ocr）          → `settings.OCR_BASE_URL`
+两者共用同一个 `Ali_API_KEY`，区别只在 base_url 与 model。
+用错 base_url 会一直 404 / 401，OCR 永远失败。
 """
 from __future__ import annotations
 
@@ -36,22 +41,39 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# 模块加载时明确打印 OCR 通道信息，便于启动日志排查 base_url / 模型是否配对
+# 注：用 warning 级别——uvicorn 默认只输出 WARNING 及以上，info 会被过滤掉
+logger.warning(
+    "[OCR] 通道配置：base_url=%s model=%s fallback=%s timeout=%ss retry=%s",
+    settings.OCR_BASE_URL,
+    settings.OCR_MODEL,
+    settings.MULTIMODAL_VLM_MODEL,
+    settings.OCR_TIMEOUT,
+    settings.OCR_PAGE_RETRY,
+)
+
 
 class OCRExtractor:
     """扫描件 PDF → 文字。所有方法都不抛异常，失败降级为空字符串。"""
 
     def __init__(self, api_key: str = "", base_url: str = "", model: str = "") -> None:
         """
-        :param api_key:  阿里云 Key，默认读环境变量 Ali_API_KEY
-        :param base_url:  OpenAI 兼容 base_url，默认 settings.ALI_BASE_URL
+        :param api_key:  阿里云 Key，默认读 OCR_API_KEY（其默认值即 Ali_API_KEY）
+        :param base_url:  OpenAI 兼容 base_url，默认 settings.OCR_BASE_URL
+                         （★ 是 OCR_BASE_URL，不是 ALI_BASE_URL，两者不是同一个域名）
         :param model:    首选 OCR 模型，默认 settings.OCR_MODEL（qwen-vl-ocr）
         """
-        self._api_key = api_key or os.getenv("Ali_API_KEY", "")
-        self._base_url = base_url or settings.ALI_BASE_URL
+        # OCR_API_KEY 默认值就是 Ali_API_KEY，环境变量里只需配 Ali_API_KEY
+        self._api_key = api_key or settings.OCR_API_KEY
+        self._base_url = base_url or settings.OCR_BASE_URL
         self._model = model or settings.OCR_MODEL
-        # 回落模型：首选模型不可用（额度/权限）时改用它，仍是同一个 Ali 通道
+        # 回落模型：首选模型不可用（额度/权限）时改用它，走 ALI_BASE_URL 文本通道
         self._fallback_model = settings.MULTIMODAL_VLM_MODEL
-        self._client = None
+        self._fallback_base_url = settings.ALI_BASE_URL
+        self._timeout = float(settings.OCR_TIMEOUT)
+        self._retry = max(0, int(settings.OCR_PAGE_RETRY))
+        self._client: Optional[object] = None       # OCR 专用客户端
+        self._fallback_client: Optional[object] = None  # 回落客户端（文本通道）
 
     # ---------------- 对外唯一入口 ----------------
 
@@ -70,11 +92,16 @@ class OCRExtractor:
 
         images = self.pdf_to_images(path)
         if not images:
+            logger.warning("[OCR] 失败：PDF 渲染无结果（%s）", os.path.basename(path))
             return "", False
 
         text = self.ocr_images(images)
         if not text:
-            logger.info("[OCR] 识别结果为空：%s", os.path.basename(path))
+            logger.warning(
+                "[OCR] 失败：全部页面识别无结果（%s，共 %d 页，已重试 %d 次/页），"
+                "降级为按原文提取",
+                os.path.basename(path), len(images), self._retry,
+            )
             return "", False
 
         logger.info(
@@ -151,34 +178,52 @@ class OCRExtractor:
     def _ocr_one(self, image: Image.Image, index: int) -> str:
         """识别单页，返回纯文本；失败返回空串。
 
-        模型选择：先试首选模型（qwen-vl-ocr），额度/权限不可用时回落到
-        settings.MULTIMODAL_VLM_MODEL（同一个 Ali Key 与 base_url）。
+        重试策略（★ 禁止无限重试）：
+          · 单页最多重试 `OCR_PAGE_RETRY` 次（默认 1 次，即最多 2 次调用）；
+          · 仍失败则跳过该页（返回空串），**不影响其他页**；
+          · 首选模型（qwen-vl-ocr，OCR 通道）整体失败后，才回落到
+            MULTIMODAL_VLM_MODEL（文本通道），回落也只按同样次数重试。
         """
         url = self._to_data_url(image)
         if not url:
             return ""
-        prompt = "请识别图片中的全部文字内容，按原样输出，不要添加任何解释。"
+        prompt = "请仅输出图像中的文本内容。"
 
-        # 候选模型去重（首选与回落相同时只试一次，避免重复消耗额度）
-        candidates: List[str] = []
-        for model in (self._model, self._fallback_model):
-            if model and model not in candidates:
-                candidates.append(model)
+        # 候选 (模型, base_url, 客户端) 三元组；首选与回落去重，避免重复消耗额度
+        attempts: List[Tuple[str, str, object]] = []
+        for model, base_url in ((self._model, self._base_url),
+                                (self._fallback_model, self._fallback_base_url)):
+            if not model:
+                continue
+            client = self._get_client(base_url)
+            if client is None:
+                continue
+            if any(model == a[0] and base_url == a[1] for a in attempts):
+                continue
+            attempts.append((model, base_url, client))
 
-        for model in candidates:
-            text = self._call_vlm(model, url, prompt, max_tokens=1500)
-            if text:
-                if model != self._model:
-                    logger.info("[OCR] 首选模型 %s 不可用，已回落 %s", self._model, model)
-                return text
-            logger.info("[OCR] 第 %d 页用 %s 识别失败，尝试下一个模型", index + 1, model)
+        if not attempts:
+            logger.warning("[OCR] 第 %d 页无可用客户端（未配置 Ali_API_KEY？）", index + 1)
+            return ""
+
+        for model, base_url, client in attempts:
+            for retry in range(self._retry + 1):
+                text = self._call_vlm(client, model, url, prompt, max_tokens=1500)
+                if text:
+                    if model != self._model:
+                        logger.warning("[OCR] 首选模型 %s 不可用，第 %d 页已回落 %s",
+                                       self._model, index + 1, model)
+                    return text
+                if retry < self._retry:
+                    logger.warning("[OCR] 第 %d 页 model=%s 第 %d 次失败，重试一次",
+                                   index + 1, model, retry + 1)
+            logger.warning("[OCR] 第 %d 页 model=%s 重试 %d 次后仍失败，跳过该页",
+                           index + 1, model, self._retry)
         return ""
 
-    def _call_vlm(self, model: str, image_url: str, prompt: str, max_tokens: int = 1500) -> str:
+    def _call_vlm(self, client, model: str, image_url: str, prompt: str,
+                  max_tokens: int = 1500) -> str:
         """调用阿里云视觉模型做单图识别；任何异常都返回空串（不抛）。"""
-        client = self._get_client()
-        if client is None:
-            return ""
         try:
             resp = client.chat.completions.create(
                 model=model,
@@ -188,29 +233,40 @@ class OCRExtractor:
                 ]}],
                 max_tokens=max_tokens,
                 temperature=0,
+                timeout=self._timeout,
             )
             return (resp.choices[0].message.content or "").strip()
-        except Exception as exc:  # noqa: BLE001 额度/网络/限流都按失败处理
-            logger.info("[OCR] 视觉模型调用失败 model=%s：%s %s",
-                        model, exc.__class__.__name__, str(exc)[:150])
+        except Exception as exc:  # noqa: BLE001 额度/网络/限流/超时都按失败处理
+            logger.warning("[OCR] 视觉模型调用失败 model=%s：%s %s",
+                           model, exc.__class__.__name__, str(exc)[:150])
             return ""
 
     # ---------------- 内部工具 ----------------
 
-    def _get_client(self):
-        """延迟创建 OpenAI 兼容客户端（避免导入即失败）。"""
-        if self._client is not None:
-            return self._client
+    def _get_client(self, base_url: str):
+        """按 base_url 延迟创建 OpenAI 兼容客户端（避免导入即失败，结果缓存）。"""
+        cache = self._fallback_client if base_url == self._fallback_base_url else self._client
+        if cache is not None:
+            return cache
         if not self._api_key:
             return None
         try:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+            client = OpenAI(
+                api_key=self._api_key,   # 即 Ali_API_KEY
+                base_url=base_url,       # ★ OCR 用 OCR_BASE_URL，回落用 ALI_BASE_URL
+                timeout=self._timeout,
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.info("[OCR] OpenAI 客户端创建失败：%s", exc.__class__.__name__)
+            logger.info("[OCR] OpenAI 客户端创建失败 base_url=%s：%s",
+                        base_url, exc.__class__.__name__)
             return None
-        return self._client
+        if base_url == self._fallback_base_url:
+            self._fallback_client = client
+        else:
+            self._client = client
+        return client
 
     @staticmethod
     def _to_data_url(image: Image.Image) -> str:

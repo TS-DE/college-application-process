@@ -140,6 +140,15 @@
 | `MULTIMODAL_VLM_MODEL` | `qwen3.7-flash-2026-07-15` | 视觉语言模型 |
 | `IMAGE_MAX_SIDE` / `MULTIMODAL_MAX_IMAGES` / `MULTIMODAL_TOP_K` | `1024` / `30` / `3` | 缩放上限 / 单文件最多提图数 / 检索返回数 |
 
+> **★ OCR 通道 base_url 修正（0.10.0 内追加，版本号不变）**
+> `qwen-vl-ocr` 的 OpenAI 兼容接口 base_url 与文本 LLM **不是同一个域名**，
+> 最初实现误用了 `ALI_BASE_URL`，导致 OCR 一直 404 / 401。
+> 现新增独立配置 `OCR_BASE_URL`（默认 `https://maas.qianwenaiapi.com/compatible-mode/v1`），
+> 与文本 / Embedding / VLM 通道共用同一个 `Ali_API_KEY`，区别只在 base_url 与 model。
+> 同时补充：单页失败重试 `OCR_PAGE_RETRY` 次（默认 1）后跳过该页，禁止无限重试；
+> OCR 关键日志改用 warning 级别（uvicorn 默认只输出 WARNING 及以上，info 会被过滤）；
+> 启动时 `main.py` 显式打印 OCR 通道 base_url 与模型名，便于排查配错。
+
 ### 三、验证流程
 
 #### 1. OCR 对比（修复前 vs 修复后）
