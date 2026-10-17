@@ -5,12 +5,25 @@
 2. 按 province + year + category + batch 物理隔离查询录取表
 3. 按位次差划分冲 / 稳 / 保
 4. 计算规则化的录取概率与推荐理由
+
+0.11.0 全国多省自适应：新增 `calculate_tiers()`，直接查
+`major_admission_{year}_all` 全国总表，省份/科类/年份全部参数化；
+原有 `recommend()` 保留为「河南单省富信息版」（带学费、计划数、AI 理由）。
 """
 from __future__ import annotations
 
+import logging
 import time
 from functools import lru_cache
 from typing import Dict, List, Optional
+
+from sqlalchemy import text
+
+from app.config import settings
+from app.database import SessionLocal, table_exists
+from app.utils.region_mapper import normalize_province
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import and_, or_, select
 
@@ -330,7 +343,8 @@ def recommend(
     ai_limit: int = 0,
 ) -> Dict:
     from app.services.ai_service import ai_enabled, batch_reasons
-    from app.services.rank_service import score_to_rank
+    # 0.11.0：河南单省富信息版改名为 score_to_rank_detail（全国版占用了 score_to_rank）
+    from app.services.rank_service import score_to_rank_detail
 
     t0 = time.time()
     buffer = buffer or settings.RANK_BUFFER
@@ -340,7 +354,7 @@ def recommend(
     if rank is None:
         if score is None:
             raise ValueError("score 与 rank 至少提供一个")
-        rank_info = score_to_rank(province, year, category, batch, score)
+        rank_info = score_to_rank_detail(province, year, category, batch, score)
         rank = rank_info["rank"]
 
     plan_idx = _plan_index(province, year, category, batch)
@@ -418,3 +432,279 @@ def recommend(
             "elapsed_ms": int((time.time() - t0) * 1000),
         },
     }
+
+
+# ============================================================
+# 0.11.0 全国多省自适应核心引擎
+# ============================================================
+#
+# ## 与上面 recommend() 的区别
+#   · 数据源：`major_admission_{year}_all` 全国总表（30+ 省，43 万行），
+#             不再按省份拼表名，因此不会出现「某省没建表就查不到」的问题；
+#   · 过滤  ：province + category + year 三个条件**必传**，
+#             防止跨省数据串联污染（不同省份科类名不同，混查会张冠李戴）；
+#   · 内存  ：每个档位 LIMIT 50 条，绝不 `SELECT *` 全量拉进 Python；
+#   · 概率  ：位次差线性映射，见 _tier_probability()。
+#
+# ## 参数传递路径
+#   前端 province/category/score
+#     → routers/recommend.py 校验（region_mapper.is_supported）
+#     → rank_service.score_to_rank(score, province, category) 得到 student_rank
+#     → 本函数 calculate_tiers(student_rank, province, category)
+#     → SQL 绑定 :prov/:cat/:min_r/:max_r → LIMIT 50
+#     → 返回 {"chong": [...], "wen": [...], "bao": [...]}
+
+# 全国总表名模板
+_NATIONAL_MAJOR_TABLE = "major_admission_{year}_all"
+
+# 单个档位最多返回条数（内存保护）
+_TIER_LIMIT = 50
+
+# 冲 / 稳 / 保 的位次窗口宽度（相对考生位次的 buffer 倍数）
+_TIER_SPAN = {"chong": 3.0, "wen": 1.0, "bao": 3.0}
+
+# 档位中文名
+_TIER_LABEL = {"chong": "冲", "wen": "稳", "bao": "保"}
+
+
+def _tier_buffer(province: str) -> int:
+    """位次缓冲宽度（按省份动态读取，不再全局写死 5000）。
+
+    考生基数大的省份（河南、山东、广东等）用更宽的缓冲，避免窗口过窄候选不足；
+    其余省份用配置的默认值。
+    """
+    prov = normalize_province(province)
+    wide = {"河南", "山东", "广东", "四川", "河北", "安徽"}
+    base = int(getattr(settings, "RANK_BUFFER", 5000) or 5000)
+    return base * (2 if prov in wide else 1)
+
+
+def _tier_probability(tier: str, gap: int, buffer: int) -> float:
+    """录取概率：位次差线性映射，保留 1 位小数。
+
+    gap = 院校最低位次 - 考生位次（正数表示院校位次更靠后、录取更稳）。
+
+    · 冲（gap 为负，院校比考生靠前）：10% ~ 40%
+    · 稳（gap 接近 0）              ：55% ~ 85%
+    · 保（gap 为正，院校比考生靠后） ：88% ~ 98%
+
+    只用于排序与直观展示，不是官方数据。
+    """
+    b = max(1, int(buffer))
+    if tier == "chong":
+        x = min(abs(gap) / (b * _TIER_SPAN["chong"]), 1.0)   # 0=最接近，1=最冒险
+        return round(40 - 30 * x, 1)
+    if tier == "wen":
+        x = max(-1.0, min(1.0, gap / b))                     # -1=略冒险，1=略稳妥
+        return round(70 - 15 * x, 1)
+    x = min(abs(gap) / (b * _TIER_SPAN["bao"]), 1.0)         # 0=刚刚保底，1=非常保险
+    return round(98 - 10 * x, 1)
+
+
+def _tier_window(tier: str, rank: int, buffer: int) -> tuple:
+    """算出该档位的 [min_rank, max_rank] 查询区间（含端点）。
+
+    位次数值越小排名越靠前：
+      冲：院校位次明显好于考生（数值更小）
+      稳：与考生位次接近
+      保：院校位次明显差于考生（数值更大）
+    """
+    b = int(buffer)
+    lo = int(b * _TIER_SPAN[tier])
+    if tier == "chong":
+        return max(1, rank - lo), rank - b
+    if tier == "wen":
+        return rank - b, rank + b
+    return rank + b, rank + lo
+
+
+def _national_reason(item: Dict, rank: Optional[int]) -> str:
+    """规则版推荐理由（与 _reason_of 同风格，但不依赖招生计划表）。"""
+    name = item.get("university_name") or "该校"
+    major = item.get("major_name") or "该专业"
+    gap = item.get("rank_diff")
+    tier = item.get("tier_label") or ""
+    parts = [f"{name}{major}属于{tier}档"]
+    if gap is not None and rank:
+        if gap > 0:
+            parts.append(f"院校最低位次比你低 {abs(gap)} 名，录取较稳")
+        elif gap < 0:
+            parts.append(f"院校最低位次比你高 {abs(gap)} 名，需要冲一冲")
+        else:
+            parts.append("院校最低位次与你基本持平")
+    if item.get("is_985"):
+        parts.append("985 高校")
+    elif item.get("is_211"):
+        parts.append("211 高校")
+    if item.get("min_score"):
+        parts.append(f"最低分 {int(item['min_score'])}")
+    return "，".join(parts) + "。"
+
+
+def _to_national_item(row: Dict, rank: int, tier: str, buffer: int) -> Dict:
+    """把总表的一行转成前端可直接渲染的推荐条目。"""
+    min_rank = row.get("min_rank")
+    gap = int(min_rank - rank) if min_rank is not None else None
+    item = {
+        "university_name": row.get("university_name"),
+        "major_name": row.get("major_name"),
+        "major_group": row.get("major_group"),
+        "major_code": row.get("major_code"),
+        "subject_req": row.get("subject_req"),
+        "school_province": row.get("school_province"),
+        "school_nature": row.get("school_nature"),
+        "is_985": int(row.get("is_985") or 0) == 1,
+        "is_211": int(row.get("is_211") or 0) == 1,
+        "min_score": row.get("min_score"),
+        "min_rank": min_rank,
+        "batch": row.get("batch"),
+        "year": row.get("year"),
+        "rank_diff": gap,
+        "tier": tier,
+        "tier_label": _TIER_LABEL.get(tier, tier),
+        "probability": _tier_probability(tier, gap, buffer) if gap is not None else None,
+    }
+    item["reason"] = _national_reason(item, rank)
+    return item
+
+
+def calculate_tiers(
+    student_rank: int, province: str, category: str, year: int = 2025
+) -> Dict[str, List[Dict]]:
+    """按位次计算冲 / 稳 / 保三档志愿（全国总表版）。
+
+    :param student_rank: 考生位次（由 rank_service.score_to_rank 得到）
+    :param province:      省份，中文名或拼音均可
+    :param category:      科类，如 "物理类" / "综合" / "理科"
+    :param year:          数据年份，默认 2025
+    :return: {"chong": [...], "wen": [...], "bao": [...]}，每个档位最多 50 条；
+             任何异常都返回三档全空 + logger.warning，不抛异常。
+    """
+    empty = {"chong": [], "wen": [], "bao": []}
+    prov = normalize_province(province)
+    cat = (category or "").strip()
+    rank = int(student_rank or 0)
+    if not prov or not cat or rank <= 0:
+        logger.warning("[TIER] 参数不完整 rank=%s province=%s category=%s",
+                       student_rank, province, category)
+        return empty
+
+    tbl = _NATIONAL_MAJOR_TABLE.format(year=int(year))
+    if not table_exists(tbl):
+        logger.warning("[TIER] 全国总表不存在：%s", tbl)
+        return empty
+
+    buffer = _tier_buffer(prov)
+    out: Dict[str, List[Dict]] = {"chong": [], "wen": [], "bao": []}
+
+    for tier in ("chong", "wen", "bao"):
+        min_r, max_r = _tier_window(tier, rank, buffer)
+        if min_r > max_r:
+            continue
+        sql = (
+            f"SELECT university_name, major_group, major_name, major_code, "
+            f"subject_req, school_province, school_nature, is_985, is_211, "
+            f"min_score, min_rank, batch, year "
+            f"FROM `{tbl}` "
+            f"WHERE `province` = :prov AND `category` = :cat AND `year` = :yr "
+            f"AND `min_rank` IS NOT NULL AND `min_rank` BETWEEN :min_r AND :max_r "
+            f"ORDER BY `min_rank` ASC LIMIT :lim"
+        )
+        try:
+            with SessionLocal() as db:
+                rows = db.execute(text(sql), {
+                    "prov": prov, "cat": cat, "yr": int(year),
+                    "min_r": min_r, "max_r": max_r, "lim": _TIER_LIMIT,
+                }).mappings().all()
+        except Exception as exc:  # noqa: BLE001 单档失败不影响其他档
+            logger.warning("[TIER] %s 档查询失败 %s/%s/%s：%s %s",
+                           tier, prov, cat, year, exc.__class__.__name__, str(exc)[:150])
+            continue
+
+        items = [_to_national_item(dict(r), rank, tier, buffer) for r in rows]
+        # 档内排序：冲看谁更接近考生位次；稳看位次差绝对值；保看谁更保险
+        if tier == "chong":
+            items.sort(key=lambda x: -(x["min_rank"] or 0))
+        elif tier == "wen":
+            items.sort(key=lambda x: abs(x["rank_diff"] or 0))
+        else:
+            items.sort(key=lambda x: (x["min_rank"] or 0))
+        out[tier] = items[:_TIER_LIMIT]
+
+    logger.info(
+        "[TIER] 全国引擎 rank=%s %s/%s buffer=%s → 冲%d 稳%d 保%d",
+        rank, prov, cat, buffer, len(out["chong"]), len(out["wen"]), len(out["bao"]),
+    )
+    return out
+
+
+# 富化时每个档位最多补多少条（学费/计划数查询有成本，只补最相关的前几条）
+_ENRICH_LIMIT = 20
+
+
+def enrich_with_plan(
+    tiers: Dict[str, List[Dict]], province: str, category: str, year: int = 2025
+) -> Dict[str, List[Dict]]:
+    """用 `enrollment_plan_{year}_all` 给三档结果补上学费 / 计划数 / 学制。
+
+    ## 为什么需要
+    `major_admission_{year}_all`（投档表）只有分数与位次，没有学费；
+    学费在 `enrollment_plan_{year}_all`（招生计划表）里。分省表被合并后，
+    只有把两张总表关联起来才能保住原来的「富信息」展示，否则前端学费列会全空。
+
+    ## 实现要点（性能）
+    · 每个档位只补前 `_ENRICH_LIMIT` 条，控制查询规模；
+    · 用一次 `IN (...)` 批量查院校，再在 Python 里按 (院校, 专业) 匹配，
+      避免 N 条推荐发 N 次查询；
+    · 任何失败都原样返回，不影响主链路。
+    """
+    prov = normalize_province(province)
+    cat = (category or "").strip()
+    tbl = f"enrollment_plan_{int(year)}_all"
+    if not prov or not cat or not table_exists(tbl):
+        return tiers
+
+    for tier, items in tiers.items():
+        head = items[:_ENRICH_LIMIT]
+        if not head:
+            continue
+        names = sorted({i["university_name"] for i in head if i.get("university_name")})
+        if not names:
+            continue
+        # 动态 IN 占位符（参数化，防注入）
+        marks = ", ".join(f":n{i}" for i in range(len(names)))
+        params = {f"n{i}": n for i, n in enumerate(names)}
+        params.update({"prov": prov, "cat": cat})
+        sql = (
+            f"SELECT university_name, major_name, tuition, plan_count, duration, subject_req "
+            f"FROM `{tbl}` "
+            f"WHERE `province` = :prov AND `category` = :cat "
+            f"AND `university_name` IN ({marks}) LIMIT 500"
+        )
+        try:
+            with SessionLocal() as db:
+                rows = db.execute(text(sql), params).mappings().all()
+        except Exception as exc:  # noqa: BLE001 富化失败不影响推荐结果
+            logger.info("[TIER] 富化查询失败 %s：%s", tbl, exc.__class__.__name__)
+            continue
+
+        # (院校, 专业) → 计划信息；同名专业多条时取第一条
+        plan: Dict[tuple, Dict] = {}
+        for r in rows:
+            key = ((r.get("university_name") or "").strip(), (r.get("major_name") or "").strip())
+            plan.setdefault(key, dict(r))
+
+        for item in head:
+            key = ((item.get("university_name") or "").strip(),
+                   (item.get("major_name") or "").strip())
+            info = plan.get(key)
+            if not info:
+                continue
+            for src, dst in (("tuition", "tuition"), ("plan_count", "plan_count"),
+                             ("duration", "duration")):
+                if item.get(dst) in (None, "") and info.get(src) not in (None, ""):
+                    item[dst] = info[src]
+            # 投档表没有选科要求时，用计划表补
+            if not item.get("subject_req") and info.get("subject_req"):
+                item["subject_req"] = info["subject_req"]
+    return tiers

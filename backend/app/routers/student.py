@@ -22,14 +22,15 @@ _ID_SEQ = itertools.count(1)
 
 
 def _ensure_rank(p: StudentProfileIn) -> Dict:
-    from app.services.rank_service import score_to_rank
+    # 0.11.0：河南单省富信息版改名为 score_to_rank_detail（全国版占用了 score_to_rank 这个名字）
+    from app.services.rank_service import score_to_rank_detail
 
     info = None
     rank = p.rank
     if rank is None:
         if p.score is None:
             raise HTTPException(status_code=400, detail="score 与 rank 至少提供一个")
-        info = score_to_rank(p.province, p.year, p.category, p.batch, p.score)
+        info = score_to_rank_detail(p.province, p.year, p.category, p.batch, p.score)
         rank = info["rank"]
     return {
         "rank": int(rank),

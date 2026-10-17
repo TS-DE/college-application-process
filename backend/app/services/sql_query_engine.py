@@ -12,14 +12,21 @@
 
 ## 表结构说明（与任务书假设不同，按真实 schema 实现）
 本项目把字段拆在两张表里，**不是**单表：
-  · major_admission_{year}_henan ：投档事实，含 university_name / major_name /
-    subject_req / min_score / min_rank
-  · enrollment_plan_{year}_henan  ：招生计划，含 university_name / major_name /
-    tuition / plan_count
+  · `major_admission_{year}_all` ：投档事实，含 province / category / university_name /
+    major_name / subject_req / min_score / min_rank
+  · `enrollment_plan_{year}_all`  ：招生计划，含 province / category / university_name /
+    major_name / tuition / plan_count
 因此本引擎按 intents 分成两组分别查询后合并，而不是做一张大 JOIN
 （录取行与计划行数量级不同，JOKIN 会产生笛卡尔积噪声）。
 对外 filters 仍沿用 extract_sql_filters() 的 school_name / major_name 契约，
 内部适配成真实的 university_name 列名。
+
+## ★ 0.11.0 全国多省自适应
+原先按 `table_name(KIND_MAJOR, year, province)` 拼**分省表**（`major_admission_2025_henan`），
+数据合并后这些表已全部删除，只剩 `_all` 总表，因此改为：
+  · 表名固定 `{kind}_{year}_all`，不再按省份拼；
+  · WHERE 必须带 `province = :prov AND category = :cat`，防止跨省数据串联污染。
+province 入参可传中文名或拼音，由 `region_mapper` 归一。
 
 ## 安全设计
 1. 表名由 app.models.dataset.table_name() 的固定模板生成，年份只接受 4 位数字；
@@ -40,7 +47,10 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import SessionLocal, table_exists
-from app.models.dataset import KIND_MAJOR, KIND_PLAN, table_name
+from app.utils.region_mapper import (
+    get_categories_by_province,
+    normalize_province,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +63,10 @@ DEFAULT_YEAR = 2025
 COL_SCHOOL = "university_name"
 COL_MAJOR = "major_name"
 
+# 0.11.0 全国总表名模板（不再按省份拼表名）
+_TABLE_MAJOR = "major_admission_{year}_all"   # 投档事实表
+_TABLE_PLAN = "enrollment_plan_{year}_all"    # 招生计划表
+
 # 意图名 -> 数据库列名（只允许这些列被查询，避免整表回传）
 INTENT_COLUMNS: Dict[str, str] = {
     "tuition": "tuition",
@@ -62,13 +76,13 @@ INTENT_COLUMNS: Dict[str, str] = {
     "plan_count": "plan_count",
 }
 
-# 意图名 -> 所属数据表（决定走 major_admission 还是 enrollment_plan）
-INTENT_KIND: Dict[str, str] = {
-    "tuition": KIND_PLAN,
-    "plan_count": KIND_PLAN,
-    "subject_req": KIND_MAJOR,
-    "min_score": KIND_MAJOR,
-    "min_rank": KIND_MAJOR,
+# 意图名 -> 所属数据表（决定查投档表还是招生计划表）
+INTENT_TABLE: Dict[str, str] = {
+    "tuition": _TABLE_PLAN,
+    "plan_count": _TABLE_PLAN,
+    "subject_req": _TABLE_MAJOR,
+    "min_score": _TABLE_MAJOR,
+    "min_rank": _TABLE_MAJOR,
 }
 
 # 意图名 -> 自然语言行模板
@@ -117,6 +131,8 @@ class MySQLQueryEngine:
                 "school_name": str,   # 可选，院校名（LIKE 模糊匹配）
                 "major_name":  str,   # 可选，专业名（LIKE 模糊匹配）
                 "year":        int,   # 可选，默认 DEFAULT_YEAR
+                "province":    str,   # 可选，默认 settings.DEFAULT_PROVINCE（中文名或拼音）
+                "category":    str,   # 可选，默认该省第一个科类
                 "intents":     list,  # 要输出哪些字段，见 INTENT_COLUMNS
              }
         :return: hit=True 时 context 为按 intents 逐行生成的中文句子；
@@ -131,25 +147,33 @@ class MySQLQueryEngine:
         school = (filters.get("school_name") or "").strip()
         major = (filters.get("major_name") or "").strip()
 
-        # 院校与专业都为空时不做全表扫描（单表上万行）
+        # 院校与专业都为空时不做全表扫描（总表单表 43 万行）
         if not school and not major:
             return {"hit": False, "context": "", "raw": [], "error": "缺少院校或专业条件"}
 
-        # 按意图拆成两组，分别查 major_admission 与 enrollment_plan
-        by_kind: Dict[str, List[str]] = {}
+        # 0.11.0 省份 / 科类归一（必传，防跨省污染）
+        prov = normalize_province(filters.get("province") or settings.DEFAULT_PROVINCE)
+        cats = get_categories_by_province(prov)
+        cat = (filters.get("category") or "").strip() or (cats[0] if cats else "")
+        if not prov or not cat:
+            return {"hit": False, "context": "", "raw": [],
+                    "error": f"无法确定省份/科类：{filters.get('province')}"}
+
+        # 按意图拆成两组，分别查投档表与招生计划表
+        by_table: Dict[str, List[str]] = {}
         for intent in intents:
-            by_kind.setdefault(INTENT_KIND[intent], []).append(intent)
+            by_table.setdefault(INTENT_TABLE[intent], []).append(intent)
 
         lines: List[str] = []
         raw: List[Dict[str, Any]] = []
         errors: List[str] = []
-        for kind, kind_intents in by_kind.items():
-            tbl = table_name(kind, year, settings.DEFAULT_PROVINCE)
+        for tpl, tbl_intents in by_table.items():
+            tbl = tpl.format(year=year)
             if not table_exists(tbl):
                 errors.append(f"数据表不存在：{tbl}")
                 continue
             try:
-                rows = self._fetch(tbl, kind_intents, school, major)
+                rows = self._fetch(tbl, tbl_intents, school, major, prov, cat)
             except Exception as exc:  # noqa: BLE001 单表异常不影响另一张表
                 logger.info("[MYSQL] 结构化查询失败 %s：%s", tbl, exc.__class__.__name__)
                 errors.append(f"查询异常：{exc.__class__.__name__}")
@@ -157,7 +181,7 @@ class MySQLQueryEngine:
             if not rows:
                 continue
             raw.extend(rows)
-            lines.extend(self._format_rows(rows, kind_intents, year))
+            lines.extend(self._format_rows(rows, tbl_intents, year))
 
         if not lines:
             return {
@@ -176,20 +200,27 @@ class MySQLQueryEngine:
     # ---------------- 内部工具 ----------------
 
     def _fetch(
-        self, tbl: str, intents: List[str], school: str, major: str
+        self, tbl: str, intents: List[str], school: str, major: str,
+        prov: str, cat: str,
     ) -> List[Dict[str, Any]]:
-        """单表查询：只 SELECT 需要的列，条件参数化，按位次升序（贴近考生位次的排前面）。"""
+        """单表查询：只 SELECT 需要的列，条件全部参数化。
+
+        0.11.0：WHERE 必须带 province + category，避免跨省数据串联污染。
+        """
         columns = [COL_SCHOOL, COL_MAJOR] + [INTENT_COLUMNS[i] for i in intents]
         # min_rank 只在投档表存在；计划表没有该列时退化为按院校名排序
         order = "min_rank IS NULL, min_rank ASC" if "min_rank" in columns else f"{COL_SCHOOL} ASC"
         sql = (
             f"SELECT {', '.join(columns)} FROM `{tbl}` "
             f"WHERE {COL_SCHOOL} LIKE :school AND {COL_MAJOR} LIKE :major "
+            f"AND `province` = :prov AND `category` = :cat "
             f"ORDER BY {order} LIMIT :limit"
         )
         params = {
             "school": f"%{school}%" if school else "%",
             "major": f"%{major}%" if major else "%",
+            "prov": prov,
+            "cat": cat,
             "limit": int(settings.MYSQL_MAX_ROWS),
         }
         with self._session_factory() as session:

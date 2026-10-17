@@ -1658,6 +1658,9 @@ def answer_with_hybrid(question: str, top_k: int = 5) -> Dict:
 
         filters = rag_service_extract_sql_filters(question) or {}
         filters["intents"] = intents
+        # 0.11.0：MySQL 通道改查全国总表，必须带上省份与科类，防止跨省数据污染。
+        # 默认省份取项目配置（河南），科类由 MySQLQueryEngine 按省份自动推断。
+        filters.setdefault("province", settings.DEFAULT_PROVINCE)
         return MySQLQueryEngine().query_structured(filters)
 
     def _vector_channel():

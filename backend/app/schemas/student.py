@@ -1,5 +1,5 @@
 """Pydantic 请求/响应模型。"""
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -108,7 +108,7 @@ class RecommendItem(BaseModel):
     rank_diff: Optional[int] = None      # 学校最低位次 - 考生位次，正=更稳妥
     tier: Optional[str] = None           # chong / wen / bao
     tier_label: Optional[str] = None     # 冲 / 稳 / 保
-    probability: Optional[int] = None    # 规则估算的录取概率（%）
+    probability: Optional[float] = None  # 规则估算的录取概率（%）；0.11.0 起为 1 位小数
     reason: Optional[str] = None         # 规则生成的推荐理由
     ai_reason: Optional[str] = None      # 大模型生成的推荐理由
     ai: bool = False                     # ai_reason 是否真的来自大模型
@@ -130,6 +130,9 @@ class RecommendOut(BaseModel):
     wen: List[RecommendItem] = []
     bao: List[RecommendItem] = []
     meta: RecommendMeta
+    # 0.11.0 全国多省自适应：全国总表引擎算出的位次与三档结果（可选，缺失时忽略）
+    rank: Optional[int] = None
+    tiers: Optional[Dict[str, List[dict]]] = None
 
 
 class UniversityQuery(BaseModel):

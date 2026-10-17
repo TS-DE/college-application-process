@@ -55,8 +55,178 @@
 | **0.8.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变） | 父块（不变） | ✅ 已发布 |
 | **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 已发布 |
 | **0.9.1** | 2026-10-14 | 父子块（不变） | + 三路融合检索（图谱 + MySQL + 向量），按「图谱 > MySQL > 向量」优先级分发 | 父块 + 图谱三元组 + **MySQL 精确值** | ✅ 已发布 |
-| **0.10.0** | 2026-10-16 | 父子块（不变） | 三路融合（不变）+ OCR 预处理 + 以文搜图（Chinese-CLIP / 图注向量 + qwen3.7-flash） | 父块 + 图谱三元组 + MySQL 精确值 + **图像** | ✅ 本次发布 |
+| **0.10.0** | 2026-10-16 | 父子块（不变） | 三路融合（不变）+ OCR 预处理 + 以文搜图（Chinese-CLIP / 图注向量 + qwen3.7-flash） | 父块 + 图谱三元组 + MySQL 精确值 + **图像** | ✅ 已发布 |
+| **0.11.0** | 2026-10-17 | 父子块（不变） | 三路融合（不变）+ **全国多省自适应核心引擎**（查 `_all` 总表，province/category 参数化） | 父块 + 图谱三元组 + MySQL 精确值 + 图像（全国 30+ 省） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.11.0] - 2026-10-17 · 架构重构：核心匹配引擎从「河南单省」升级为「全国多省自适应」
+
+### 一、原有技术（0.10.0）及缺陷
+
+| 环节 | 0.10.0 的技术 | 存在的缺陷 |
+|---|---|---|
+| 表名拼接 | `table_name(KIND_MAJOR, year, province)` → `major_admission_2025_henan` | 全国数据合并入库后**分省表已全部删除**，只剩 `*_2025_all` 三张总表，原链路直接 500（`数据表不存在或无法反射：score_range_2025_henan`） |
+| 科类假设 | 前端 / 服务层默认「物理类」 | 不同省份科类名不同（3+3=综合 / 3+1+2=物理类·历史类 / 老高考=理科·文科），写死会导致查询落空或串省 |
+| 参数校验 | 无 | 传 `province=beijing, category=物理类` 这种非法组合不会被拦，一路查到空结果才报错 |
+| 内存保护 | 分省表单表几千行，`fetch_all()` 全量拉取 | 总表单表 **43 万行**（enrollment_plan 80 万行），全量拉取会直接把内存和接口打爆 |
+| 位次缓冲 | `RANK_BUFFER=5000` 全局写死 | 考生基数大的省份窗口过窄，候选不足 |
+
+### 二、改进技术及对应代码位置
+
+#### 1. 新增 `utils/region_mapper.py`（单一职责：只管「省份 ↔ 科类」）
+
+| 能力 | 说明 |
+|---|---|
+| `PROVINCE_CATEGORIES` | 31 个省级行政区的科类配置 |
+| `get_categories_by_province(code)` | 支持中文名与拼音两种入参 |
+| `normalize_province(code)` | 归一成数据库 `province` 列的真实取值（中文名） |
+| `is_new_gaokao` / `gaokao_mode` / `has_data` | 新高考判定 / 高考模式 / 该省是否有数据 |
+
+#### 2. `services/rank_service.py` 位次换算重构
+
+| 函数 | 签名 | 说明 |
+|---|---|---|
+| `score_to_rank` | `(score, province, category, year=2025) -> int` | 全国总表版，查不到返回 **0** + warning，不抛异常 |
+| `rank_to_score` | `(rank, province, category, year=2025) -> int` | 同上 |
+| `score_to_rank_detail` | `(province, year, category, batch, score) -> Dict` | 原河南富信息版改名保留（返回 control_score / rank_range 等） |
+
+> **三个踩过的坑**：① `province` 列存中文名，入参要归一；② `score` / `cumulative_count`
+> 是 TEXT 且值为 `'710.0'`，数值比较必须 `CAST(... AS SIGNED)`——直接
+> `score <= '600'` 会因字符串比较漏掉 `'600.0'`；③ 单省数据缺失要返回 0 而不是抛异常。
+
+#### 3. `services/recommend_service.py` 全国推荐引擎
+
+```python
+calculate_tiers(student_rank, province, category, year=2025)
+    -> {"chong": [...], "wen": [...], "bao": [...]}
+```
+
+| 设计点 | 实现 |
+|---|---|
+| 数据源 | `major_admission_{year}_all`，WHERE 必带 `province` + `category` + `year` |
+| 内存保护 | 每档 `LIMIT 50`，绝不 `SELECT *` |
+| 位次缓冲 | `_tier_buffer()` 按省份动态取值（河南/山东/广东等大省 ×2） |
+| 概率 | `_tier_probability()` 位次差线性映射，冲 10-40% / 稳 55-85% / 保 88-98%，保留 1 位小数 |
+| 富化 | `enrich_with_plan()` 用 `enrollment_plan_{year}_all` 补学费 / 计划数 / 学制，每档只补前 20 条、一次 `IN` 批量查 |
+
+#### 4. `services/sql_query_engine.py` 同步迁移（0.9.1 MySQL 通道）
+
+原按 `table_name()` 拼分省表，分省表删除后三路融合的 MySQL 路直接失效。
+现改为固定 `{kind}_{year}_all` + `province = :prov AND category = :cat`，
+province 入参同样支持拼音 / 中文归一。
+
+#### 5. `routers/recommend.py` 路由层
+
+| 接口 | 行为 |
+|---|---|
+| `POST /api/recommend` | **全国引擎为主路径**：校验 → 算位次 → 算三档 → 富化。响应保留原 `student/chong/wen/bao/meta` 字段，新增 `rank` 与 `tiers`（向前兼容） |
+| `POST /api/recommend/national` | 纯全国引擎版，只返回 `{rank, province, category, year, tiers}` |
+| `_validate_province_category()` | 省份不存在 / 科类不支持 / 该省无数据，分别返回明确 400 |
+
+原「河南单省富信息版」`recommend_service.recommend()` 依赖已删除的分省表，
+降级为**可选增强**（保留代码，不再作为主路径）。
+
+#### 6. `routers/meta.py` 的 `/api/meta/options`
+
+在原有返回基础上**追加**（不破坏现有消费方）：
+
+```json
+{
+  "provinces": ["北京", "天津", "...31 个"],
+  "categories_map": {"北京": ["综合"], "河南": ["物理类", "历史类"], "...": []},
+  "province_modes": {"北京": "3+3", "河南": "3+1+2", "新疆": "老高考"}
+}
+```
+
+前端一次拉全即可做「选省份 → 联动科类」的下钻。
+
+#### 7. `sql/05_national_tables_perf.sql`（新增）
+
+列类型收紧（TEXT → VARCHAR）+ 复合索引确认 + `ANALYZE TABLE` + EXPLAIN 验证语句。
+pandas 全量字符串导入会把文本列建成 TEXT，不收紧的话 43 万行查询会超时。
+
+### 三、验证流程
+
+#### 1. 区域映射与参数校验
+
+```
+python test_national_engine.py
+```
+
+```
+用例 1：region_mapper 区域映射
+  省份数 = 31
+  拼音/中文归一全部通过；无数据省份 = ['内蒙古', '山西', '青海']
+用例 3b：概率线性映射边界
+  冲 10-40 / 稳 55-85 / 保 88-98 边界值正确
+用例 4：非法传参拦截
+  beijing/物理类 → 400「该省份不支持此科类：北京 仅支持 综合」
+  火星/综合     → 400「不支持的省份：火星」
+  shanxi/理科   → 400「山西 暂无 2025 年录取数据，请切换省份」
+```
+
+#### 2. 多省位次换算与三档计算（真实库）
+
+```
+python test_national_engine.py --real
+```
+
+| 考生 | 分数 | 位次 | 冲 | 稳 | 保 |
+|---|---|---|---|---|---|
+| 北京 · 3+3 综合 | 600 | 11883 | 50 | 50 | 50 |
+| 河南 · 3+1+2 物理类 | 600 | 45887 | 50 | 50 | 50 |
+| 河南 · 3+1+2 历史类 | 600 | 6178 | 0 | 50 | 50 |
+| 四川 · 物理类 | 600 | 23461 | — | — | — |
+| 新疆 · 老高考理科 | 550 | 4021 | — | — | — |
+
+三档结构 / LIMIT 50 / 概率区间 / 档内排序全部通过。
+
+#### 3. 接口层
+
+```
+python test_national_engine.py --api
+```
+
+```
+/api/meta/options        → provinces=31 categories_map=31
+beijing/综合/600         → 200  rank=11883 tiers={chong:50, wen:50, bao:50}
+henan/物理类/600         → 200  rank=45887 tiers={chong:50, wen:50, bao:50}
+beijing/物理类/600       → 400  该省份不支持此科类：北京 仅支持 综合
+/api/recommend（河南）    → 200  旧字段齐全；rank=45887 tiers=有
+```
+
+`/api/recommend` 返回的条目已带富化字段（`tuition: 5000.0`、`plan_count: 3.0`、`duration: "4"`）。
+
+#### 4. 回归验证
+
+```bash
+cd backend
+python test_national_engine.py --api   # 0.11.0 新增
+python test_hybrid_rag.py              # 0.9.1 三路融合（MySQL 通道已迁到总表）
+python test_multimodal_rag.py          # 0.10.0 多模态 + OCR
+python smoke_test.py                   # 业务接口冒烟
+python smoke_rag.py                    # RAG SMOKE DONE
+```
+
+### 四、与任务书的偏差（均已按实测数据校正）
+
+| 项 | 任务书假设 | 实际数据 | 处理 |
+|---|---|---|---|
+| 科类分组 | 四川/云南/陕西/宁夏归老高考「理科/文科」 | 这四省在 2025 总表里存的是「物理类/历史类」 | 按实际数据配置，否则四省永远 400 |
+| 无数据省份 | 未提及 | 山西 / 内蒙古 / 青海在三张总表里**没有任何数据** | 单列 `PROVINCES_NO_DATA`，路由层给出「该省暂无数据」的明确报错 |
+| `province` 入参 | `province_code`（拼音，如 `henan`） | 数据库 `province` 列存**中文名** | 两种入参都支持，内部归一成中文名 |
+| `probability` 类型 | 1 位小数 | 原 schema 是 `Optional[int]` | schema 改为 `Optional[float]`（int 仍是合法 float，向后兼容） |
+
+### 五、后续演进方向（0.12.0）
+
+| 方向 | 说明 |
+|---|---|
+| 前端省份联动 | `Volunteer.vue` 接入 `categories_map`，做「选省份 → 联动科类」下拉 |
+| 老高考数据补齐 | 山西 / 内蒙古 / 青海导入 2025 数据 |
+| Level 3 串行筛选 | 图谱 / MySQL 能完整回答时跳过向量检索 |
+| 分省表兼容层 | 若将来又建回分省表，可加一层「总表优先、分省兜底」的路由 |
 
 ---
 
