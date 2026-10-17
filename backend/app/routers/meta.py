@@ -47,7 +47,18 @@ def _available_years(province: str) -> List[int]:
 
 @router.get("/options")
 def options(province: str = Query(default=settings.DEFAULT_PROVINCE)) -> Dict:
-    """返回该省份可用的年份 / 科类 / 批次，避免前端写死下拉框。"""
+    """返回该省份可用的年份 / 科类 / 批次，避免前端写死下拉框。
+
+    0.11.0：新增 `provinces`（全国 31 省）与 `categories_map`（省份 → 科类），
+    前端一次拉全即可做「选省份 → 联动科类」的下钻，无需再为每省写死选项。
+    """
+    from app.utils.region_mapper import (
+        categories_map,
+        gaokao_mode,
+        list_provinces,
+        normalize_province,
+    )
+
     years = _available_years(province)
     categories: List[str] = []
     batches: List[str] = []
@@ -68,12 +79,20 @@ def options(province: str = Query(default=settings.DEFAULT_PROVINCE)) -> Dict:
         cb = "本科批" if b in ("本科一批", "本科二批", "本一", "本二", "本科批") else b
         if cb not in canon_batches:
             canon_batches.append(cb)
+
+    # 0.11.0 全国省份 / 科类映射（归一化后的中文名为 key）
+    cats_map = categories_map()
+    prov_cn = normalize_province(province)
     return {
-        "province": province,
+        "province": prov_cn or province,
         "years": years,
         "categories": categories,
         "batches": canon_batches,
         "raw_batches": batches,
+        # ---- 0.11.0 新增：全国多省自适应下拉选项 ----
+        "provinces": list_provinces(),
+        "categories_map": cats_map,
+        "province_modes": {p: gaokao_mode(p) for p in list_provinces()},
         "default": {
             "year": years[-1] if years else 2025,
             "category": "物理类" if "物理类" in categories else (categories[0] if categories else "物理类"),

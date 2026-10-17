@@ -112,14 +112,20 @@ def test_mysql_engine() -> None:
     MySQLQueryEngine(session_factory=lambda: session).query_structured({
         "school_name": "福州大学至诚学院",
         "major_name": "计算机",
+        "province": "henan",
         "intents": ["tuition", "subject_req"],
     })
-    # 按真实 schema 拆成两张表查询：tuition 走 enrollment_plan，subject_req 走 major_admission
+    # 0.11.0：改查全国总表，且 WHERE 必须带 province + category（防跨省污染）
     assert len(session.calls) == 2, [c[0] for c in session.calls]
     sql_plan, params_plan = session.calls[0]
     sql_adm, params_adm = session.calls[1]
-    assert "enrollment_plan_2025_henan" in sql_plan, sql_plan
-    assert "major_admission_2025_henan" in sql_adm, sql_adm
+    assert "enrollment_plan_2025_all" in sql_plan, sql_plan
+    assert "major_admission_2025_all" in sql_adm, sql_adm
+    for sql_text in (sql_plan, sql_adm):
+        assert "`province` = :prov" in sql_text, sql_text
+        assert "`category` = :cat" in sql_text, sql_text
+    assert params_plan["prov"] == "河南", params_plan   # 拼音入参已归一成中文名
+    assert params_plan["cat"] == "物理类", params_plan  # 未传科类时取该省第一个
     # 参数化查询：条件必须走绑定，不能字符串拼接进 SQL
     for sql_text in (sql_plan, sql_adm):
         assert "LIKE :school" in sql_text and "LIKE :major" in sql_text, sql_text
@@ -134,7 +140,8 @@ def test_mysql_engine() -> None:
     for line in res["context"].splitlines():
         print(f"    {line}")
     print(f"  参数化校验通过：school={params_plan['school']} major={params_plan['major']} limit={params_plan['limit']}")
-    print(f"  两表拆分：enrollment_plan(学费/计划) + major_admission(分数线/位次/选科)")
+    print(f"  全国总表：enrollment_plan_2025_all(学费/计划) + major_admission_2025_all(分数线/位次/选科)")
+    print(f"  省份/科类归一：prov={params_plan['prov']} cat={params_plan['cat']}")
 
     # 无意图 / 无条件时不查库
     empty = MySQLQueryEngine(session_factory=_session_factory()).query_structured({"intents": []})

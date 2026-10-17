@@ -104,7 +104,7 @@ backend/
 │   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
 │   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
-│   │   ├── recommend.py          <span style="color:#888">// /api/recommend（主链路）、/api/recommend/ai-reasons（批量理由）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── recommend.py          <span style="color:#888">// /api/recommend（主链路，0.11.0 全国引擎）、/api/recommend/national（纯全国引擎）、/api/recommend/ai-reasons（批量理由）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── stats.py              <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
 │   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
 │   │   ├── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
@@ -115,7 +115,7 @@ backend/
 │   │   ├── ai_service.py         <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
 │   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（学费/分数线/位次/选科/招生计划），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
+│   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
 │   │   ├── multimodal/            <span style="color:#888">// 0.10.0 以文搜图（5 个类，合成复用；图像独立向量空间 gaokao_images）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 多模态</span>
 │   │   │   ├── image_extractor.py <span style="color:#888">// ImageExtractor：pdfplumber 抽 PDF 嵌图；扫描件退化为按页渲染（pypdfium2）</span>
 │   │   │   ├── image_encoder.py  <span style="color:#888">// BaseImageEncoder 抽象 + ChineseCLIPEncoder / CaptionEncoder + create_image_encoder() 工厂</span>
@@ -148,6 +148,7 @@ backend/
 │   └── utils/
 │       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取（0.10.0 起返回 (文本, ocr_used)）、20MB 限制</span>
 │       ├── ocr_utils.py          <span style="color:#888">// 0.10.0 OCRExtractor：扫描件判定 / PDF 转图 / 页间并发 OCR / OCR 兜底入口</span>
+│       ├── region_mapper.py      <span style="color:#888">// 0.11.0 全国省份↔科类映射：31 省配置、拼音/中文归一、新高考判定、无数据省份标记</span>
 │       └── security.py           <span style="color:#888">// bcrypt 哈希校验 + JWT 签发/解析</span>
 ├── sql/
 │   ├── 03_knowledge.sql          <span style="color:#888">// 旧版 knowledge_files（历史归档）</span>
@@ -162,6 +163,7 @@ backend/
 ├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
 ├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
 ├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
+├── test_national_engine.py       <span style="color:#888">// 0.11.0：全国多省自适应引擎（区域映射 + 多省位次 + 三档计算 + 非法传参 + 接口层）</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -739,6 +741,43 @@ graph TD
 
 **为什么图像用独立集合**：图像编码器与文本编码器不同（Chinese-CLIP 512 维 / 图注向量 768 维），语义空间也不同；混在一个集合会维度报错，且检索结果互相干扰。切换编码器前必须调用 `ImageStore.reset()` 重建集合并重新上传文件。
 
+### 4.7 主链六：志愿填报推荐（0.11.0 全国多省自适应）
+
+入口：`student/Volunteer.vue` → `api/recommend.ts` → `POST /api/recommend`（或 `/api/recommend/national`）
+
+```mermaid
+graph TD
+    A["student/Volunteer.vue<br/>选省份 / 科类 / 填分数"] -->|"POST /api/recommend<br/>{province, category, score}"| B["routers/recommend.py<br/>_validate_province_category()"]
+    B -->|"省份不存在"| E1["400 不支持的省份"]
+    B -->|"科类不支持"| E2["400 该省份不支持此科类"]
+    B -->|"该省无数据"| E3["400 该省暂无 2025 年数据"]
+    B -->|"校验通过"| C["rank_service.score_to_rank()<br/>score → 位次（查 score_range_2025_all）"]
+    C -->|"返回 0"| E4["400 未在当年一分一段表中找到该分数"]
+    C -->|"得到位次"| D["recommend_service.calculate_tiers()<br/>位次 → 冲稳保（查 major_admission_2025_all）"]
+    D --> D1["每档 LIMIT 50<br/>位次缓冲按省份动态取值"]
+    D1 --> D2["recommend_service.enrich_with_plan()<br/>查 enrollment_plan_2025_all 补学费/计划数/学制"]
+    D2 --> F["返回 student / chong / wen / bao<br/>+ rank + tiers（向前兼容）"]
+
+    style B fill:#fff3cd,stroke:#d32f2f
+    style D fill:#e3f2fd,stroke:#1976d2
+    style D2 fill:#e3f2fd,stroke:#1976d2
+```
+
+**省份 / 科类参数传递路径**（★ 0.11.0 核心）：
+
+| 环节 | 位置 | 做什么 |
+|---|---|---|
+| ① 前端取选项 | `GET /api/meta/options` | 一次返回 `provinces`（31 省）+ `categories_map`（省→科类）+ `province_modes`（高考模式），前端做「选省份 → 联动科类」 |
+| ② 归一化 | `region_mapper.normalize_province()` | 入参可传中文名（`河南`）或拼音（`henan`），统一归一成数据库 `province` 列的中文取值 |
+| ③ 合法性校验 | `routers/recommend._validate_province_category()` | 省份不存在 / 科类不在该省列表 / 该省无数据 → 分别返回明确 400 |
+| ④ 位次换算 | `rank_service.score_to_rank(score, prov, cat, year)` | 查 `score_range_{year}_all`，WHERE 带 `province` + `category`；查不到返回 0 |
+| ⑤ 三档计算 | `recommend_service.calculate_tiers(rank, prov, cat, year)` | 查 `major_admission_{year}_all`，WHERE 带 `province` + `category` + `year` + `min_rank BETWEEN`；每档 LIMIT 50 |
+| ⑥ 富化 | `recommend_service.enrich_with_plan()` | 查 `enrollment_plan_{year}_all` 补学费 / 计划数 / 学制，每档只补前 20 条、一次 `IN` 批量查 |
+
+**科类差异处理**：三种高考模式的科类名不同，`region_mapper` 已按实测数据配置——3+3 六省只有「综合」；3+1+2 二十省为「物理类 / 历史类」（含四川、云南、陕西、宁夏，任务书原归老高考，实测为 3+1+2）；老高考仅新疆、西藏为「理科 / 文科」。山西 / 内蒙古 / 青海暂无数据，会在第 ③ 步被明确拦截。
+
+**内存与性能保护**：总表单表 43 万行（`enrollment_plan` 80 万行），所有查询都带 `LIMIT`（三档各 50 条、富化各 20 条），绝不 `SELECT *` 全量拉取；列类型收紧与索引脚本见 `backend/sql/05_national_tables_perf.sql`。
+
 ---
 
 ## 五、接口清单
@@ -752,8 +791,10 @@ graph TD
 | POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
-| POST | `/api/recommend` | **冲稳保推荐主链路** | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
+| POST | `/api/recommend` | **冲稳保推荐主链路**（0.11.0 起走全国总表引擎，响应新增 `rank` / `tiers`；省份+科类非法返回 400） | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
+| POST | `/api/recommend/national` | 0.11.0 纯全国引擎版：只返回 `{rank, province, category, year, tiers}` | 公开 | 预留（只要结构化结果的场景） |
 | POST | `/api/recommend/ai-reasons` | 批量生成 AI 理由 | 公开 | 预留 |
+| GET | `/api/meta/options` | 年份/科类/批次下拉 + 0.11.0 新增 `provinces` / `categories_map` / `province_modes` | 公开 | 预留（前端省份联动） |
 | GET | `/api/score-to-rank` | 分数 → 位次 | 公开 | 预留（页面走 score-check） |
 | GET | `/api/rank-to-score` | 位次 → 分数 | 公开 | 预留 |
 | POST | `/api/student/profile` | 保存考生信息并返回换算位次 | 公开 | 预留 |
