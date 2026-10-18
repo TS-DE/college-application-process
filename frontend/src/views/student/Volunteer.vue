@@ -13,14 +13,20 @@
 
       <el-form label-position="top" class="form-grid">
         <el-form-item label="考试地区">
-          <el-select v-model="form.province" style="width: 100%">
-            <el-option label="河南" value="河南" />
+          <!-- 0.11.1：省份下拉改为全国 31 省动态渲染 -->
+          <el-select v-model="form.province" style="width: 100%" @change="onProvinceChange">
+            <el-option v-for="p in provinceOptions" :key="p" :label="p" :value="p" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="科类">
+          <!-- 0.11.1：科类跟随省份级联（北京=综合 / 河南=物理类·历史类 / 新疆=理科·文科） -->
+          <el-select v-model="form.category" style="width: 100%" @change="onCategoryChange">
+            <el-option v-for="c in categoryOptions" :key="c" :label="c" :value="c" />
           </el-select>
         </el-form-item>
         <el-form-item label="参考年份">
           <el-select v-model="form.year" style="width: 100%" @change="onDimensionChange">
-            <el-option :label="2025" :value="2025" />
-            <el-option :label="2024" :value="2024" />
+            <el-option v-for="y in yearOptions" :key="y" :label="y" :value="y" />
           </el-select>
         </el-form-item>
         <el-form-item label="成绩类型">
@@ -31,7 +37,8 @@
         </el-form-item>
       </el-form>
 
-      <div class="subject-row">
+      <!-- 3+1+2 省份才需要选具体科目；3+3 省份只有「综合」，不显示这一块 -->
+      <div v-if="needSubjectPick" class="subject-row">
         <span class="label">高考科目（3 + 1 + 2）</span>
         <div class="pills">
           <button
@@ -104,9 +111,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { controlLines, recommend as recommendApi, scoreCheck } from '@/api/recommend'
+import { controlLines, metaOptions, recommend as recommendApi, scoreCheck } from '@/api/recommend'
 import type { RecommendResult } from '@/types/recommend'
 
 const SUBJECTS = ['物理', '化学', '生物', '政治', '历史', '地理']
@@ -114,6 +121,8 @@ const FIRST_SUBJECTS = ['物理', '历史']
 
 const form = reactive({
   province: '河南',
+  // 0.11.1：科类由下拉框显式选择（不再只靠首选科目推导），默认河南为物理类
+  category: '物理类',
   year: 2025,
   level: '' as '' | 'ben' | 'zhuan',
   score: '',
@@ -130,17 +139,32 @@ const batchAuto = ref(false)
 const loading = ref(false)
 const result = ref<RecommendResult | null>(null)
 
+// ---- 0.11.1 全国省份 / 科类级联 ----
+const provinceOptions = ref<string[]>(['河南'])
+const categoriesMap = ref<Record<string, string[]>>({ 河南: ['物理类', '历史类'] })
+const yearOptions = ref<number[]>([2025])
+
+/** 当前省份支持的科类列表（北京 → ['综合']；河南 → ['物理类','历史类']） */
+const categoryOptions = computed(() => categoriesMap.value[form.province] || [])
+
+/** 是否为 3+3 省份（只有「综合」），这类省份不需要选 3+1+2 的具体科目 */
+const needSubjectPick = computed(
+  () => categoryOptions.value.length > 1 || categoryOptions.value.includes('物理类')
+)
+
 const tiers = [
   { key: 'chong' as const, label: '冲' },
   { key: 'wen' as const, label: '稳' },
   { key: 'bao' as const, label: '保' }
 ]
 
-const firstSubject = computed(() => subjects.value.find((s) => FIRST_SUBJECTS.includes(s)) || null)
+/** 实际提交给后端的科类：以「科类」下拉为准；老高考年份做一次写法映射 */
 const category = computed(() => {
-  const f = firstSubject.value
-  if (!f) return ''
-  return form.year >= 2025 ? `${f}类` : f === '物理' ? '理科' : '文科'
+  const c = form.category || ''
+  if (form.year >= 2025) return c
+  if (c === '物理类') return '理科'
+  if (c === '历史类') return '文科'
+  return c
 })
 
 const scorePlaceholder = computed(() => {
@@ -166,7 +190,62 @@ function toggleSubject(s: string) {
     }
     subjects.value.push(s)
   }
+  // 首选科目变化时，把「科类」下拉同步过去，避免两处不一致
+  if (FIRST_SUBJECTS.includes(s)) {
+    const want = form.year >= 2025 ? `${s}类` : s === '物理' ? '理科' : '文科'
+    if (categoryOptions.value.includes(want)) form.category = want
+  }
   loadLines()
+}
+
+// ---------------- 0.11.1 省份 / 科类级联 ----------------
+
+/** 切换省份：重置科类为该省第一个，清空旧的位次/批次/分数校验态 */
+function onProvinceChange() {
+  const cats = categoryOptions.value
+  form.category = cats[0] || ''
+  // 3+3 省份只有「综合」，清掉 3+1+2 科目选择，避免提交无意义的选科
+  if (!needSubjectPick.value) subjects.value = []
+  else if (form.category === '物理类' && !subjects.value.includes('物理')) subjects.value = ['物理']
+  else if (form.category === '历史类' && !subjects.value.includes('历史')) subjects.value = ['历史']
+
+  form.rank = ''
+  form.batch = ''
+  form.score = ''
+  batchAuto.value = false
+  rankRange.value = ''
+  scoreError.value = ''
+  result.value = null
+  loadLines()
+}
+
+/** 切换科类：反向同步首选科目，并重新拉批次线 */
+function onCategoryChange() {
+  const c = form.category
+  if (c === '物理类') subjects.value = ['物理', ...subjects.value.filter((s) => !FIRST_SUBJECTS.includes(s))]
+  else if (c === '历史类') subjects.value = ['历史', ...subjects.value.filter((s) => !FIRST_SUBJECTS.includes(s))]
+  else if (!needSubjectPick.value) subjects.value = []
+
+  form.rank = ''
+  rankRange.value = ''
+  scoreError.value = ''
+  loadLines()
+  autoCheck()
+}
+
+/** 拉取全国省份与「省份 → 科类」映射，初始化级联下拉 */
+async function loadOptions() {
+  try {
+    const res = await metaOptions(form.province)
+    provinceOptions.value = res.provinces?.length ? res.provinces : provinceOptions.value
+    categoriesMap.value = res.categories_map || categoriesMap.value
+    yearOptions.value = res.years?.length ? res.years : [2025]
+    const cats = categoriesMap.value[form.province] || []
+    if (cats.length && !cats.includes(form.category)) form.category = cats[0]
+    if (!needSubjectPick.value) subjects.value = []
+  } catch {
+    // 拉取失败时保留默认值（河南 / 物理类），不影响主流程
+  }
 }
 
 async function loadLines() {
@@ -215,7 +294,7 @@ async function autoCheck() {
     return
   }
   if (!category.value) {
-    scoreError.value = '请先选择首选科目（物理或历史）'
+    scoreError.value = '请先选择科类'
     return
   }
   try {
@@ -241,7 +320,7 @@ async function autoCheck() {
 
 async function onRecommend() {
   if (!category.value) {
-    ElMessage.warning('请选择首选科目（物理或历史）')
+    ElMessage.warning('请先选择科类')
     return
   }
   if (!form.score || !form.rank || !form.batch) {
@@ -268,7 +347,10 @@ async function onRecommend() {
   }
 }
 
-loadLines()
+onMounted(async () => {
+  await loadOptions()
+  loadLines()
+})
 </script>
 
 <style scoped>

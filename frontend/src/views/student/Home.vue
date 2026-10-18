@@ -3,7 +3,7 @@
     <section class="hero">
       <div>
         <h1>高考志愿填报系统</h1>
-        <p>河南 2024-2025 录取数据 · 冲稳保规则引擎 · 本地大模型 + 知识库问答</p>
+        <p>全国 30+ 省份录取数据 · 冲稳保规则引擎 · 本地大模型 + 知识库问答</p>
       </div>
       <div class="btns">
         <el-button type="primary" size="large" @click="$router.push('/volunteer')">开始智能选志愿</el-button>
@@ -16,17 +16,20 @@
       <div class="card map-card">
         <div class="card-head">
           <div>
-            <h3>各省在河南招生的专业数量</h3>
-            <p class="sub">数据来源：{{ year }} 年河南 {{ batch }} {{ category }} 录取数据</p>
+            <h3>各省在 {{ province }} 招生的专业数量</h3>
+            <p class="sub">数据来源：{{ year }} 年 {{ province }} {{ batch }} {{ category }} 录取数据</p>
           </div>
           <div class="filters">
-            <el-select v-model="year" size="small" style="width: 90px" @change="load">
-              <el-option :label="2025" :value="2025" />
-              <el-option :label="2024" :value="2024" />
+            <!-- 0.11.1：新增考生省份下拉，地图随省份切换（北京只看北京数据） -->
+            <el-select v-model="province" size="small" style="width: 100px" @change="onProvinceChange">
+              <el-option v-for="p in provinceChoices" :key="p" :label="p" :value="p" />
             </el-select>
+            <el-select v-model="year" size="small" style="width: 90px" @change="load">
+              <el-option v-for="y in yearChoices" :key="y" :label="y" :value="y" />
+            </el-select>
+            <!-- 0.11.1：科类跟随省份级联 -->
             <el-select v-model="category" size="small" style="width: 100px" @change="load">
-              <el-option label="物理类" value="物理类" />
-              <el-option label="历史类" value="历史类" />
+              <el-option v-for="c in categoryChoices" :key="c" :label="c" :value="c" />
             </el-select>
             <el-select v-model="batch" size="small" style="width: 96px" @change="load">
               <el-option label="本科批" value="本科批" />
@@ -72,17 +75,31 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import * as echarts from 'echarts'
-import { majorCountByProvince } from '@/api/recommend'
+import { majorCountByProvince, metaOptions } from '@/api/recommend'
 import type { ProvinceMajorStat } from '@/types/recommend'
 
 const router = useRouter()
 
-const year = ref(2025)
+// ---- 0.11.1 考生省份 / 科类级联（默认河南 / 物理类）----
+const province = ref('河南')
+const provinceChoices = ref<string[]>(['河南'])
+const categoriesMap = ref<Record<string, string[]>>({ 河南: ['物理类', '历史类'] })
 const category = ref('物理类')
+const year = ref(2025)
+const yearChoices = ref<number[]>([2025])
 const batch = ref('本科批')
+
+/** 当前省份支持的科类（北京 → ['综合']；河南 → ['物理类','历史类']） */
+const categoryChoices = computed(() => categoriesMap.value[province.value] || [category.value])
+
+/** 切换考生省份：科类重置为该省第一个，然后重新拉地图数据 */
+function onProvinceChange() {
+  category.value = categoryChoices.value[0] || ''
+  load()
+}
 
 const chartEl = ref<HTMLDivElement>()
 const chart = shallowRef<echarts.ECharts | null>(null)
@@ -209,12 +226,27 @@ async function render() {
   inst.resize()
 }
 
+/** 拉取全国省份与「省份 → 科类」映射（级联数据源） */
+async function loadOptions() {
+  try {
+    const res = await metaOptions(province.value)
+    provinceChoices.value = res.provinces?.length ? res.provinces : provinceChoices.value
+    categoriesMap.value = res.categories_map || categoriesMap.value
+    yearChoices.value = res.years?.length ? res.years : [2025]
+    const cats = categoriesMap.value[province.value] || []
+    if (cats.length && !cats.includes(category.value)) category.value = cats[0]
+  } catch {
+    // 失败时保留默认（河南 / 物理类）
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     await loadGeoJson()
+    // 0.11.1：带上考生省份，否则后端只能按默认省统计（跨省数据会串）
     const res = await majorCountByProvince({
-      province: '河南',
+      province: province.value,
       year: year.value,
       category: category.value,
       batch: batch.value
@@ -237,6 +269,7 @@ function onResize() {
 let resizeObserver: ResizeObserver | null = null
 
 onMounted(async () => {
+  await loadOptions()
   await load()
   window.addEventListener('resize', onResize)
   // 容器尺寸变化（不限于窗口 resize）时也自适应

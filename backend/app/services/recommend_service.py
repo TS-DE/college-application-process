@@ -54,7 +54,12 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
 
     key 优先级：(院校代码, 专业代码) > (院校名, 专业名) > 院校名。
     2024 的 enrollment_plan 院校代码/专业代码整列为空，只能退回按名称匹配。
+
+    0.11.1：查全国总表 `enrollment_plan_{year}_all`，并**必须**按省份隔离，
+    否则会把外省的学费 / 计划数套到本省院校上。
     """
+    from app.services.dataset_access import province_conditions
+
     tbl = get_table(table_name(KIND_PLAN, year, province))
     stmt = select(
         tbl.c.university_code,
@@ -72,6 +77,9 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
         stmt = stmt.where(tbl.c.category.in_(cats))
     if batches:
         stmt = stmt.where(tbl.c.batch.in_(batches))
+    prov_conds = province_conditions(tbl, province)
+    if prov_conds:
+        stmt = stmt.where(*prov_conds)
 
     by_code: Dict[str, Dict] = {}
     by_name: Dict[str, Dict] = {}
@@ -169,9 +177,13 @@ def _fetch_candidates(
     buffer: int,
     span: int,
 ) -> List[Dict]:
+    from app.services.dataset_access import province_conditions
+
     tbl = get_table(table_name(KIND_MAJOR, year, province))
     conds = _build_filters(tbl, filters)
 
+    # ★ 0.11.1 省份隔离：总表含 30+ 省数据，漏掉会跨省串联
+    conds += province_conditions(tbl, province)
     cats = resolve_category(category, year, KIND_MAJOR)
     if cats:
         conds.append(tbl.c.category.in_(cats))

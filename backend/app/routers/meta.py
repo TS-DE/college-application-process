@@ -1,48 +1,60 @@
-"""元信息接口：可用维度、省份分布、热门院校、一分一段表。"""
+"""元信息接口：可用维度、省份分布、热门院校、一分一段表。
+
+0.11.1：所有查询改走全国总表，表解析与省份/科类/批次条件统一由
+`services/dataset_access.py` 提供，路由层不再拼表名。
+"""
+import re
 from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.config import settings
-from app.database import fetch_all, get_table, table_exists
+from app.database import engine, fetch_all, table_exists
 from app.models.dataset import (
     KIND_MAJOR,
     KIND_SCHOOL,
     KIND_SCORE,
+    NATIONAL_TABLE_SUFFIX,
     normalize_code,
     normalize_int,
     normalize_score,
-    province_suffix,
-    resolve_batch,
-    resolve_category,
-    table_name,
+)
+from app.services.dataset_access import (
+    DatasetUnavailable,
+    province_conditions,
+    resolve_table,
+    scope_conditions,
 )
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 
-def _available_years(province: str) -> List[int]:
-    """扫描 information_schema，找出该省份实际导入了哪些年份。"""
-    from sqlalchemy import text
+_YEAR_IN_TABLE = re.compile(r"_(\d{4})_")
 
-    from app.database import engine
 
-    suffix = province_suffix(province)
+def _available_years(province: str = "") -> List[int]:
+    """扫描 information_schema，找出**总表**实际导入了哪些年份。
+
+    0.11.1：不再按省份后缀（`score_range_%_henan`）扫表——分省表已不存在。
+    现在扫 `score_range_{年份}_all`，因此年份是**全局**的，与省份无关
+    （哪一年有没有数据对所有省份是同一个答案）。
+    `province` 参数保留兼容调用方，不参与匹配。
+    """
+    pattern = f"{KIND_SCORE}_%_{NATIONAL_TABLE_SUFFIX}"
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = :db AND table_name LIKE :p"
             ),
-            {"db": settings.DB_NAME, "p": f"{KIND_SCORE}_%_{suffix}"},
+            {"db": settings.DB_NAME, "p": pattern},
         ).fetchall()
     years = set()
     for (tname,) in rows:
-        parts = tname.split("_")
-        for p in parts:
-            if p.isdigit() and len(p) == 4:
-                years.add(int(p))
-    return sorted(years)
+        m = _YEAR_IN_TABLE.search(tname)
+        if m:
+            years.add(int(m.group(1)))
+    return sorted(years) or [2025]
 
 
 @router.get("/options")
@@ -63,10 +75,16 @@ def options(province: str = Query(default=settings.DEFAULT_PROVINCE)) -> Dict:
     categories: List[str] = []
     batches: List[str] = []
     for y in years:
-        tbl = get_table(table_name(KIND_SCORE, y, province))
-        rows = fetch_all(
-            select(tbl.c.category, tbl.c.batch).distinct()
-        )
+        try:
+            tbl = resolve_table(KIND_SCORE, y, province)
+        except DatasetUnavailable:
+            continue
+        # ★ 0.11.1：总表含 30+ 省，必须按省份隔离后再取 DISTINCT
+        stmt = select(tbl.c.category, tbl.c.batch).distinct()
+        prov_conds = province_conditions(tbl, province)
+        if prov_conds:
+            stmt = stmt.where(*prov_conds)
+        rows = fetch_all(stmt)
         for r in rows:
             c, b = r.get("category"), r.get("batch")
             if c and c not in categories:
@@ -108,17 +126,18 @@ def province_stats(
     category: str = Query(default="物理类"),
     batch: str = Query(default="本科批"),
 ) -> Dict:
-    """各省份在河南招生的院校专业数量，供首页地图渲染。"""
-    tbl = get_table(table_name(KIND_MAJOR, year, province))
+    """各省份在 `province` 招生的院校专业数量，供首页地图渲染。
+
+    0.11.1：查全国总表并按考生省份隔离。
+    """
+    tbl = resolve_table(KIND_MAJOR, year, province)
     stmt = select(tbl.c.school_province, func.count().label("cnt")).where(
         tbl.c.school_province.isnot(None)
     )
-    cats = resolve_category(category, year, KIND_MAJOR)
-    batches = resolve_batch(batch, year, KIND_MAJOR)
-    if cats:
-        stmt = stmt.where(tbl.c.category.in_(cats))
-    if batches:
-        stmt = stmt.where(tbl.c.batch.in_(batches))
+    # ★ 省份 + 科类 + 批次三重隔离
+    conds = scope_conditions(KIND_MAJOR, tbl, province, year, category, batch)
+    if conds:
+        stmt = stmt.where(*conds)
     stmt = stmt.group_by(tbl.c.school_province)
     rows = fetch_all(stmt)
     return {
@@ -137,15 +156,15 @@ def hot_schools(
     batch: str = Query(default="本科批"),
     limit: int = Query(default=12, ge=1, le=50),
 ) -> Dict:
-    """首页热门院校卡片：优先 985/211，按投档位次排序。"""
-    tbl = get_table(table_name(KIND_SCHOOL, year, province))
+    """首页热门院校卡片：优先 985/211，按投档位次排序。
+
+    0.11.1：`school_admission` 无 `_all` 表，`resolve_table` 自动回落到
+    `major_admission_{year}_all`，按院校分组后等价得到院校维度数据。
+    """
+    tbl = resolve_table(KIND_SCHOOL, year, province)
     conds = [tbl.c.min_rank.isnot(None), tbl.c.university_name.isnot(None)]
-    cats = resolve_category(category, year, KIND_SCHOOL)
-    batches = resolve_batch(batch, year, KIND_SCHOOL)
-    if cats:
-        conds.append(tbl.c.category.in_(cats))
-    if batches:
-        conds.append(tbl.c.batch.in_(batches))
+    # ★ 省份 + 科类 + 批次三重隔离
+    conds += scope_conditions(KIND_SCHOOL, tbl, province, year, category, batch)
 
     stmt = (
         select(

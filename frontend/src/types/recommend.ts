@@ -43,4 +43,8 @@ export interface RecommendResult {
   wen: RecommendItem[]
   bao: RecommendItem[]
   meta?: Record<string, any>
+  /** 0.11.1：全国引擎算出的位次（与 chong/wen/bao 同源，便于前端展示） */
+  rank?: number
+  /** 0.11.1：全国引擎原始三档结果（键为 chong/wen/bao） */
+  tiers?: Record<string, RecommendItem[]>
 }

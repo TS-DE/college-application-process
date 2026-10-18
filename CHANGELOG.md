@@ -56,8 +56,149 @@
 | **0.9.0** | 2026-10-12 | 父子块（不变） | 检索前+多路+Rerank+高级RAG（不变）**＋知识图谱双通道** | 父块 + **图谱三元组**（按优先级 + Token 配额融合） | ✅ 已发布 |
 | **0.9.1** | 2026-10-14 | 父子块（不变） | + 三路融合检索（图谱 + MySQL + 向量），按「图谱 > MySQL > 向量」优先级分发 | 父块 + 图谱三元组 + **MySQL 精确值** | ✅ 已发布 |
 | **0.10.0** | 2026-10-16 | 父子块（不变） | 三路融合（不变）+ OCR 预处理 + 以文搜图（Chinese-CLIP / 图注向量 + qwen3.7-flash） | 父块 + 图谱三元组 + MySQL 精确值 + **图像** | ✅ 已发布 |
-| **0.11.0** | 2026-10-17 | 父子块（不变） | 三路融合（不变）+ **全国多省自适应核心引擎**（查 `_all` 总表，province/category 参数化） | 父块 + 图谱三元组 + MySQL 精确值 + 图像（全国 30+ 省） | ✅ 本次发布 |
+| **0.11.0** | 2026-10-17 | 父子块（不变） | 三路融合（不变）+ **全国多省自适应核心引擎**（查 `_all` 总表，province/category 参数化） | 父块 + 图谱三元组 + MySQL 精确值 + 图像（全国 30+ 省） | ✅ 已发布 |
+| **0.11.1** | 2026-10-18 | 父子块（不变） | 三路融合（不变）+ 全国引擎（不变 **＋前后端全链路打通**） | 同上（数据源彻底统一到 `_all` 总表） | ✅ 本次热修复 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.11.1] - 2026-10-18 · 热修复：彻底清理 `_henan` 硬编码，打通全国多省前后端链路
+
+### 一、原有技术（0.11.0）及缺陷
+
+0.11.0 只重构了 `rank_service` / `recommend_service` 的**底层引擎**，路由层、模型层、前端没同步，
+导致「引擎能跑、页面全空」：
+
+| 环节 | 0.11.0 的状态 | 存在的缺陷 |
+|---|---|---|
+| `models/dataset.table_name()` | 仍返回 `major_admission_2025_henan` | 分省表已删除 → 反射失败 → **500「数据表不存在或无法反射」** |
+| `routers/stats.py` 首页地图 | 用 `table_name()` 拼分省表 | 地图无数据 |
+| `routers/university.py` 查大学/查专业 | 同上，且只按 `category` 过滤 | 无数据；即便有表也会跨省串联 |
+| `routers/meta.py` options / province-stats / hot-schools | 同上，`_available_years` 还按 `%_henan` 扫表 | 下拉框与热门院校全空 |
+| `rank_service._load_score_range()` | 查分省一分一段表 | 位次换算 500 |
+| `recommend_service._plan_index()` / `_fetch_candidates()` | 查分省表 | 学费 / 计划数丢失 |
+| 前端 `Volunteer.vue` | 省份下拉只有一个写死的「河南」，科类靠首选科目推导 | 选不了北京，也无法表达「综合」 |
+| 前端 `University.vue` / `Home.vue` | `province: '河南'` 硬编码 | 换省份无效 |
+
+> 除代码缺陷外还有一处**数据现实**：`school_admission_2025_all` **不存在**（只有
+> `major_admission` / `enrollment_plan` / `score_range` 三张总表），因此院校维度必须从投档表聚合。
+
+### 二、改进技术及对应代码位置
+
+#### 1. `models/dataset.py`：表名统一到 `_all`
+
+```python
+def table_name(kind, year, province=""):   # province 保留但不再参与命名
+    return f"{kind}_{year}_{NATIONAL_TABLE_SUFFIX}"      # → major_admission_2025_all
+
+KIND_FALLBACK = {KIND_SCHOOL: KIND_MAJOR}   # 无 _all 表的数据集回落
+```
+
+#### 2. 新增 `services/dataset_access.py`（单一职责 / 接口隔离）
+
+| 函数 | 职责 |
+|---|---|
+| `resolve_table(kind, year)` | 反射全国总表，`school_admission` 自动回落 `major_admission` |
+| `province_conditions()` | 生成 `WHERE province = ?`（★ 防跨省串联的核心） |
+| `category_conditions()` | 科类归一（综合 / 物理类·历史类 / 理科·文科） |
+| `batch_conditions()` | **省份感知的批次归一**（见下） |
+| `scope_conditions()` | 一次性返回「省份 + 科类 + 批次」三组条件 |
+
+**批次归一是本次的隐藏坑**：实测总表里的批次写法有 20+ 种——
+「本科批」19 省通用，但四川/陕西是「本科批A/B/C段」，还有「普通本科批」
+「专科批次」「高职专科」「高职(专科)批」，浙江/山东用「普通类一段/二段」。
+直接 `batch = '本科批'` 精确匹配，四川这类省份一条都查不到（表现为查大学页面空白）。
+现在按「该省真实批次字典」做语义匹配，匹配不到时**跳过批次过滤并记日志**，
+宁可多给数据也不让整页空白。
+
+#### 3. 路由层：只传参数，不拼表名
+
+| 文件 | 改动 |
+|---|---|
+| `routers/stats.py` | `resolve_table` + `scope_conditions`，地图按考生省份统计 |
+| `routers/university.py` | 院校/专业列表改为总表聚合 + 省份隔离；`university_code`/`province` 都参与过滤 |
+| `routers/meta.py` | options / province-stats / hot-schools 全部改总表；`_available_years` 改为扫 `score_range_%_all`（年份全局，与省份无关） |
+| `routers/student.py` | `/score-to-rank`、`/rank-to-score` 改用 `score_to_rank_detail` / `rank_to_score_detail`（0.11.0 改名后未同步的调用点） |
+| `recommend_service.py` | `_plan_index()` / `_fetch_candidates()` 补 `province` 条件 |
+| `rank_service.py` | `_load_score_range()` 补 `province` 条件（否则 30+ 省一分一段混在一起，位次全错） |
+
+#### 4. 前端：省份 / 科类级联
+
+| 文件 | 改动 |
+|---|---|
+| `api/recommend.ts` | 新增 `metaOptions(province)` + `MetaOptionsResult`（含 `provinces` / `categories_map`） |
+| `types/recommend.ts` | `RecommendResult` 增加 `rank` / `tiers` |
+| `Volunteer.vue` | 新增「考试地区」全国 31 省下拉 + 「科类」级联下拉；3+3 省份自动隐藏 3+1+2 科目选择；科类与首选科目双向同步 |
+| `University.vue` | 新增「考生省份」下拉（与「院校所在地」区分），科类级联，专业明细带上省份 |
+| `Home.vue` | 新增省份下拉，地图按考生省份统计，标题与文案改为动态省份 |
+
+前端级联逻辑：`province` 变化 → `category = categoriesMap[province][0]` → 清空位次/批次/结果 →
+重新拉批次线。3+3 省份（如北京）只有「综合」，自动清空科目选择。
+
+### 三、验证流程
+
+#### 1. 后端接口（真实 HTTP）
+
+| 接口 | 河南/物理类 | 北京/综合 | 四川/物理类 |
+|---|---|---|---|
+| `/api/stats/major-count-by-province` | 9535 专业 / 30 省 | 1541 专业 / 30 省 | — |
+| `/api/universities` | 470 所 | 254 所 | 453 所 |
+| `/api/meta/options` | categories=`[历史类, 物理类]` | categories=`[综合]` | — |
+| `/api/meta/hot-schools` | 5 条 | 5 条 | — |
+| `/api/score-to-rank`（600 分） | 位次 45887 | 位次 11883 | — |
+| `/api/recommend/national` | 冲/稳/保 = 50/50/50 | 50/50/50 | — |
+| `/api/recommend` | 冲/稳/保 = 50/50/50，含学费 6000 | 50/50/50 | — |
+
+跨省隔离验证：同一接口换省份，总数从 9535 降到 1541，说明 `province` 条件真正生效
+（若漏加，两省结果会完全相同）。
+
+非法组合仍正确拦截：`beijing/物理类` → `400 该省份不支持此科类：北京 仅支持 综合`。
+
+#### 2. 前端
+
+```bash
+cd frontend
+npm run build      # vue-tsc --noEmit + vite build 均通过
+```
+
+`vue-tsc` 会校验模板表达式与 `<script setup>` 作用域，因此
+`categoryOptions` / `needSubjectPick` / `onProvinceChange` 等新绑定均为编译期验证通过。
+打包产物确认包含 `科类`、`考生省份`、`categories_map`、`/meta/options`。
+
+#### 3. 回归
+
+```bash
+cd backend
+python test_national_engine.py --api   # 通过
+python test_hybrid_rag.py              # 0.9.1 三路融合通过
+python test_multimodal_rag.py          # 0.10.0 多模态通过
+python smoke_test.py                   # 冒烟通过
+python smoke_rag.py                    # RAG SMOKE DONE
+```
+
+#### 4. 已知数据缺口（非代码问题）
+
+`enrollment_plan_2025_all` 各省字段填充率差异很大，实测：
+
+| 省份 | 总行数 | 有学费 | 有计划数 |
+|---|---|---|---|
+| 河南 | 58275 | 57645 | 58275 |
+| 河北 | 51198 | 49566 | 0 |
+| 四川 | 46148 | **0** | 46145 |
+| 安徽 | 40509 | 0 | 0 |
+| 广西 | 38110 | 0 | 0 |
+
+因此北京/四川等省份的「学费」「计划数」显示为空是**原始数据缺失**，
+富化逻辑本身正确（河南实测能补出学费 6000、计划数 2）。补齐需重新导入这些省的招生计划。
+
+### 四、后续演进方向（0.12.0）
+
+| 方向 | 说明 |
+|---|---|
+| 老高考数据补齐 | 山西 / 内蒙古 / 青海导入 2025 数据 |
+| 招生计划字段补全 | 补齐四川/安徽/广西等省的 tuition 列 |
+| 前端省份记忆 | 用 localStorage 记住上次选择的省份与科类 |
+| 批次写法字典化 | 把 `_batch_matches` 的模糊规则升级为可配置的批次映射表 |
 
 ---
 

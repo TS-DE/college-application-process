@@ -1,17 +1,16 @@
-"""统计类接口：首页地图等聚合视图。"""
+"""统计类接口：首页地图等聚合视图。
+
+0.11.1：数据源由分省表（`major_admission_2025_henan`）改为全国总表
+（`major_admission_2025_all`），省份/科类/批次全部走 SQL 条件隔离，
+表解析与条件构造统一交给 `services/dataset_access.py`。
+"""
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, func, select
 
-from app.models.dataset import (
-    KIND_MAJOR,
-    normalize_code,
-    normalize_int,
-    resolve_batch,
-    resolve_category,
-    table_name,
-)
+from app.models.dataset import KIND_MAJOR, normalize_code, normalize_int
+from app.services.dataset_access import DatasetUnavailable, resolve_table, scope_conditions
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -59,21 +58,20 @@ def major_count_by_province(
     按 `school_province`（学校所在省份）聚合：
       - university_count：涉及院校数（distinct university_code）
       - major_count：专业数（distinct university_code + major_code）
+
+    0.11.1：查全国总表 `major_admission_{year}_all`，
+    `province=北京` 就只统计「北京考生能报的」数据，不会把外省数据混进来。
     """
-    from app.database import fetch_all, get_table
+    from app.database import fetch_all
 
     try:
-        tbl = get_table(table_name(KIND_MAJOR, year, province))
-    except Exception as exc:  # noqa: BLE001
+        tbl = resolve_table(KIND_MAJOR, year, province)
+    except DatasetUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     conds = [tbl.c.school_province.isnot(None), tbl.c.school_province != ""]
-    cats = resolve_category(category, year, KIND_MAJOR)
-    if cats:
-        conds.append(tbl.c.category.in_(cats))
-    batches = resolve_batch(batch, year, KIND_MAJOR)
-    if batches:
-        conds.append(tbl.c.batch.in_(batches))
+    # ★ 省份 + 科类 + 批次三重隔离（省份是 0.11.1 新增，防跨省串联）
+    conds += scope_conditions(KIND_MAJOR, tbl, province, year, category, batch)
 
     major_key = func.concat(tbl.c.university_code, "-", tbl.c.major_code)
     stmt = (

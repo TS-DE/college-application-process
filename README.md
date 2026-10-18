@@ -116,6 +116,7 @@ backend/
 │   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
+│   │   ├── dataset_access.py     <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、province/category/batch 条件构造、省份感知的批次归一</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── multimodal/            <span style="color:#888">// 0.10.0 以文搜图（5 个类，合成复用；图像独立向量空间 gaokao_images）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 多模态</span>
 │   │   │   ├── image_extractor.py <span style="color:#888">// ImageExtractor：pdfplumber 抽 PDF 嵌图；扫描件退化为按页渲染（pypdfium2）</span>
 │   │   │   ├── image_encoder.py  <span style="color:#888">// BaseImageEncoder 抽象 + ChineseCLIPEncoder / CaptionEncoder + create_image_encoder() 工厂</span>
@@ -763,16 +764,21 @@ graph TD
     style D2 fill:#e3f2fd,stroke:#1976d2
 ```
 
-**省份 / 科类参数传递路径**（★ 0.11.0 核心）：
+**省份 / 科类参数传递路径**（★ 0.11.0 核心，0.11.1 打通全链路）：
 
 | 环节 | 位置 | 做什么 |
 |---|---|---|
+| ⓪ 前端级联 | `Volunteer.vue` / `University.vue` / `Home.vue` | 省份下拉取自 `metaOptions().provinces`；选省份后 `category` 重置为 `categories_map[省份][0]`（0.11.1） |
 | ① 前端取选项 | `GET /api/meta/options` | 一次返回 `provinces`（31 省）+ `categories_map`（省→科类）+ `province_modes`（高考模式），前端做「选省份 → 联动科类」 |
 | ② 归一化 | `region_mapper.normalize_province()` | 入参可传中文名（`河南`）或拼音（`henan`），统一归一成数据库 `province` 列的中文取值 |
 | ③ 合法性校验 | `routers/recommend._validate_province_category()` | 省份不存在 / 科类不在该省列表 / 该省无数据 → 分别返回明确 400 |
-| ④ 位次换算 | `rank_service.score_to_rank(score, prov, cat, year)` | 查 `score_range_{year}_all`，WHERE 带 `province` + `category`；查不到返回 0 |
-| ⑤ 三档计算 | `recommend_service.calculate_tiers(rank, prov, cat, year)` | 查 `major_admission_{year}_all`，WHERE 带 `province` + `category` + `year` + `min_rank BETWEEN`；每档 LIMIT 50 |
-| ⑥ 富化 | `recommend_service.enrich_with_plan()` | 查 `enrollment_plan_{year}_all` 补学费 / 计划数 / 学制，每档只补前 20 条、一次 `IN` 批量查 |
+| ④ 表解析 | `dataset_access.resolve_table(kind, year)` | 统一反射 `{kind}_{year}_all`；`school_admission` 无总表时回落 `major_admission`（0.11.1） |
+| ⑤ 条件构造 | `dataset_access.scope_conditions()` | 一次生成 `province` + `category` + `batch` 三组条件；批次按**该省真实写法**归一（本科批A/B/C段等）（0.11.1） |
+| ⑥ 位次换算 | `rank_service.score_to_rank(score, prov, cat, year)` | 查 `score_range_{year}_all`，WHERE 带 `province` + `category`；查不到返回 0 |
+| ⑦ 三档计算 | `recommend_service.calculate_tiers(rank, prov, cat, year)` | 查 `major_admission_{year}_all`，WHERE 带 `province` + `category` + `year` + `min_rank BETWEEN`；每档 LIMIT 50 |
+| ⑧ 富化 | `recommend_service.enrich_with_plan()` | 查 `enrollment_plan_{year}_all` 补学费 / 计划数 / 学制，每档只补前 20 条、一次 `IN` 批量查 |
+
+**数据表只有一套，省份靠条件区分**（0.11.1 定案）：`major_admission_2025_all` / `enrollment_plan_2025_all` / `score_range_2025_all` 三张总表承载全国 30+ 省数据，`school_admission` 未参与合并、由投档表按院校聚合替代。路由层不再拼表名，漏传省份最多查出全量，不会因表名拼错直接 500。
 
 **科类差异处理**：三种高考模式的科类名不同，`region_mapper` 已按实测数据配置——3+3 六省只有「综合」；3+1+2 二十省为「物理类 / 历史类」（含四川、云南、陕西、宁夏，任务书原归老高考，实测为 3+1+2）；老高考仅新疆、西藏为「理科 / 文科」。山西 / 内蒙古 / 青海暂无数据，会在第 ③ 步被明确拦截。
 
@@ -794,7 +800,7 @@ graph TD
 | POST | `/api/recommend` | **冲稳保推荐主链路**（0.11.0 起走全国总表引擎，响应新增 `rank` / `tiers`；省份+科类非法返回 400） | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
 | POST | `/api/recommend/national` | 0.11.0 纯全国引擎版：只返回 `{rank, province, category, year, tiers}` | 公开 | 预留（只要结构化结果的场景） |
 | POST | `/api/recommend/ai-reasons` | 批量生成 AI 理由 | 公开 | 预留 |
-| GET | `/api/meta/options` | 年份/科类/批次下拉 + 0.11.0 新增 `provinces` / `categories_map` / `province_modes` | 公开 | 预留（前端省份联动） |
+| GET | `/api/meta/options` | 年份/科类/批次下拉 + `provinces` / `categories_map` / `province_modes`（0.11.1 起前端三处页面均用它做省份→科类级联） | 公开 | `Volunteer.vue` / `University.vue` / `Home.vue` → `metaOptions()` |
 | GET | `/api/score-to-rank` | 分数 → 位次 | 公开 | 预留（页面走 score-check） |
 | GET | `/api/rank-to-score` | 位次 → 分数 | 公开 | 预留 |
 | POST | `/api/student/profile` | 保存考生信息并返回换算位次 | 公开 | 预留 |
