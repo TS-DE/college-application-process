@@ -82,6 +82,11 @@ class Settings:
         "KNOWLEDGE_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge_files"),
     )
+    # 0.12.1：上传根目录（用户报告落盘在 {UPLOAD_ROOT}/reports，与知识库物理隔离）
+    UPLOAD_ROOT: str = _env(
+        "UPLOAD_ROOT",
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
     # Ollama embedding 模型（离线优先）
     OLLAMA_BASE_URL: str = _env("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_EMBED_MODEL: str = _env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -104,6 +109,15 @@ class Settings:
     ALI_TIMEOUT: float = float(_env("ALI_TIMEOUT", "30"))
     # 是否允许模型「先思考再回答」：关掉后同一请求实测 9.7s → 2.6s，默认关闭
     ALI_ENABLE_THINKING: bool = _env("ALI_ENABLE_THINKING", "0") not in {"0", "false", "False"}
+    # 0.12.1：`/api/ai/chat` 整体链路超时（秒）。
+    # 链路里最多串 3 次 LLM 调用（意图路由 + 图谱实体识别/Cypher + 最终生成），
+    # 单次超时若不生效就会叠加到 120 秒以上，前端一直转圈。
+    # 设为 100 秒留 20 秒余量给序列化与网络往返，超时直接返回 504。
+    CHAT_TOTAL_TIMEOUT: float = float(_env("CHAT_TOTAL_TIMEOUT", "100"))
+    # 0.12.1：图谱通道单次 LLM 超时（秒）。图谱链路要串「实体识别 + Cypher 生成」
+    # 两次调用，若沿用默认 30 秒，最坏 60 秒会挤占最终生成的预算。
+    # 图谱是增强项，宁可快速失败回落到 MySQL/向量，也不要拖死整条链路。
+    GRAPH_LLM_TIMEOUT: float = float(_env("GRAPH_LLM_TIMEOUT", "20"))
     # 切片参数
     CHUNK_SIZE: int = int(_env("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(_env("CHUNK_OVERLAP", "50"))

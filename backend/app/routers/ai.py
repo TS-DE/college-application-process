@@ -2,6 +2,9 @@
 
 0.12.0：`/api/ai/chat` 改为**必须登录**，并在 Prompt 中注入用户画像
 （`user_profiles.summary_text`）。画像读取失败只记日志，不影响问答。
+
+0.12.1：整体超时改为可配置（`CHAT_TOTAL_TIMEOUT`），超时明确返回 504 并打印
+分阶段耗时；意图路由新增主观咨询白名单（不再误拦截「我该去哪」类问题）。
 """
 import asyncio
 from typing import Dict
@@ -10,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.routers.auth import get_current_user
 from app.schemas.student import (
@@ -108,8 +112,15 @@ async def chat(
 
     0.12.0：必须登录（画像与历史都挂在 user_id 上）；会话开始前读一次画像总结，
     拼进系统 Prompt。`profile_injected` 字段告诉前端本次是否真的注入了画像。
+
+    0.12.1：整体超时从 120 秒收紧到 `CHAT_TOTAL_TIMEOUT`（默认 100 秒），
+    超时明确抛 504 并提示「哪一步慢了」，前端不再无限转圈。
     """
+    import time
+
+    _t0 = time.time()
     profile_context = await run_in_threadpool(_load_profile_summary, db, user["id"])
+    _t_profile = time.time()
     if profile_context:
         # 便于验证「画像是否真的进了 Prompt」：控制台打印注入摘要。
         # 用 print 而非 logger.info——uvicorn 默认只输出 WARNING 以上的应用日志，
@@ -119,8 +130,32 @@ async def chat(
             f"[PROFILE] 已注入用户画像 user={user['id']} 长度={len(profile_context)}：{snippet}…",
             flush=True,
         )
-    result = await asyncio.wait_for(
-        run_in_threadpool(_chat_sync, payload, profile_context), timeout=120.0
+    print(
+        f"[AI] 阶段耗时 读画像={_t_profile - _t0:.2f}s（画像长度={len(profile_context)}）",
+        flush=True,
+    )
+    try:
+        result = await asyncio.wait_for(
+            run_in_threadpool(_chat_sync, payload, profile_context),
+            timeout=settings.CHAT_TOTAL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        print(
+            f"[AI] 整体超时 {settings.CHAT_TOTAL_TIMEOUT}s（已耗时 {time.time() - _t0:.2f}s）"
+            f" question={(payload.get('question') or '')[:40]}",
+            flush=True,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"AI 响应超时（>{settings.CHAT_TOTAL_TIMEOUT:.0f} 秒）。"
+                "可尝试：关闭知识库增强后重试、缩短问题长度，或稍后再试。"
+            ),
+        ) from None
+    print(
+        f"[AI] 阶段耗时 总链路={time.time() - _t0:.2f}s"
+        f" source={result.get('source') if isinstance(result, dict) else '?'}",
+        flush=True,
     )
     # 附带给前端一个明确标记，便于在界面上提示「已结合你的画像」
     if isinstance(result, dict):

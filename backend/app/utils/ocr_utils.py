@@ -157,6 +157,31 @@ class OCRExtractor:
 
     # ---------------- 步骤 3：图片 → 文字 ----------------
 
+    def ocr_image_file(self, path: str) -> Tuple[str, bool]:
+        """识别**单张图片**（PNG/JPG/JPEG），返回 (文本, 是否用了 OCR)。
+
+        0.12.1 新增：用户画像报告允许直接上传图片（手机拍的测评报告）。
+        复用 `_ocr_one()` 的模型选择、重试与降级策略，不重复实现一遍。
+
+        :return: (文本, ocr_used)。OCR 关闭 / 无 Key / 识别失败均返回 ("", False)
+        """
+        if not settings.OCR_ENABLED:
+            return "", False
+        if not self._api_key:
+            logger.info("[OCR] 未配置 Ali_API_KEY，跳过图片识别")
+            return "", False
+        try:
+            with Image.open(path) as raw:
+                image = raw.convert("RGB")
+        except Exception as exc:  # noqa: BLE001 坏图不当成异常抛出
+            logger.info("[OCR] 图片打开失败：%s", exc.__class__.__name__)
+            return "", False
+
+        text = self._ocr_one(image, 0)
+        if text:
+            logger.info("[OCR] 图片识别 %d 字：%s", len(text), os.path.basename(path))
+        return text, bool(text)
+
     def ocr_images(self, images: List[Image.Image]) -> str:
         """逐页识别并拼接。页间用线程池并发（单页 20-35 秒，串行太慢）。
 

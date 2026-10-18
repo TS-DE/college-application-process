@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
@@ -1110,6 +1111,9 @@ ROUTER_PROMPT = """你是一个高考志愿填报系统的意图分类器。
 1. 问题中包含任何高考相关词汇（如：高考、志愿、院校、大学、专业、招生、录取、分数线、学费、位次、选科、批次、投档、调剂）。
 2. 问题询问某所学校或某个专业的情况（如：XX大学怎么样、XX专业学什么、XX学校学费多少）。
 3. 问题询问某省/某年的招生政策或招生计划（如：河南2025年招生计划、福建在河南招多少人）。
+4. **主观咨询 / 征询意见类问题**（如：我该去哪所学校、你觉得我适合什么专业、帮我推荐几个志愿、
+   能猜到我想去哪所学校吗、帮我把把关、这样填稳不稳）——这类问题属于志愿**规划**，
+   即使没有提到具体院校名也应判 YES。
 
 【严格规则】：
 1. 如果问题与上述完全无关（例如：婚假、天气、编程、闲聊、历史事件），只输出：NO
@@ -1120,6 +1124,24 @@ ROUTER_PROMPT = """你是一个高考志愿填报系统的意图分类器。
 {query}
 
 【输出】："""
+
+# 0.12.1：主观咨询意图白名单。
+# 命中这些词时**直接放行，不再调用 LLM 分类**——一是避免模型把「你能猜到我想去哪所学校吗」
+# 这类规划类问题误判成闲聊而拦截，二是省掉一次 20-45 秒的 LLM 往返（超时的主要来源之一）。
+SUBJECTIVE_INTENT_KEYWORDS: tuple = (
+    "我该", "我该去哪", "该去哪", "该选哪", "该报哪", "去哪所学校", "哪个学校",
+    "推荐", "建议", "帮我看看", "把把关", "稳不稳", "猜猜", "猜到",
+    "适合我", "适合什么", "怎么填", "如何填", "怎么选", "如何选",
+    "志愿怎么", "求指导", "帮忙分析", "分析一下", "评价一下",
+)
+
+
+def _has_subjective_intent(query: str) -> bool:
+    """是否命中主观咨询白名单（确定性判断，不依赖大模型）。"""
+    q = (query or "").strip()
+    if not q:
+        return False
+    return any(word in q for word in SUBJECTIVE_INTENT_KEYWORDS)
 
 # 2) 防幻觉提示词：RAG 检索之后，把父块 Context 与 Query 一起交给 LLM
 #    参数：temperature=0.1，top_p=0.3
@@ -1226,8 +1248,17 @@ def route_query(query: str) -> bool:
     - 在 RAG 检索**之前**调用，避免无关问题（婚假、天气、闲聊）污染检索与生成
     - 参数：temperature=0.0，max_tokens=5（num_predict=5）
     - **降级**：AI 关闭 / LLM 调用失败 / 返回为空 → 默认放行，不中断链路
+
+    0.12.1：新增**确定性预检**。命中主观咨询白名单（"我该去哪"、"推荐"、"把把关"…）
+    直接放行，不再调 LLM。既修复了「你能猜到我想去哪所学校吗」被误拦截的问题，
+    又把一次 20-45 秒的 LLM 往返从关键路径上拿掉。
     """
     from app.services.ai_service import ai_enabled, ask
+
+    # ① 确定性预检：规划类问题一律放行（顺带省一次 LLM 调用）
+    if _has_subjective_intent(query):
+        logger.info("[RAG] 路由：命中主观咨询白名单 → 放行（query=%s）", query)
+        return True
 
     if not ai_enabled():
         return True  # AI 未启用时不做拦截
@@ -1595,6 +1626,48 @@ HYBRID_FUSION_PROMPT = """你是高考志愿填报助手。请严格根据以下
 """
 
 
+ADVISORY_PROMPT = """你是资深的高考志愿规划师。考生问的是一个**规划咨询类**问题，
+请给出可执行的建议，不要让考生吃闭门羹。
+
+{context_block}
+【考生画像】
+{profile_context}
+
+【考生提问】
+{question}
+
+【回答要求】
+1. 如果上面【参考资料】里确实有能回答问题的精确数据（分数线 / 位次 / 学费），**优先引用**。
+2. 如果没有，请基于通识与考生画像给出**方向性、策略性**建议：地域选择、院校层次搭配、
+   专业大类取舍、冲稳保结构、填报节奏。
+3. 提到具体院校或专业时，只谈**公认的层次与特色**（如「省内重点」「工科见长」），
+   **严禁编造**任何分数线、位次、学费、招生人数。
+4. 若考生在问题里给了分数或位次，可基于该分数段做**层次判断**
+   （如「这个分数段通常对应省属公办本科」），仍然不要给出精确数字。
+5. 分点说明，控制在 250 字以内，语气务实、像一位有经验的老师。
+"""
+
+
+def build_advisory_prompt(
+    question: str, profile_context: str = "", context_text: str = ""
+) -> str:
+    """规划咨询 Prompt（0.12.1）。
+
+    :param context_text: 三路检索到的内容（可能为空，也可能是不相关资料）。
+                         非空时放进【参考资料】，要求模型「有数据就引用、没数据靠通识」，
+                         避免像 0.12.0 那样被防幻觉规则逼成拒答。
+    """
+    block = ""
+    text = (context_text or "").strip()
+    if text:
+        block = f"【参考资料】（可能只部分相关，请自行判断可用性）：\n{text}\n"
+    return ADVISORY_PROMPT.format(
+        context_block=block,
+        profile_context=profile_context or "（暂无画像，按普通考生处理）",
+        question=question,
+    )
+
+
 def build_profile_section(profile_context: str = "") -> str:
     """把用户画像渲染成 Prompt 里的一个段落（0.12.0）。
 
@@ -1671,6 +1744,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
     :return:                见模块 docstring 的返回结构；任一路异常只跳过该路
     """
     # ---- Step 1：结构化意图识别 ----
+    _t0 = time.time()
     intents = detect_structured_intent(question)
 
     # ---- Step 2：三路并行（任一路异常只让该路为空，不影响其他路）----
@@ -1759,7 +1833,49 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
         sources.append("MySQL 招生数据")
     sources.extend(vector_names if vector_hit else [])
 
-    # ---- Step 4：三路都空 → 拒答，不调大模型 ----
+    # ---- Step 4：规划咨询类问题单独分流（0.12.1 核心修复）----
+    #
+    # 为什么不能只处理「三路全空」：
+    # 实测「我高考502分，根据我的画像，我该去哪」时，向量通道会命中知识库里
+    # **无关**的文档（MBTI 报告、各省专升本录取率…），于是 contexts 非空、
+    # 走正常融合路径，最终被 ANTI_HALLUCINATION_PROMPT 的「上下文没有就拒答」
+    # 规则逼成「根据现有资料未查询到」——这正是用户反馈的现象。
+    #
+    # 所以只要命中主观咨询意图，**无论有没有检索到内容**都走规划师 Prompt：
+    # 有资料就把资料作为【参考资料】让其优先引用，没资料就基于画像 + 通识给建议。
+    if _has_subjective_intent(question):
+        from app.services.ai_service import ask
+
+        context_text = "\n\n".join(contexts) if contexts else ""
+        advisory = ask(
+            build_advisory_prompt(question, profile_context, context_text),
+            temperature=0.3,
+            top_p=0.85,
+            num_predict=600,
+            timeout=60,
+        )
+        if advisory:
+            logger.info(
+                "[HYBRID] 命中主观咨询意图 → 规划师模式（有资料=%s，query=%s）",
+                bool(context_text), question,
+            )
+            return {
+                "answer": advisory,
+                "source": "hybrid:advisory" if not context_text else "hybrid:advisory_with_context",
+                "sources": sources,
+                "graph_hit": graph_hit,
+                "mysql_hit": mysql_hit,
+                "vector_hit": vector_hit,
+                "fusion_strategy": FUSION_STRATEGY,
+                "graph_cypher": graph_cypher,
+                "graph_error": graph_error,
+                "mysql_error": mysql_error,
+                "vector_error": vector_error,
+                "profile_injected": bool(profile_context),
+            }
+        logger.info("[HYBRID] 规划师模式生成失败，落回常规链路")
+
+    # ---- Step 5：三路都空 → 拒答（客观问题才走这里）----
     if not contexts:
         return {
             "answer": "根据现有资料未查询到具体信息，建议查阅学校官方招生简章。",
@@ -1773,6 +1889,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
             "graph_error": graph_error,
             "mysql_error": mysql_error,
             "vector_error": vector_error,
+            "profile_injected": bool(profile_context),
         }
 
     # ---- Step 5：组装 Prompt 并生成 ----
@@ -1793,8 +1910,9 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
         raise RuntimeError("大模型响应超时")
 
     logger.info(
-        "[HYBRID] 三路融合完成 strategy=%s graph_hit=%s mysql_hit=%s vector_hit=%s intents=%s",
+        "[HYBRID] 三路融合完成 strategy=%s graph_hit=%s mysql_hit=%s vector_hit=%s intents=%s profile=%s 耗时=%.2fs",
         FUSION_STRATEGY, graph_hit, mysql_hit, vector_hit, intents,
+        bool(profile_context), time.time() - _t0,
     )
     return {
         "answer": answer,
@@ -1808,6 +1926,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
         "graph_error": graph_error,
         "mysql_error": mysql_error,
         "vector_error": vector_error,
+        "profile_injected": bool(profile_context),
     }
 
 

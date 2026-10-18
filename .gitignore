@@ -12,6 +12,8 @@ dist/
 
 # 项目数据（上传文件与向量库不入库）
 backend/knowledge_files/
+# 0.12.1：用户画像报告临时目录（隐私数据，绝不入库）
+backend/reports/
 backend/chroma_db/
 backend/*.db
 

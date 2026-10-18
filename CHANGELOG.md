@@ -59,8 +59,151 @@
 | **0.11.0** | 2026-10-17 | 父子块（不变） | 三路融合（不变）+ **全国多省自适应核心引擎**（查 `_all` 总表，province/category 参数化） | 父块 + 图谱三元组 + MySQL 精确值 + 图像（全国 30+ 省） | ✅ 已发布 |
 | **0.11.1** | 2026-10-18 | 父子块（不变） | 三路融合（不变）+ 全国引擎（不变 **＋前后端全链路打通**） | 同上（数据源彻底统一到 `_all` 总表） | ✅ 已发布 |
 | **0.11.2** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + **数据提纯层**（从 `major_note` 正则补学费/学制） | 同上（补齐广西/四川/安徽等省的缺失字段） | ✅ 已发布 |
-| **0.12.0** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + **账号体系与双轨制用户画像**（报告提取 / 业务问卷 → 画像注入 Prompt） | 同上 + **用户画像**（个性化建议） | ✅ 本次发布 |
+| **0.12.0** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + **账号体系与双轨制用户画像**（报告提取 / 业务问卷 → 画像注入 Prompt） | 同上 + **用户画像**（个性化建议） | ✅ 已发布 |
+| **0.12.1** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + 用户画像（**＋隐私隔离 / 规划师模式 / 超时贯通**） | 同上（修复地图统计与问答拒答） | ✅ 本次热修复 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.12.1] - 2026-10-18 · 热修复：隐私隔离 / 地图统计 / 规划师模式 / 超时贯通
+
+### 一、四个线上问题与根因
+
+| # | 现象 | 真实根因 |
+|---|---|---|
+| 1 | 普通用户的私人报告进了「知识库管理」，管理员与其他用户都能检索 | 0.12.0 抽屉里写着「请先在知识库管理上传」，把用户报告导流到了 Admin 的公共政策库；报告因此写入 Chroma `gaokao_knowledge` 与 `knowledge_files` 台账 |
+| 2 | 吉林、山东地图「暂无数据」，江西「0 个专业 / 17 所院校」 | ① 统计口径用 `university_code`/`major_code` 做 DISTINCT，而山东 `university_code` **33861/33861 全空**、江西 `major_code` **9660/11725 为空**，`CONCAT(code,'-',code)` 为 NULL → `COUNT(DISTINCT NULL)=0`；② 吉林 `school_province` **整列为 NULL**，被 `IS NOT NULL` 过滤掉 → 返回空数组 |
+| 3 | AI 一直转圈 / 超时 504 | `ai_service.ask(timeout=…)` **收了参数却从未下传**给 `llm_client`，所有调用实际用通道构造时的 `ALI_TIMEOUT(30)`/`OLLAMA_TIMEOUT(45)`；链路最多串 3 次 LLM 调用，叠加后越过 120 秒上限 |
+| 4 | 「我 502 分该去哪」被拒答；「你能猜到我想去哪所学校吗」被拦截 | ① 向量通道命中了**无关文档**（MBTI 报告、专升本录取率），`contexts` 非空 → 走融合路径 → 被防幻觉规则逼成拒答；② `ROUTER_PROMPT` 只认「院校/专业/分数线」等硬词，规划类问法被误判为闲聊 |
+
+### 二、修复内容
+
+#### 1. 隐私隔离：报告与知识库彻底分家
+
+| 位置 | 改动 |
+|---|---|
+| `utils/file_utils.py` | 新增 `REPORT_ALLOWED_EXTS`（多 `png/jpg/md`）、`ensure_report_dir()`、`save_report_file()`；落盘在 `{UPLOAD_ROOT}/reports/`，与 `KNOWLEDGE_DIR` **物理隔离** |
+| `services/profile/report_reader.py` | **新增** `ReportReader`：文件 → 文本，`finally` 块里**立即删除**文件（磁盘不留私人副本） |
+| `routers/profile.py` | **新增** `POST /api/profile/report/upload-file`：读文件 → 提文本 → `ProfileService.extract_report`；全链路**不调** `add_documents` / `ImageStore` / 不写 `knowledge_files` |
+| `utils/ocr_utils.py` | 新增 `ocr_image_file()`：支持直接上传图片（复用 `_ocr_one` 的模型选择与重试） |
+| `AiChat.vue` | 抽屉内改为 `el-upload` 直接上传（PDF/图片/TXT/MD/DOCX），删除「请先在知识库管理上传」的提示，增加隐私说明 |
+| `Knowledge.vue` | 保持仅管理员可见（路由 `requiresAdmin` + Navbar `v-if`） |
+
+**隐私保证**：报告只进当前用户的 `user_profiles`，不进 Chroma、不进台账、不留磁盘。
+
+#### 2. 地图统计修复
+
+```sql
+-- 旧（错误）：任一 code 为空 → CONCAT 为 NULL → COUNT(DISTINCT NULL) = 0
+COUNT(DISTINCT university_code), COUNT(DISTINCT CONCAT(university_code,'-',major_code))
+
+-- 新（正确）：改用名称列，各省都有值
+COUNT(DISTINCT university_name),
+COUNT(DISTINCT CONCAT_WS('||', university_name, major_name))
+```
+
+同时不再过滤 `school_province IS NOT NULL`：缺失值归入 `数据缺失` 桶，
+接口返回 `degraded=True` + `message`，前端显示明确说明而不是「暂无数据」。
+
+#### 3. 规划师模式（解决「拒绝回答规划类问题」）
+
+新增 `ADVISORY_PROMPT` + `build_advisory_prompt(question, profile_context, context_text)`。
+
+关键改动：**只要命中主观咨询意图，无论有没有检索到内容都走规划师 Prompt**。
+- 有检索内容 → 作为【参考资料】放进 Prompt，要求「有数据就引用」；
+- 无检索内容 → 基于画像 + 通识给方向性建议；
+- 两种情况都**严禁编造**分数线 / 位次 / 学费。
+
+`source` 分别标记为 `hybrid:advisory`（无资料）与 `hybrid:advisory_with_context`（有资料），便于排查。
+
+#### 4. 意图识别放行
+
+```python
+SUBJECTIVE_INTENT_KEYWORDS = (
+    "我该", "该去哪", "推荐", "建议", "帮我看看", "把把关", "稳不稳",
+    "猜猜", "猜到", "适合我", "怎么填", "怎么选", "分析一下", …
+)  # 25 个词
+```
+
+`route_query()` 先做**确定性预检**：命中即放行，**不调 LLM**。
+既修复了误拦截，又把一次 20-45 秒的 LLM 往返从关键路径上移除。
+`ROUTER_PROMPT` 同步新增第 4 条规则（主观咨询判 YES）。
+
+#### 5. 超时贯通 + 分阶段日志 + 504
+
+| 层 | 改动 |
+|---|---|
+| `llm_client.BaseLLMChannel.chat` | 抽象契约新增 `timeout` 参数 |
+| `AliLLMChannel` | `kwargs["timeout"] = timeout or self.timeout`（SDK 支持 per-request） |
+| `OllamaLLMChannel` | `http_timeout = timeout or self.timeout` |
+| `LLMClient.chat` | 透传 `timeout` |
+| `ai_service.ask` | **真正把 timeout 传给门面**（0.12.0 及以前在这里丢掉） |
+| `graph_query_engine` | 新增 `graph_llm()`，图谱专用 `GRAPH_LLM_TIMEOUT`（默认 20s），避免两次调用吃掉生成预算 |
+| `routers/ai.py` | 整体超时 `CHAT_TOTAL_TIMEOUT`（默认 100s，留 20s 余量），超时抛 **504** 并提示可操作建议；`print` 分阶段耗时 |
+| `config.py` | 新增 `CHAT_TOTAL_TIMEOUT` / `GRAPH_LLM_TIMEOUT` / `UPLOAD_ROOT` |
+
+输出示例：
+
+```
+[PROFILE] 已注入用户画像 user=13 长度=179：你性格理性独立…
+[AI] 阶段耗时 读画像=0.00s（画像长度=179）
+[AI] 阶段耗时 总链路=43.35s source=hybrid:advisory_with_context
+```
+
+### 三、验证结果
+
+#### 1. 桩版（`python test_hotfix_0_12_1.py`）
+
+```
+用例 1：地图统计口径         山东 19688/1126、江西 7072/452、吉林 9112（degraded）、河南 9578（未退化）
+用例 2：主观咨询意图识别     8 个咨询问法全命中、5 个无关问法不命中（白名单 25 词）
+用例 3：ROUTER_PROMPT        已含第 4 条主观咨询规则
+用例 4：规划师兜底           ADVISORY_PROMPT 含画像/禁编造/参考资料分支
+用例 4b：强制三路全空        source=hybrid:advisory；对照组客观问题仍 hybrid_empty
+用例 5：报告隐私隔离         目录不同、读后即删、拒绝 exe、源码无 Chroma 调用
+用例 6：超时贯通             ask → LLMClient → Ali/Ollama 三层均已透传
+```
+
+#### 2. 真实链路（`--real`）
+
+| 验收标准 | 结果 |
+|---|---|
+| 1. 抽屉上传 PDF 能解析，但知识库管理看不到 | ✅ 文件上传 200；`知识库文件数=4，含用户报告=无` |
+| 2. 地图切吉林 / 山东正常显示 | ✅ 山东 19688 专业 / 1126 院校；吉林 9112 / 878（带降级说明） |
+| 3. 问「502 分根据画像我该去哪」给出建议 | ✅ `source=hybrid:advisory_with_context`，回答「502分通常对应省属公办本科中段，建议聚焦计算机类、电子信息类…」 |
+| 4. 不再长时间转圈 | ✅ 总链路 43.35s（< 100s 上限），超时明确 504 |
+
+附加：无关问题仍返回 `router_blocked`（放宽未破坏底线）。
+
+#### 3. 回归
+
+```bash
+python smoke_test.py / smoke_rag.py            # 通过
+python test_hybrid_rag.py                      # 0.9.1 通过
+python test_multimodal_rag.py                  # 0.10.0 通过
+python test_national_engine.py --api           # 0.11.0 通过
+python test_data_cleaner.py --real             # 0.11.2 通过
+python test_user_profile.py                    # 0.12.0 通过
+cd ../frontend && npm run build                # vue-tsc + vite 通过
+```
+
+### 四、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 吉林地图无省份分布 | 该省 `major_admission_2025_all.school_province` 整列为 NULL，且 `enrollment_plan` 无此列可回补，只能展示总量 |
+| 规划师模式仍可能较慢 | 三路检索（尤其图谱的两次 LLM 调用）约 40 秒；已受 `GRAPH_LLM_TIMEOUT` 约束，如需更快可关闭 `use_graph` |
+| 报告文件不落盘 | 提取后即删除，因此**无法回溯**原始报告；需要留档请让用户自行保存 |
+| 图片 OCR 依赖通道 | 未配置 `Ali_API_KEY` 时图片提取会失败并提示改用粘贴文字 |
+
+### 五、后续演进方向（0.13.0）
+
+| 方向 | 说明 |
+|---|---|
+| 主观问题跳过图谱通道 | 规划类问题几乎不需要关系型事实，跳过可省约 40 秒 |
+| 流式输出 | 前端边生成边展示，把「等待感」降到最低 |
+| 报告归档（可选） | 用户主动勾选「保留原文件」，落到私有目录并加密 |
+| 地图数据补齐 | 吉林补 `school_province` 列，或从院校名反查所在地 |
 
 ---
 

@@ -59,7 +59,7 @@
             <div class="track-icon">A</div>
             <div class="track-title">上传测评报告</div>
             <div class="track-desc">
-              已有 MBTI / 霍兰德等报告？把报告文字贴进来，AI 自动提取特质与适合的专业方向。
+              已有 MBTI / 霍兰德等报告？上传 PDF / 图片文件或粘贴文字，AI 自动提取特质与适合的专业方向。
             </div>
           </div>
           <div class="track-card" :class="{ on: track === 'survey' }" @click="chooseTrack('survey')">
@@ -87,19 +87,42 @@
             <el-input
               v-model="reportText"
               type="textarea"
-              :rows="12"
+              :rows="10"
               maxlength="20000"
               show-word-limit
               placeholder="把报告里的文字粘贴到这里。例如：&#10;霍兰德职业兴趣测评：您的兴趣代码为 IRC（研究型-现实型-常规型）&#10;MBTI 性格类型为 INTJ&#10;特质：逻辑性强、独立思考、喜欢解决复杂问题…"
             />
           </el-form-item>
         </el-form>
-        <div class="muted hint">
-          提示：如果是 PDF，请先在「知识库管理」上传（系统会 OCR 成文字），再把文字复制过来。
+
+        <!-- 0.12.1：直接上传文件，走独立画像接口（不写公共知识库） -->
+        <el-divider content-position="left">或者直接上传文件</el-divider>
+        <el-upload
+          class="report-uploader"
+          drag
+          :auto-upload="true"
+          :show-file-list="true"
+          :limit="1"
+          accept=".pdf,.txt,.docx,.md,.png,.jpg,.jpeg"
+          :http-request="onReportUpload"
+          :on-exceed="onReportExceed"
+        >
+          <div class="uploader-inner">
+            <div class="uploader-icon">⬆</div>
+            <div class="uploader-text">将报告文件拖到此处，或<em>点击上传</em></div>
+            <div class="muted uploader-tip">
+              支持 PDF（含扫描件，自动 OCR）/ 图片 / TXT / MD / DOCX，单个不超过 10MB
+            </div>
+          </div>
+        </el-upload>
+        <div class="muted hint privacy-hint">
+          隐私说明：报告仅用于生成你自己的画像，文件解析后会立即删除，
+          不会进入公共知识库，其他用户与管理员都检索不到。
         </div>
+
         <div class="step-actions">
           <el-button @click="step = 1">上一步</el-button>
-          <el-button type="primary" :loading="submitting" @click="submitReport">开始解析</el-button>
+          <el-button type="primary" :loading="submitting" @click="submitReport">开始解析文字</el-button>
         </div>
       </div>
 
@@ -196,7 +219,8 @@ import {
   fetchProfileDomains,
   generateSurvey,
   submitSurvey as submitSurveyApi,
-  uploadReport
+  uploadReport,
+  uploadReportFile
 } from '@/api/profile'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import { useUserStore } from '@/stores/user'
@@ -368,6 +392,25 @@ async function submitReport() {
   } finally {
     submitting.value = false
   }
+}
+
+/** 0.12.1：文件版报告上传（独立接口，不写公共知识库） */
+async function onReportUpload(options: { file: File }) {
+  submitting.value = true
+  try {
+    const res = await uploadReportFile(options.file)
+    applySummary(res)
+    ElMessage.success('报告解析完成')
+  } catch (e: any) {
+    const detail = e?.response?.data?.detail
+    ElMessage.error(detail || '报告解析失败，若是扫描件请确认 OCR 通道可用，或改为粘贴文字')
+  } finally {
+    submitting.value = false
+  }
+}
+
+function onReportExceed() {
+  ElMessage.warning('一次只能上传一个报告文件')
 }
 
 // ---------------- 途径 B：问卷 ----------------
@@ -640,5 +683,32 @@ onMounted(async () => {
 }
 .tip {
   margin-bottom: 12px;
+}
+/* ---------------- 0.12.1 报告上传 ---------------- */
+.report-uploader {
+  width: 100%;
+}
+.uploader-inner {
+  padding: 6px 0 2px;
+}
+.uploader-icon {
+  font-size: 22px;
+  color: var(--primary);
+  line-height: 1.4;
+}
+.uploader-text {
+  font-size: 13.5px;
+  margin: 2px 0 4px;
+}
+.uploader-tip {
+  font-size: 12px;
+}
+.privacy-hint {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f0f7ff;
+  border-left: 3px solid var(--primary);
+  border-radius: 4px;
+  line-height: 1.7;
 }
 </style>

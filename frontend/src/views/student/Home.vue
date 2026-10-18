@@ -46,13 +46,18 @@
             <el-skeleton :rows="6" animated class="skeleton" />
           </div>
 
+          <!-- 0.12.1：区分「真的没数据」与「数据集缺维度」两种情况 -->
           <div v-else-if="!stats.length" class="chart-overlay">
-            <el-empty description="暂无数据（该年份数据集没有院校省份信息）" />
+            <el-empty :description="statsMessage || '暂无数据（该年份数据集没有院校省份信息）'" />
+          </div>
+
+          <div v-else-if="degraded" class="degraded-tip">
+            <el-alert :title="statsMessage" type="warning" :closable="false" show-icon />
           </div>
         </div>
 
         <p class="legend">
-          颜色越深，代表该省高校在河南投放的专业越多（点击省份可查看该省院校）
+          颜色越深，代表该省高校在{{ province }}投放的专业越多（点击省份可查看该省院校）
         </p>
       </div>
 
@@ -105,6 +110,9 @@ const chartEl = ref<HTMLDivElement>()
 const chart = shallowRef<echarts.ECharts | null>(null)
 const stats = ref<ProvinceMajorStat[]>([])
 const loading = ref(false)
+/** 0.12.1：该省数据集是否缺少院校所在地维度（吉林） */
+const degraded = ref(false)
+const statsMessage = ref('')
 
 let geoJson: any = null
 
@@ -252,8 +260,13 @@ async function load() {
       batch: batch.value
     })
     stats.value = res.data || []
+    // 0.12.1：后端会告知「数据集缺维度」，此时显示说明而不是空白
+    degraded.value = !!res.degraded
+    statsMessage.value = res.message || ''
   } catch {
     stats.value = []
+    degraded.value = false
+    statsMessage.value = ''
   } finally {
     loading.value = false
     // 等覆盖层移除、容器恢复可见后再渲染，保证拿到正确宽高

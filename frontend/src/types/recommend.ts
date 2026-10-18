@@ -35,6 +35,9 @@ export interface ProvinceMajorStatsResult {
   batch: string
   total_major: number
   total_university: number
+  /** 0.12.1：true 表示该省数据集缺少院校所在地维度（如吉林），无法按省份分布展示 */
+  degraded?: boolean
+  message?: string
   data: ProvinceMajorStat[]
 }
 

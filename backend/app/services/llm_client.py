@@ -110,10 +110,16 @@ class BaseLLMChannel(abc.ABC):
         temperature: float = 0.0,
         max_tokens: int = 512,
         top_p: Optional[float] = None,
+        timeout: Optional[float] = None,
     ) -> Optional[str]:
         """返回模型回复文本；不可用/失败返回 None（由门面决定降级）。
 
-        :param top_p: 核采样阈值，None 表示用通道自己的默认（保留 0.4.1 兜底策略里调过的 0.3）
+        :param top_p:    核采样阈值，None 表示用通道自己的默认（保留 0.4.1 兜底策略里调过的 0.3）
+        :param timeout:  单次调用超时（秒）。0.12.1 新增——之前 `ai_service.ask(timeout=…)`
+                         收了这个参数却从未下传，导致调用方以为设了 20 秒，
+                         实际走的是构造时的 ALI_TIMEOUT(30) / OLLAMA_TIMEOUT(45)，
+                         多个环节叠加后整体超过接口的 120 秒上限，表现为「一直转圈」。
+                         传 None 表示用通道自己的默认值。
         """
 
     def available(self) -> bool:
@@ -187,7 +193,7 @@ class AliLLMChannel(BaseLLMChannel):
             logger.info("%s Ali 通道就绪 base_url=%s model=%s key=%s", LOG_PREFIX, self.base_url, self.model, mask(self.api_key))
         return self._client
 
-    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None) -> Optional[str]:
+    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None, timeout: Optional[float] = None) -> Optional[str]:
         if not self.available():
             return None
         messages: List[dict] = []
@@ -201,6 +207,8 @@ class AliLLMChannel(BaseLLMChannel):
             if not self.enable_thinking:
                 # OpenAI 兼容接口关闭思考的方式：透传厂商私有参数
                 kwargs["extra_body"] = {"enable_thinking": False}
+            # 0.12.1：单次请求超时覆盖（OpenAI SDK 的 create() 支持 per-request timeout）
+            kwargs["timeout"] = timeout or self.timeout
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -304,7 +312,7 @@ class OllamaLLMChannel(BaseLLMChannel):
 
     _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 
-    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None) -> Optional[str]:
+    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None, timeout: Optional[float] = None) -> Optional[str]:
         prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
         payload = {
             "model": self.model,
@@ -313,11 +321,13 @@ class OllamaLLMChannel(BaseLLMChannel):
             "think": False,
             "options": {"temperature": temperature, "top_p": top_p or 0.85, "num_predict": max_tokens},
         }
+        # 0.12.1：支持单次调用覆盖超时（默认仍用构造时的 OLLAMA_TIMEOUT）
+        http_timeout = timeout or self.timeout
         try:
-            resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=self.timeout)
+            resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=http_timeout)
             if resp.status_code != 200:  # 老版本 Ollama 不认识 think 字段
                 payload.pop("think", None)
-                resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=self.timeout)
+                resp = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=http_timeout)
             resp.raise_for_status()
             text = self._THINK_RE.sub("", resp.json().get("response", "") or "")
             return text.strip().strip("`").strip() or None
@@ -399,12 +409,15 @@ class LLMClient:
         self._cache = _EmbeddingCache()
 
     # ---------------- LLM ----------------
-    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None) -> str:
-        """按通道顺序尝试，返回首个非空结果；全失败返回空串（调用方做保守处理）。"""
+    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0, max_tokens: int = 512, top_p: Optional[float] = None, timeout: Optional[float] = None) -> str:
+        """按通道顺序尝试，返回首个非空结果；全失败返回空串（调用方做保守处理）。
+
+        0.12.1：`timeout` 透传给每个通道（0.12.0 及以前在门面这里被丢弃）。
+        """
         for ch in self._llm_channels:
             if not ch.available():
                 continue
-            out = ch.chat(system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens, top_p=top_p)
+            out = ch.chat(system_prompt, user_prompt, temperature=temperature, max_tokens=max_tokens, top_p=top_p, timeout=timeout)
             if out:
                 return out
         return ""
