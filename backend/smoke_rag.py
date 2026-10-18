@@ -54,8 +54,14 @@ for h in hits["data"][:2]:
     print("   -", h["metadata"].get("filename"), "|", h["text"][:40].replace("\n", " "))
 
 # AI 问答（带 RAG）
-r = requests.post(B + "/api/ai/chat", json={"question": "河南本科批平行志愿怎么填报？", "use_rag": True, "top_k": 3})
+# 0.12.0：/api/ai/chat 强制登录（画像与历史都挂在 user_id 上），必须带 Token
+r = requests.post(
+    B + "/api/ai/chat",
+    json={"question": "河南本科批平行志愿怎么填报？", "use_rag": True, "top_k": 3},
+    headers=hdr(student),
+)
 print("chat:", r.status_code, "source =", r.json().get("source"), "sources =", r.json().get("sources"))
+print("profile_injected:", r.json().get("profile_injected"))
 print("answer:", r.json().get("answer", "")[:120].replace("\n", " "))
 
 # 删除

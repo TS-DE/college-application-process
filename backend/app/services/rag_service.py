@@ -1254,16 +1254,24 @@ def generate_answer(
     context: str,
     temperature: float = 0.1,
     top_p: float = 0.3,
+    profile_context: str = "",
 ) -> Optional[str]:
     """防幻觉生成：优先依据检索到的父块上下文回答，上下文中完全没有才拒答。
 
     - 参数默认：**temperature=0.1**，**top_p=0.3**
       （0.4.0 用的 top_p=0.1 过于保守，会导致上下文明明有数字时模型也放弃生成）
     - 返回 None 表示生成失败，由调用方降级（回退原 chat 逻辑或提示稍后重试）
+    - 0.12.0：`profile_context` 非空时在规则前插入【考生画像】段落，
+      要求模型结合画像给个性化建议，但**不得据此编造数字**。
     """
     from app.services.ai_service import ask
 
     prompt = ANTI_HALLUCINATION_PROMPT.format(context=context, question=query)
+    section = build_profile_section(profile_context)
+    if section:
+        # 插到【回答规则】之前，让画像先于规则被模型读到
+        anchor = "【回答规则】："
+        prompt = prompt.replace(anchor, section + "\n" + anchor, 1)
     return ask(
         prompt,
         temperature=temperature,   # 低温度：减少自由发挥
@@ -1565,7 +1573,7 @@ HYBRID_FUSION_PROMPT = """你是高考志愿填报助手。请严格根据以下
 
 【优先级声明】
 {priority_hint}
-
+{profile_section}
 【图谱事实】（权威精确数据）：
 {graph_context}
 
@@ -1587,19 +1595,42 @@ HYBRID_FUSION_PROMPT = """你是高考志愿填报助手。请严格根据以下
 """
 
 
+def build_profile_section(profile_context: str = "") -> str:
+    """把用户画像渲染成 Prompt 里的一个段落（0.12.0）。
+
+    统一在这里拼，是为了让「三路融合」和「防幻觉生成」两条链路
+    用完全相同的措辞（单一职责 + 合成复用），不会出现两套画像说法。
+
+    :param profile_context: 画像总结文本（`user_profiles.summary_text`）
+    :return: 可直接塞进 Prompt 的段落；无画像时返回空串
+    """
+    text = (profile_context or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n【考生画像】（用于个性化建议，不得据此编造任何数字）：\n"
+        f"{text}\n"
+        "请在回答中结合这些特征给出建议（例如专业方向、地域与学费偏好），"
+        "但分数线、学费、位次等数字仍必须以事实数据为准。\n"
+    )
+
+
 def build_hybrid_prompt(
     priority_hint: str,
     graph_context: str,
     mysql_context: str,
     vector_context: str,
     question: str,
+    profile_context: str = "",
 ) -> str:
     """拼接三路融合 Prompt（单一职责：只负责组装，不负责检索与生成）。
 
     priority_hint 由调用方根据三路命中情况动态生成，见 _build_hybrid_priority_hint()。
+    0.12.0：新增 `profile_context`（用户画像），为空时 Prompt 与 0.11.x 完全一致。
     """
     return HYBRID_FUSION_PROMPT.format(
         priority_hint=priority_hint,
+        profile_section=build_profile_section(profile_context),
         graph_context=graph_context or "（无）",
         mysql_context=mysql_context or "（无）",
         vector_context=vector_context or "（无）",
@@ -1624,7 +1655,7 @@ def _build_hybrid_priority_hint(graph_hit: bool, mysql_hit: bool, vector_hit: bo
     return "三路均未检索到相关信息，请返回预设拒答话术，禁止编造。"
 
 
-def answer_with_hybrid(question: str, top_k: int = 5) -> Dict:
+def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "") -> Dict:
     """三路融合问答主流程：图谱 + MySQL + 向量并行检索，按优先级分发。
 
     流程：
@@ -1634,9 +1665,10 @@ def answer_with_hybrid(question: str, top_k: int = 5) -> Dict:
       Step 4  三路都空 → 直接返回拒答，不调用大模型（省一次网络往返，也防止编造）
       Step 5  build_hybrid_prompt() → ask() 生成
 
-    :param question: 用户问题
-    :param top_k:    向量通道召回条数
-    :return:         见模块 docstring 的返回结构；任一路异常只跳过该路
+    :param question:        用户问题
+    :param top_k:           向量通道召回条数
+    :param profile_context: 0.12.0 用户画像总结，为空时行为与 0.11.x 完全一致
+    :return:                见模块 docstring 的返回结构；任一路异常只跳过该路
     """
     # ---- Step 1：结构化意图识别 ----
     intents = detect_structured_intent(question)
@@ -1751,6 +1783,7 @@ def answer_with_hybrid(question: str, top_k: int = 5) -> Dict:
         mysql_context=mysql_context if mysql_hit else "",
         vector_context=vector_text if vector_hit else "",
         question=question,
+        profile_context=profile_context,
     )
 
     from app.services.ai_service import ask

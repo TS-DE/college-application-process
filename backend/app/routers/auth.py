@@ -93,13 +93,26 @@ async def login(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/register", response_model=UserOut)
 def register(body: RegisterIn, db: Session = Depends(get_db)):
-    """注册：只允许注册 student；管理员请用 scripts/create_admin.py 创建。"""
+    """注册（0.12.0：补充昵称与手机号）。
+
+    只允许注册 student；管理员请用 scripts/create_admin.py 创建。
+    昵称缺省时用用户名兜底，保证前端头像菜单永远有可展示的名字。
+    """
     if db.scalar(select(User).where(User.username == body.username)):
         raise HTTPException(status_code=400, detail="用户名已存在")
     if len(body.password) < 6:
         raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if body.phone and db.scalar(select(User).where(User.phone == body.phone)):
+        raise HTTPException(status_code=400, detail="该手机号已被注册")
+
     role = "admin" if body.role == "admin" and settings.ALLOW_ADMIN_REGISTER else "student"
-    user = User(username=body.username, password_hash=hash_password(body.password), role=role)
+    user = User(
+        username=body.username,
+        password_hash=hash_password(body.password),
+        role=role,
+        nickname=(body.nickname or "").strip() or body.username,
+        phone=body.phone or None,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
