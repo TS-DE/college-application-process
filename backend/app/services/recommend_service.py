@@ -57,8 +57,13 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
 
     0.11.1：查全国总表 `enrollment_plan_{year}_all`，并**必须**按省份隔离，
     否则会把外省的学费 / 计划数套到本省院校上。
+
+    0.11.2：部分省份（安徽/广西/陕西等）的 tuition / duration 整列为 NULL，
+    信息混在 `major_note` 文本里，这里用 `data_cleaner` 提纯后再入索引，
+    使 `/api/recommend` 与 `/api/majors` 两个消费方同时受益。
     """
-    from app.services.dataset_access import province_conditions
+    from app.services.dataset_access import scope_conditions
+    from app.utils.data_cleaner import clean_item
 
     tbl = get_table(table_name(KIND_PLAN, year, province))
     stmt = select(
@@ -70,16 +75,13 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
         tbl.c.plan_count,
         tbl.c.duration,
         tbl.c.subject_req,
+        tbl.c.major_note,
     )
-    cats = resolve_category(category, year, KIND_PLAN)
-    batches = resolve_batch(batch, year, KIND_PLAN)
-    if cats:
-        stmt = stmt.where(tbl.c.category.in_(cats))
-    if batches:
-        stmt = stmt.where(tbl.c.batch.in_(batches))
-    prov_conds = province_conditions(tbl, province)
-    if prov_conds:
-        stmt = stmt.where(*prov_conds)
+    # 0.11.2：批次必须用**省份感知**的归一（广西写作「本科普通批」、
+    # 四川写作「本科批B段」），否则索引直接为空、学费全都补不上
+    conds = scope_conditions(KIND_PLAN, tbl, province, year, category, batch)
+    if conds:
+        stmt = stmt.where(*conds)
 
     by_code: Dict[str, Dict] = {}
     by_name: Dict[str, Dict] = {}
@@ -90,7 +92,10 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
             "plan_count": normalize_score(r.get("plan_count")),
             "duration": normalize_duration(r.get("duration")),
             "subject_req": r.get("subject_req"),
+            "major_note": r.get("major_note"),
         }
+        # 0.11.2：tuition / duration 缺失时从 major_note 里正则提纯
+        clean_item(info)
         ucode = normalize_code(r.get("university_code"))
         mcode = normalize_code(r.get("major_code"))
         uname = (r.get("university_name") or "").strip()
@@ -177,19 +182,13 @@ def _fetch_candidates(
     buffer: int,
     span: int,
 ) -> List[Dict]:
-    from app.services.dataset_access import province_conditions
+    from app.services.dataset_access import scope_conditions
 
     tbl = get_table(table_name(KIND_MAJOR, year, province))
     conds = _build_filters(tbl, filters)
 
-    # ★ 0.11.1 省份隔离：总表含 30+ 省数据，漏掉会跨省串联
-    conds += province_conditions(tbl, province)
-    cats = resolve_category(category, year, KIND_MAJOR)
-    if cats:
-        conds.append(tbl.c.category.in_(cats))
-    batches = resolve_batch(batch, year, KIND_MAJOR)
-    if batches:
-        conds.append(tbl.c.batch.in_(batches))
+    # ★ 省份 + 科类 + 批次三重隔离（0.11.2 起批次也走省份感知归一）
+    conds += scope_conditions(KIND_MAJOR, tbl, province, year, category, batch)
 
     # 位次窗口裁剪，避免全表扫描（2025 河南本科批约 1.7 万行）
     if rank:
@@ -554,10 +553,17 @@ def _national_reason(item: Dict, rank: Optional[int]) -> str:
 
 
 def _to_national_item(row: Dict, rank: int, tier: str, buffer: int) -> Dict:
-    """把总表的一行转成前端可直接渲染的推荐条目。"""
+    """把总表的一行转成前端可直接渲染的推荐条目。
+
+    0.11.2：投档表里没有 tuition / duration，先留空，等 `enrich_with_plan()`
+    从招生计划表补齐；若计划表也缺，再由 `clean_item()` 从 `major_note` 提纯。
+    """
+    from app.utils.data_cleaner import clean_item
+
     min_rank = row.get("min_rank")
     gap = int(min_rank - rank) if min_rank is not None else None
     item = {
+        "university_code": row.get("university_code"),
         "university_name": row.get("university_name"),
         "major_name": row.get("major_name"),
         "major_group": row.get("major_group"),
@@ -571,11 +577,17 @@ def _to_national_item(row: Dict, rank: int, tier: str, buffer: int) -> Dict:
         "min_rank": min_rank,
         "batch": row.get("batch"),
         "year": row.get("year"),
+        # 0.11.2：保留原始说明文本，供提纯与前端展示
+        "major_note": row.get("major_note"),
+        "tuition": None,
+        "duration": None,
         "rank_diff": gap,
         "tier": tier,
         "tier_label": _TIER_LABEL.get(tier, tier),
         "probability": _tier_probability(tier, gap, buffer) if gap is not None else None,
     }
+    # 先用投档表自身的 major_note 兜一层（多数情况下计划表会更准，后面会覆盖）
+    clean_item(item)
     item["reason"] = _national_reason(item, rank)
     return item
 
@@ -614,9 +626,9 @@ def calculate_tiers(
         if min_r > max_r:
             continue
         sql = (
-            f"SELECT university_name, major_group, major_name, major_code, "
+            f"SELECT university_code, university_name, major_group, major_name, major_code, "
             f"subject_req, school_province, school_nature, is_985, is_211, "
-            f"min_score, min_rank, batch, year "
+            f"min_score, min_rank, batch, year, major_note "
             f"FROM `{tbl}` "
             f"WHERE `province` = :prov AND `category` = :cat AND `year` = :yr "
             f"AND `min_rank` IS NOT NULL AND `min_rank` BETWEEN :min_r AND :max_r "
@@ -650,73 +662,69 @@ def calculate_tiers(
     return out
 
 
-# 富化时每个档位最多补多少条（学费/计划数查询有成本，只补最相关的前几条）
-_ENRICH_LIMIT = 20
+# 富化时每个档位最多补多少条。
+# 0.11.2 起富化改为走**内存索引**（`_plan_index` 已缓存，无逐条 DB 查询），
+# 成本极低，因此上限放宽到覆盖三档全部条目（每档上限 `_TIER_LIMIT` = 50）。
+_ENRICH_LIMIT = 200
 
 
 def enrich_with_plan(
-    tiers: Dict[str, List[Dict]], province: str, category: str, year: int = 2025
+    tiers: Dict[str, List[Dict]],
+    province: str,
+    category: str,
+    year: int = 2025,
+    batch: str = "本科批",
 ) -> Dict[str, List[Dict]]:
-    """用 `enrollment_plan_{year}_all` 给三档结果补上学费 / 计划数 / 学制。
+    """用招生计划索引给三档结果补上学费 / 计划数 / 学制。
 
     ## 为什么需要
     `major_admission_{year}_all`（投档表）只有分数与位次，没有学费；
-    学费在 `enrollment_plan_{year}_all`（招生计划表）里。分省表被合并后，
-    只有把两张总表关联起来才能保住原来的「富信息」展示，否则前端学费列会全空。
+    学费在 `enrollment_plan_{year}_all`（招生计划表）里。
 
-    ## 实现要点（性能）
-    · 每个档位只补前 `_ENRICH_LIMIT` 条，控制查询规模；
-    · 用一次 `IN (...)` 批量查院校，再在 Python 里按 (院校, 专业) 匹配，
-      避免 N 条推荐发 N 次查询；
-    · 任何失败都原样返回，不影响主链路。
+    ## 0.11.2 重写：复用 `_plan_index` / `_lookup_plan`
+    原实现自己按 `(院校名, 专业名)` 精确匹配，但**各省计划表的专业名带括号后缀**
+    （广西：`工科试验班(吴健雄班)` vs 投档表 `工科试验班`），精确匹配全部落空，
+    结果就是「索引里有学费、页面上却没有」。
+
+    改为复用 `_plan_index` + `_lookup_plan` 后得到三级匹配：
+      ① (院校代码, 专业代码) → ② (院校名, 专业名) → ③ 院校名（兜底）
+    同时不再重复写查询逻辑（合成复用，`/api/majors` 与本函数共用同一套索引）。
     """
+    from app.utils.data_cleaner import clean_item
+
     prov = normalize_province(province)
     cat = (category or "").strip()
-    tbl = f"enrollment_plan_{int(year)}_all"
-    if not prov or not cat or not table_exists(tbl):
+    if not prov or not cat:
+        return tiers
+
+    try:
+        idx = _plan_index(prov, int(year), cat, batch)
+    except Exception as exc:  # noqa: BLE001 富化失败不影响推荐结果
+        logger.info("[TIER] 招生计划索引构建失败：%s", exc.__class__.__name__)
+        return tiers
+    if not idx.get("name") and not idx.get("school"):
+        logger.info("[TIER] 招生计划索引为空，跳过富化 %s/%s/%s", prov, cat, batch)
         return tiers
 
     for tier, items in tiers.items():
-        head = items[:_ENRICH_LIMIT]
-        if not head:
-            continue
-        names = sorted({i["university_name"] for i in head if i.get("university_name")})
-        if not names:
-            continue
-        # 动态 IN 占位符（参数化，防注入）
-        marks = ", ".join(f":n{i}" for i in range(len(names)))
-        params = {f"n{i}": n for i, n in enumerate(names)}
-        params.update({"prov": prov, "cat": cat})
-        sql = (
-            f"SELECT university_name, major_name, tuition, plan_count, duration, subject_req "
-            f"FROM `{tbl}` "
-            f"WHERE `province` = :prov AND `category` = :cat "
-            f"AND `university_name` IN ({marks}) LIMIT 500"
-        )
-        try:
-            with SessionLocal() as db:
-                rows = db.execute(text(sql), params).mappings().all()
-        except Exception as exc:  # noqa: BLE001 富化失败不影响推荐结果
-            logger.info("[TIER] 富化查询失败 %s：%s", tbl, exc.__class__.__name__)
-            continue
-
-        # (院校, 专业) → 计划信息；同名专业多条时取第一条
-        plan: Dict[tuple, Dict] = {}
-        for r in rows:
-            key = ((r.get("university_name") or "").strip(), (r.get("major_name") or "").strip())
-            plan.setdefault(key, dict(r))
-
-        for item in head:
-            key = ((item.get("university_name") or "").strip(),
-                   (item.get("major_name") or "").strip())
-            info = plan.get(key)
-            if not info:
-                continue
-            for src, dst in (("tuition", "tuition"), ("plan_count", "plan_count"),
-                             ("duration", "duration")):
-                if item.get(dst) in (None, "") and info.get(src) not in (None, ""):
-                    item[dst] = info[src]
-            # 投档表没有选科要求时，用计划表补
-            if not item.get("subject_req") and info.get("subject_req"):
-                item["subject_req"] = info["subject_req"]
+        for item in items[:_ENRICH_LIMIT]:
+            info = _lookup_plan(
+                idx,
+                item.get("university_code"),
+                item.get("university_name"),
+                item.get("major_code"),
+                item.get("major_name"),
+            )
+            if info:
+                # 计划表是学费 / 计划数 / 学制的权威来源：有值就覆盖
+                for src, dst in (("tuition", "tuition"), ("plan_count", "plan_count"),
+                                 ("duration", "duration")):
+                    if info.get(src) not in (None, ""):
+                        item[dst] = info[src]
+                if not item.get("subject_req") and info.get("subject_req"):
+                    item["subject_req"] = info["subject_req"]
+                if not item.get("major_note") and info.get("major_note"):
+                    item["major_note"] = info["major_note"]
+            # 补缺 + 金额收敛成整数（计划表给的是 Decimal，前端会显示成 5500.0）
+            clean_item(item)
     return tiers

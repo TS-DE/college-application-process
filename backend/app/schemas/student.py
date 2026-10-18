@@ -95,8 +95,10 @@ class RecommendItem(BaseModel):
     max_score: Optional[float] = None
     avg_score: Optional[float] = None
     admit_count: Optional[float] = None
-    plan_count: Optional[float] = None
-    tuition: Optional[float] = None
+    plan_count: Optional[int] = None
+    # 0.11.2：学费统一成整数（元/年）。数据可能是从 major_note 提纯出来的，
+    # 声明成 float 会被 pydantic 转回 5500.0，前端显示不干净
+    tuition: Optional[int] = None
     duration: Optional[str] = None
     school_province: Optional[str] = None
     school_nature: Optional[str] = None
@@ -182,7 +184,8 @@ class RecommendReasonIn(BaseModel):
     student_score: Optional[int] = None
     tier: Optional[str] = None
     school_province: Optional[str] = None
-    tuition: Optional[float] = None
+    # 0.11.2：学费统一整数，含 0（免学费）
+    tuition: Optional[int] = None
 
 
 class RecommendReasonOut(BaseModel):

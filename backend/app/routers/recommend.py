@@ -92,8 +92,9 @@ async def recommend(payload: RecommendIn) -> RecommendOut:
 
     # ---- 第四步：富化（学费 / 计划数 / 学制）----
     try:
+        # 0.11.2：富化要带批次，否则计划索引会按默认批次取，跨批次院校对不上
         tiers = await asyncio.wait_for(
-            run_in_threadpool(enrich_with_plan, tiers, prov, cat, payload.year),
+            run_in_threadpool(enrich_with_plan, tiers, prov, cat, payload.year, payload.batch),
             timeout=30.0,
         )
     except Exception:  # noqa: BLE001 富化失败不影响主结果
