@@ -93,6 +93,10 @@ def ask(
             temperature=temperature,
             max_tokens=num_predict,
             top_p=top_p,
+            # 0.12.1 热修复：把调用方指定的 timeout 真正传给通道。
+            # 之前这里漏传，`ask(timeout=20)` 实际用通道构造时的
+            # ALI_TIMEOUT(30)/OLLAMA_TIMEOUT(45)，多环节叠加就超过接口 120 秒上限
+            timeout=timeout,
         )
         return _strip_think(text) or None
     except Exception:  # noqa: BLE001 任何异常都不应中断业务链路

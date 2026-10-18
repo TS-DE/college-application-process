@@ -21,6 +21,7 @@ from app.services.profile.repository import (
     InMemoryProfileRepository,
     ProfileRepository,
 )
+from app.services.profile.report_reader import ReportReadError, ReportReader
 from app.services.profile.service import ProfileService
 from app.services.profile.summarizer import ProfileSummarizer
 from app.services.profile.survey import (
@@ -46,6 +47,8 @@ __all__ = [
     "LLMJsonParser",
     "ProfileSummarizer",
     "SurveyQuestionGenerator",
+    "ReportReader",
+    "ReportReadError",
     "ALLOWED_DOMAINS",
     "DEFAULT_DOMAINS",
 ]

@@ -7,6 +7,12 @@ from app.config import settings
 ALLOWED_EXTS = {".pdf", ".txt", ".docx"}
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 
+# 0.12.1：用户画像报告的**独立**白名单与目录。
+# ★ 与知识库（ALLOWED_EXTS / KNOWLEDGE_DIR）彻底分开——用户的私人报告
+#   绝不能和管理员的公共政策文件混在一个目录、走同一套上传链路。
+REPORT_ALLOWED_EXTS = {".pdf", ".txt", ".docx", ".md", ".png", ".jpg", ".jpeg"}
+REPORT_MAX_SIZE = 10 * 1024 * 1024  # 报告通常几页，10MB 足够
+
 TYPE_MAP = {
     ".pdf": "pdf",
     ".txt": "txt",
@@ -17,6 +23,34 @@ TYPE_MAP = {
 def ensure_dir() -> str:
     os.makedirs(settings.KNOWLEDGE_DIR, exist_ok=True)
     return settings.KNOWLEDGE_DIR
+
+
+def ensure_report_dir() -> str:
+    """用户报告的私有落盘目录（0.12.1，与知识库目录物理隔离）。"""
+    path = os.path.join(settings.UPLOAD_ROOT, "reports")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_report_file(content: bytes, original_filename: str) -> tuple[str, str]:
+    """保存用户报告到独立目录，返回 (stored_filename, file_path)。
+
+    文件会在文本提取完成后被**立即删除**（见 services/profile/report_reader.py），
+    磁盘上不留私人报告副本。
+    """
+    ext = ext_of(original_filename)
+    safe_original = os.path.basename(original_filename).replace(" ", "_")
+    stored = f"{uuid.uuid4().hex}_{safe_original}"
+    if ext and not stored.endswith(ext):
+        stored += ext
+    path = os.path.join(ensure_report_dir(), stored)
+    with open(path, "wb") as f:
+        f.write(content)
+    return stored, path
+
+
+def is_report_allowed(filename: str) -> bool:
+    return ext_of(filename) in REPORT_ALLOWED_EXTS
 
 
 def ext_of(filename: str) -> str:

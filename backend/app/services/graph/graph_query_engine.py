@@ -43,6 +43,27 @@ class GraphResult:
     error: Optional[str] = None                        # 失败原因（降级时非空）
 
 
+def graph_llm(prompt: str, temperature: float = 0.0, num_predict: int = 800) -> str:
+    """图谱专用 LLM 通道（0.12.1）。
+
+    与 `entity_extractor.default_llm` 的区别只有一点：**超时更短**
+    （`settings.GRAPH_LLM_TIMEOUT`，默认 20 秒）。
+    图谱链路要串「实体识别 + Cypher 生成」两次调用，若沿用默认 30 秒，
+    最坏 60 秒会挤占最终生成的预算，把整条问答拖过 100 秒上限。
+    图谱只是增强项，快速失败回落到 MySQL/向量通道比拖死链路更合理。
+    """
+    from app.config import settings
+    from app.services.ai_service import ask
+
+    return ask(
+        prompt,
+        temperature=temperature,
+        top_p=1.0,
+        num_predict=num_predict,
+        timeout=settings.GRAPH_LLM_TIMEOUT,
+    ) or ""
+
+
 class GraphQueryEngine:
     """图谱通道门面：实体识别 → Cypher 生成 → 执行 → 格式化。"""
 
@@ -53,8 +74,9 @@ class GraphQueryEngine:
         generator: Optional[CypherGenerator] = None,
     ) -> None:
         self.store = store or GraphStore()
-        self.extractor = extractor or EntityExtractor()
-        self.generator = generator or CypherGenerator()
+        # 0.12.1：默认装配时注入图谱专用 LLM 通道（短超时）
+        self.extractor = extractor or EntityExtractor(llm=graph_llm)
+        self.generator = generator or CypherGenerator(llm=graph_llm)
 
     # ---------------- 对外入口 ----------------
 
@@ -153,10 +175,10 @@ def build_default_engine() -> GraphQueryEngine:
     """
     from app.config import settings
 
-    extractor = EntityExtractor(use_llm=settings.GRAPH_LLM_EXTRACT_ENABLED)
+    extractor = EntityExtractor(llm=graph_llm, use_llm=settings.GRAPH_LLM_EXTRACT_ENABLED)
     if settings.GRAPH_DICT_EXTRACT_ENABLED:
         try:
             extractor.load_entity_dict_from_mysql()
         except Exception as exc:  # noqa: BLE001 词典加载失败 → 只剩 LLM 抽取路
             logger.info("[GRAPH] 实体词典加载失败，仅用 LLM 抽取路：%s", exc.__class__.__name__)
-    return GraphQueryEngine(extractor=extractor, generator=CypherGenerator())
+    return GraphQueryEngine(extractor=extractor, generator=CypherGenerator(llm=graph_llm))

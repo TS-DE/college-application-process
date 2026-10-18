@@ -127,6 +127,7 @@ backend/
 │   │   │   ├── survey.py         <span style="color:#888">// SurveyQuestionGenerator：LLM 出题 + 8 道内置题库兜底 + ALLOWED_DOMAINS 白名单</span>
 │   │   │   ├── summarizer.py     <span style="color:#888">// ProfileSummarizer：多源信息 → 画像正文（LLM + 规则模板兜底）</span>
 │   │   │   ├── repository.py     <span style="color:#888">// BaseProfileRepository 抽象 + ProfileRepository(MySQL) + InMemoryProfileRepository(测试)（DIP）</span>
+│   │   │   ├── report_reader.py  <span style="color:#888">// 0.12.1 ReportReader：报告文件 → 文本，读完立即删文件；不写 Chroma / 不写台账（隐私隔离）</span>
 │   │   │   ├── service.py        <span style="color:#888">// ProfileService：update_basic / generate_survey / submit_survey / extract_report / rebuild 编排</span>
 │   │   │   └── __init__.py       <span style="color:#888">// 只导出编排器与抽象，隐藏内部实现（迪米特法则）</span>
 │   │   ├── multimodal/            <span style="color:#888">// 0.10.0 以文搜图（5 个类，合成复用；图像独立向量空间 gaokao_images）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 多模态</span>
@@ -180,6 +181,7 @@ backend/
 ├── test_national_engine.py       <span style="color:#888">// 0.11.0：全国多省自适应引擎（区域映射 + 多省位次 + 三档计算 + 非法传参 + 接口层）</span>
 ├── test_data_cleaner.py          <span style="color:#888">// 0.11.2：数据提纯（正则边界 + 列错位修复 + 各省填充率 + 接口整数校验）</span>
 ├── test_user_profile.py          <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 服务编排 + 画像注入 Prompt + --real 端到端）</span>
+├── test_hotfix_0_12_1.py         <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 主观咨询放行 + 规划师模式 + 超时贯通</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -850,6 +852,25 @@ graph TD
 Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 / 位次仍必须来自图谱与 MySQL。
 `profile_context` 默认空串，为空时 Prompt 与 0.11.x 完全一致（向后兼容）。
 
+**隐私隔离（0.12.1）**：用户报告与公共知识库是两条完全独立的链路。
+
+| 维度 | 知识库（Admin） | 用户报告（User） |
+|---|---|---|
+| 入口 | `/api/knowledge/upload` | `/api/profile/report/upload-file` |
+| 落盘 | `KNOWLEDGE_DIR/` | `{UPLOAD_ROOT}/reports/`（读后即删） |
+| 台账 | `knowledge_files` | 无 |
+| 向量库 | `gaokao_knowledge` + `gaokao_images` | **不写** |
+| 可见性 | 全体用户可检索 | 仅本人 `user_profiles` |
+
+**规划师模式（0.12.1）**：命中主观咨询意图（`SUBJECTIVE_INTENT_KEYWORDS`）时，
+无论三路检索是否有内容，都走 `ADVISORY_PROMPT`：有资料就引用、
+没资料基于画像 + 通识给方向性建议，并**严禁编造**具体数字。
+这解决了「我 502 分该去哪」被防幻觉规则逼成拒答的问题。
+
+**超时链路（0.12.1）**：`ai_service.ask(timeout=…)` → `LLMClient.chat(timeout=…)` →
+各通道 `chat(timeout=…)` 三层贯通；`CHAT_TOTAL_TIMEOUT`（100s）兜底，
+`GRAPH_LLM_TIMEOUT`（20s）约束图谱的两次 LLM 调用。
+
 ---
 
 ## 五、接口清单
@@ -886,6 +907,7 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 | POST | `/api/profile/survey/questions` | **途径 B** 按领域生成 3-5 道业务问卷题（大模型不可用返内置题，`fallback=true`） | 需登录 | `AiChat.vue:genQuestions()` → `generateSurvey()` |
 | POST | `/api/profile/survey/submit` | 提交问卷作答并重算画像 | 需登录 | `AiChat.vue:submitSurvey()` → `submitSurvey()` |
 | POST | `/api/profile/report/upload` | **途径 A** 解析 MBTI / 霍兰德报告文本并重算画像 | 需登录 | `AiChat.vue:submitReport()` → `uploadReport()` |
+| POST | `/api/profile/report/upload-file` | **途径 A（文件版）** 上传 PDF / 图片 / 文档报告。**0.12.1 隐私隔离**：文件落 `{UPLOAD_ROOT}/reports/`、提取后立即删除、不写 Chroma、不写 knowledge_files 台账 | 需登录 | `AiChat.vue:onReportUpload()` → `uploadReportFile()` |
 | POST | `/api/profile/summary/rebuild` | 基于已有数据重新汇总画像 | 需登录 | `Profile.vue:onRebuild()` → `rebuildProfile()` |
 | DELETE | `/api/profile` | 清空画像（不影响账号） | 需登录 | `Profile.vue:onClear()` → `clearProfile()` |
 | POST | `/api/knowledge/upload` | 上传并向量化 | admin | `UploadModal.vue` el-upload 直传 |

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -173,6 +173,57 @@ async def upload_report(
 
 
 # ---------------------------------------------------------------- 汇总 / 清空
+
+
+@router.post("/report/upload-file", response_model=SummaryOut)
+async def upload_report_file(
+    file: UploadFile = File(...),
+    user: Dict = Depends(get_current_user),
+    service: ProfileService = Depends(get_profile_service),
+) -> SummaryOut:
+    """**途径 A（文件版）**：上传 PDF / 图片 / 文档报告，解析出画像特征。
+
+    ## 隐私隔离（0.12.1 核心修复）
+    本接口与知识库上传**完全独立**：
+      · 文件落在 `{UPLOAD_ROOT}/reports/`，不在 `KNOWLEDGE_DIR`；
+      · 提取完文本后**立即删除**文件，不在磁盘留私人副本；
+      · **不写 Chroma**（既不进 `gaokao_knowledge` 也不进 `gaokao_images`）；
+      · **不写 knowledge_files 台账**——知识库管理页看不到这份报告。
+    提取出的特质只进当前登录用户的 `user_profiles` 表。
+
+    若只需粘贴文字，请用 `/api/profile/report/upload`。
+    """
+    import asyncio
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from app.services.profile.report_reader import ReportReadError, ReportReader
+
+    content = await file.read()
+    reader = ReportReader()
+
+    # ① 文件 → 文本（线程池执行，避免阻塞事件循环；内部用完即删文件）
+    try:
+        text = await asyncio.wait_for(
+            run_in_threadpool(reader.read, content, file.filename or "report"),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="报告解析超时，请改用粘贴文字方式") from None
+    except ReportReadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # ② 文本 → 画像特征 → 汇总（与粘贴文字版完全同一条链路）
+    try:
+        result = await asyncio.wait_for(
+            run_in_threadpool(service.extract_report, user["id"], text, ""),
+            timeout=90.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="画像生成超时，请稍后重试") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SummaryOut(**result)
 
 
 @router.post("/summary/rebuild", response_model=SummaryOut)
