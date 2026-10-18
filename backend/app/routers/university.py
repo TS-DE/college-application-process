@@ -180,6 +180,7 @@ def majors(
     rows = fetch_all(stmt)
 
     from app.services.recommend_service import _plan_index, _lookup_plan
+    from app.utils.data_cleaner import clean_item
 
     plan_idx = _plan_index(province, year, category, batch)
     items: List[Dict] = []
@@ -188,25 +189,26 @@ def majors(
             plan_idx, r.get("university_code"), r.get("university_name"),
             r.get("major_code"), r.get("major_name"),
         )
-        items.append(
-            {
-                "university_code": normalize_code(r.get("university_code")),
-                "university_name": r.get("university_name"),
-                "major_code": normalize_code(r.get("major_code")),
-                "major_name": r.get("major_name"),
-                "major_group": r.get("major_group"),
-                "major_note": r.get("major_note"),
-                "subject_req": r.get("subject_req") or plan.get("subject_req"),
-                "min_score": normalize_score(r.get("min_score")),
-                "min_rank": normalize_int(r.get("min_rank")),
-                "max_score": normalize_score(r.get("max_score")),
-                "avg_score": normalize_score(r.get("avg_score")),
-                "admit_count": normalize_score(r.get("admit_count")),
-                "plan_count": normalize_score(plan.get("plan_count")),
-                "tuition": normalize_score(plan.get("tuition")),
-                "duration": plan.get("duration"),
-            }
-        )
+        item = {
+            "university_code": normalize_code(r.get("university_code")),
+            "university_name": r.get("university_name"),
+            "major_code": normalize_code(r.get("major_code")),
+            "major_name": r.get("major_name"),
+            "major_group": r.get("major_group"),
+            "major_note": r.get("major_note"),
+            "subject_req": r.get("subject_req") or plan.get("subject_req"),
+            "min_score": normalize_score(r.get("min_score")),
+            "min_rank": normalize_int(r.get("min_rank")),
+            "max_score": normalize_score(r.get("max_score")),
+            "avg_score": normalize_score(r.get("avg_score")),
+            "admit_count": normalize_score(r.get("admit_count")),
+            "plan_count": normalize_score(plan.get("plan_count")),
+            "tuition": normalize_score(plan.get("tuition")),
+            "duration": plan.get("duration"),
+        }
+        # 0.11.2：计划表缺 tuition / duration 时，从 major_note 文本里提纯补上
+        clean_item(item)
+        items.append(item)
 
     total = len(items)
     start = (page - 1) * page_size

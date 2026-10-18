@@ -150,6 +150,7 @@ backend/
 │       ├── file_utils.py         <span style="color:#888">// UUID 落盘、类型白名单、PDF/DOCX/TXT 提取（0.10.0 起返回 (文本, ocr_used)）、20MB 限制</span>
 │       ├── ocr_utils.py          <span style="color:#888">// 0.10.0 OCRExtractor：扫描件判定 / PDF 转图 / 页间并发 OCR / OCR 兜底入口</span>
 │       ├── region_mapper.py      <span style="color:#888">// 0.11.0 全国省份↔科类映射：31 省配置、拼音/中文归一、新高考判定、无数据省份标记</span>
+│       ├── data_cleaner.py       <span style="color:#888">// 0.11.2 数据提纯：从 major_note 正则补学费/学制，修「duration 列装学费」的列错位</span>
 │       └── security.py           <span style="color:#888">// bcrypt 哈希校验 + JWT 签发/解析</span>
 ├── sql/
 │   ├── 03_knowledge.sql          <span style="color:#888">// 旧版 knowledge_files（历史归档）</span>
@@ -165,6 +166,7 @@ backend/
 ├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
 ├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
 ├── test_national_engine.py       <span style="color:#888">// 0.11.0：全国多省自适应引擎（区域映射 + 多省位次 + 三档计算 + 非法传参 + 接口层）</span>
+├── test_data_cleaner.py          <span style="color:#888">// 0.11.2：数据提纯（正则边界 + 列错位修复 + 各省填充率 + 接口整数校验）</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -776,7 +778,8 @@ graph TD
 | ⑤ 条件构造 | `dataset_access.scope_conditions()` | 一次生成 `province` + `category` + `batch` 三组条件；批次按**该省真实写法**归一（本科批A/B/C段等）（0.11.1） |
 | ⑥ 位次换算 | `rank_service.score_to_rank(score, prov, cat, year)` | 查 `score_range_{year}_all`，WHERE 带 `province` + `category`；查不到返回 0 |
 | ⑦ 三档计算 | `recommend_service.calculate_tiers(rank, prov, cat, year)` | 查 `major_admission_{year}_all`，WHERE 带 `province` + `category` + `year` + `min_rank BETWEEN`；每档 LIMIT 50 |
-| ⑧ 富化 | `recommend_service.enrich_with_plan()` | 查 `enrollment_plan_{year}_all` 补学费 / 计划数 / 学制，每档只补前 20 条、一次 `IN` 批量查 |
+| ⑧ 富化 | `recommend_service.enrich_with_plan()` | 复用 `_plan_index` / `_lookup_plan` 三级匹配补学费 / 计划数 / 学制（0.11.2 重写，原先精确匹配会让广西等省全部落空） |
+| ⑨ 提纯 | `utils/data_cleaner.clean_item()` | 计划表仍缺学费/学制时，从 `major_note` 正则提取；并修「四川把学费写进 `duration` 列」的列错位（0.11.2） |
 
 **数据表只有一套，省份靠条件区分**（0.11.1 定案）：`major_admission_2025_all` / `enrollment_plan_2025_all` / `score_range_2025_all` 三张总表承载全国 30+ 省数据，`school_admission` 未参与合并、由投档表按院校聚合替代。路由层不再拼表名，漏传省份最多查出全量，不会因表名拼错直接 500。
 

@@ -132,13 +132,16 @@ def _batch_matches(canon: str, actual: str) -> bool:
         return True
     if canon == "本科批":
         return (
-            actual.startswith("本科批")          # 本科批A段 / B段 / C段
+            actual == "本科"                     # 四川：本科 / 专科 两档最简写法
+            or actual.startswith("本科批")       # 本科批A段 / B段 / C段
             or actual.startswith("普通本科批")   # 普通本科批
+            or actual.startswith("本科普通批")   # 广西：本科普通批
             or actual == "普通类一段"            # 浙江/山东：一段为本科段
         )
     if canon == "专科批":
         return (
-            actual.startswith("专科批")          # 专科批 / 专科批次
+            actual == "专科"                     # 四川：最简写法
+            or actual.startswith("专科批")       # 专科批 / 专科批次
             or actual.startswith("高职")         # 高职专科 / 高职(专科)批
             or actual == "普通类二段"            # 浙江/山东：二段含专科
         )

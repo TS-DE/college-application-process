@@ -78,7 +78,17 @@
         <el-table-column prop="min_score" label="最低分" width="90" />
         <el-table-column prop="min_rank" label="最低位次" width="100" />
         <el-table-column prop="plan_count" label="计划数" width="90" />
-        <el-table-column prop="tuition" label="学费" width="90" />
+        <!-- 0.11.2：学费 0 = 免学费，null = 暂无（如首都师范大学师范类免收学费） -->
+        <el-table-column label="学费" width="110">
+          <template #default="{ row }">
+            {{ formatTuition(row.tuition) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="学制" width="80">
+          <template #default="{ row }">
+            {{ row.duration || '暂无' }}
+          </template>
+        </el-table-column>
         <el-table-column prop="subject_req" label="选科要求" min-width="160" />
       </el-table>
     </el-drawer>
@@ -125,6 +135,18 @@ const majorLoading = ref(false)
 
 /** 当前考生省份支持的科类（北京 → ['综合']） */
 const categoryOptions = computed(() => categoriesMap.value[query.province] || [])
+
+/**
+ * 学费展示（0.11.2）：0 = 免学费，null = 暂无。
+ * 部分省份原始数据没有学费列，后端会尝试从 major_note 提纯。
+ */
+function formatTuition(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '暂无'
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '暂无'
+  if (n === 0) return '免学费'
+  return `${n} 元/年`
+}
 
 /** 切换考生省份：科类重置为该省第一个，清空分页与院校所在地筛选 */
 function onProvinceChange() {

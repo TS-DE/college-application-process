@@ -103,7 +103,17 @@
             </template>
           </el-table-column>
           <el-table-column prop="school_province" label="省份" width="90" />
-          <el-table-column prop="tuition" label="学费" width="90" />
+          <!-- 0.11.2：学费 0 = 免学费，null = 暂无（部分省份原始数据缺失） -->
+          <el-table-column label="学费" width="100">
+            <template #default="{ row }">
+              {{ formatTuition(row.tuition) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="学制" width="80">
+            <template #default="{ row }">
+              {{ row.duration || '暂无' }}
+            </template>
+          </el-table-column>
         </el-table>
       </el-card>
     </div>
@@ -157,6 +167,19 @@ const tiers = [
   { key: 'wen' as const, label: '稳' },
   { key: 'bao' as const, label: '保' }
 ]
+
+/**
+ * 学费展示（0.11.2）：0 表示免学费，null/undefined 表示数据源缺失。
+ * 部分省份（北京/四川/安徽等）的原始招生计划没有学费列，
+ * 后端已尽力从 major_note 提纯，仍提不到时这里显示「暂无」而不是空白。
+ */
+function formatTuition(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '暂无'
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '暂无'
+  if (n === 0) return '免学费'
+  return `${n} 元/年`
+}
 
 /** 实际提交给后端的科类：以「科类」下拉为准；老高考年份做一次写法映射 */
 const category = computed(() => {
