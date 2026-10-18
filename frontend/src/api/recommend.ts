@@ -23,6 +23,27 @@ export function recommend(payload: RecommendPayload) {
   })
 }
 
+/**
+ * 维度下拉选项（0.11.1 新增）。
+ * `categories_map` 是「省份 → 该省支持的科类」，用于前端做级联：
+ * 北京只有「综合」，河南有「物理类 / 历史类」，新疆是「理科 / 文科」。
+ */
+export interface MetaOptionsResult {
+  province: string
+  years: number[]
+  categories: string[]
+  batches: string[]
+  raw_batches: string[]
+  provinces: string[]
+  categories_map: Record<string, string[]>
+  province_modes: Record<string, string>
+  default: { year: number; category: string; batch: string }
+}
+
+export function metaOptions(province: string) {
+  return http<MetaOptionsResult>({ url: '/meta/options', params: { province } })
+}
+
 export interface ScoreCheckPayload {
   province: string
   year: number

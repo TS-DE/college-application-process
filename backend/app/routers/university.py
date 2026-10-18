@@ -11,9 +11,6 @@ from app.models.dataset import (
     normalize_code,
     normalize_int,
     normalize_score,
-    resolve_batch,
-    resolve_category,
-    table_name,
 )
 from app.services.recommend_service import _probability
 
@@ -50,16 +47,15 @@ def universities(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> Dict:
-    """院校列表（来源：院校投档表 school_admission）。"""
+    """院校列表（0.11.1：来源改为全国总表，按院校分组聚合）。
+
+    `province` 表示**考生所在省份**（决定看哪一套投档数据），
+    `school_province` 才是**院校所在地**筛选，两者不要混淆。
+    """
     tbl = get_school_table(province, year)
     conds = [tbl.c.min_rank.isnot(None), tbl.c.university_name.isnot(None)]
-
-    cats = resolve_category(category, year, KIND_SCHOOL)
-    if cats:
-        conds.append(tbl.c.category.in_(cats))
-    batches = resolve_batch(batch, year, KIND_SCHOOL)
-    if batches:
-        conds.append(tbl.c.batch.in_(batches))
+    # ★ 0.11.1 新增：按考生省份隔离，避免把外省投档数据算进来
+    conds += _scope_conds(KIND_SCHOOL, tbl, province, year, category, batch)
 
     if keyword:
         conds.append(tbl.c.university_name.like(f"%{keyword}%"))
@@ -161,12 +157,8 @@ def majors(
 
     tbl = get_major_table(province, year)
     conds = [tbl.c.min_rank.isnot(None)]
-    cats = resolve_category(category, year, KIND_MAJOR)
-    if cats:
-        conds.append(tbl.c.category.in_(cats))
-    batches = resolve_batch(batch, year, KIND_MAJOR)
-    if batches:
-        conds.append(tbl.c.batch.in_(batches))
+    # ★ 0.11.1：省份 + 科类 + 批次三重隔离
+    conds += _scope_conds(KIND_MAJOR, tbl, province, year, category, batch)
 
     if university_code:
         try:
@@ -227,18 +219,33 @@ def majors(
 
 
 def get_school_table(province: str, year: int):
-    from app.database import get_table
+    """院校维度表（0.11.1：全国总表；`school_admission` 无 `_all` 时回落投档表）。
+
+    `province` 仅用于日志，省份隔离由查询条件完成——见 `_scope_conds()`。
+    """
+    from app.services.dataset_access import DatasetUnavailable, resolve_table
 
     try:
-        return get_table(table_name(KIND_SCHOOL, year, province))
-    except Exception as exc:  # noqa: BLE001
+        return resolve_table(KIND_SCHOOL, year, province)
+    except DatasetUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def get_major_table(province: str, year: int):
-    from app.database import get_table
+    """专业维度表（0.11.1：全国总表 `major_admission_{year}_all`）。"""
+    from app.services.dataset_access import DatasetUnavailable, resolve_table
 
     try:
-        return get_table(table_name(KIND_MAJOR, year, province))
-    except Exception as exc:  # noqa: BLE001
+        return resolve_table(KIND_MAJOR, year, province)
+    except DatasetUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _scope_conds(kind: str, tbl, province: str, year: int, category: str, batch: str):
+    """省份 + 科类 + 批次三重隔离条件（0.11.1 起路由层必带）。
+
+    总表里存着 30+ 省的数据，漏掉 province 条件就会把外省院校混进来。
+    """
+    from app.services.dataset_access import scope_conditions
+
+    return scope_conditions(kind, tbl, province, year, category, batch)

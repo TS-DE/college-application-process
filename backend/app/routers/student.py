@@ -78,11 +78,16 @@ def score_to_rank(
     batch: str = Query(default="本科批"),
     score: float = Query(..., ge=0, le=750),
 ) -> ScoreToRankOut:
-    """分数 -> 位次，查一分一段表。"""
-    from app.services.rank_service import score_to_rank as _conv
+    """分数 -> 位次，查一分一段表（全国总表 + 省份/科类隔离）。
+
+    0.11.1：`rank_service.score_to_rank` 已改为全国版签名
+    `(score, province, category, year) -> int`；需要 control_score / rank_range
+    这类富信息时用 `score_to_rank_detail`。
+    """
+    from app.services.rank_service import score_to_rank_detail
 
     try:
-        info = _conv(province, year, category, batch, score)
+        info = score_to_rank_detail(province, year, category, batch, score)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ScoreToRankOut(**info)
@@ -97,10 +102,10 @@ def rank_to_score(
     rank: int = Query(..., ge=1),
 ) -> RankToScoreOut:
     """位次 -> 分数（同分去向 / 位次反查）。"""
-    from app.services.rank_service import rank_to_score as _conv
+    from app.services.rank_service import rank_to_score_detail
 
     try:
-        info = _conv(province, year, category, batch, rank)
+        info = rank_to_score_detail(province, year, category, batch, rank)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RankToScoreOut(**info)

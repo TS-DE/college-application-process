@@ -52,9 +52,19 @@ _NATIONAL_LIMIT = 50
 def _load_score_range(
     province: str, year: int, category: str, batch: Optional[str] = None
 ) -> List[Dict]:
-    """batch 传 None 时加载该科类全部批次的分数段（用于批次线 / 跨批次定位）。"""
+    """batch 传 None 时加载该科类全部批次的分数段（用于批次线 / 跨批次定位）。
+
+    0.11.1：查全国总表 `score_range_{year}_all`，**必须**按省份隔离——
+    否则会把三十多个省的一分一段混在一起，位次换算结果完全错误。
+    """
+    from app.services.dataset_access import province_conditions
+
     tbl = get_table(table_name(KIND_SCORE, year, province))
     stmt = select(tbl)
+    # ★ 省份隔离（总表里存着 30+ 省数据，漏掉会跨省串联）
+    prov_conds = province_conditions(tbl, province)
+    if prov_conds:
+        stmt = stmt.where(*prov_conds)
     cats = resolve_category(category, year, KIND_SCORE)
     if cats:
         stmt = stmt.where(tbl.c.category.in_(cats))
