@@ -58,8 +58,193 @@
 | **0.10.0** | 2026-10-16 | 父子块（不变） | 三路融合（不变）+ OCR 预处理 + 以文搜图（Chinese-CLIP / 图注向量 + qwen3.7-flash） | 父块 + 图谱三元组 + MySQL 精确值 + **图像** | ✅ 已发布 |
 | **0.11.0** | 2026-10-17 | 父子块（不变） | 三路融合（不变）+ **全国多省自适应核心引擎**（查 `_all` 总表，province/category 参数化） | 父块 + 图谱三元组 + MySQL 精确值 + 图像（全国 30+ 省） | ✅ 已发布 |
 | **0.11.1** | 2026-10-18 | 父子块（不变） | 三路融合（不变）+ 全国引擎（不变 **＋前后端全链路打通**） | 同上（数据源彻底统一到 `_all` 总表） | ✅ 已发布 |
-| **0.11.2** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + **数据提纯层**（从 `major_note` 正则补学费/学制） | 同上（补齐广西/四川/安徽等省的缺失字段） | ✅ 本次热修复 |
+| **0.11.2** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + **数据提纯层**（从 `major_note` 正则补学费/学制） | 同上（补齐广西/四川/安徽等省的缺失字段） | ✅ 已发布 |
+| **0.12.0** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + **账号体系与双轨制用户画像**（报告提取 / 业务问卷 → 画像注入 Prompt） | 同上 + **用户画像**（个性化建议） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.12.0] - 2026-10-18 · 账号体系完善 + 用户画像系统（双轨制）
+
+### 一、原有技术（0.11.2）及缺陷
+
+| 环节 | 0.11.2 的状态 | 存在的缺陷 |
+|---|---|---|
+| 注册 | 只有用户名 + 密码，且前端无注册页 | 用户只能由脚本创建，C 端无法自助开户 |
+| 用户资料 | `users` 只有 `username / password_hash / role` | 无法记录昵称、手机号、性别、生日，画像缺少基础维度 |
+| AI 问答 | 每次提问都是「陌生人视角」 | 同一个考生反复问，模型不知道他的地域/学费/专业偏好，回答永远泛化 |
+| 用户体系 | `/api/ai/chat` 不校验登录 | 无法把画像、历史挂到 user_id 上，也挡不住匿名刷接口 |
+| 个性化 | 无 | 没有「用户画像」这一层数据载体 |
+
+### 二、改进技术及对应代码位置
+
+#### 1. 数据层
+
+| 文件 | 改动 |
+|---|---|
+| `models/user.py` | 新增 `nickname / phone / gender / birthday / email`，并加 `display_name` 属性（昵称优先） |
+| `models/profile.py` | **新建** `UserProfile`：`user_id`(唯一)、`basic_info`(JSON)、`external_reports`(TEXT)、`survey_answers`(JSON)、`summary_text`(TEXT)、`source` |
+| `database.py` | `_COLUMN_MIGRATIONS["users"]` 补 5 列；新增 `_TABLE_MIGRATIONS` + `ensure_tables()` 幂等建表 |
+
+迁移全部幂等，启动时自动执行，**不需要手工改库**：
+
+```
+[startup] 已建表：user_profiles
+[startup] 已补列：users.nickname, users.phone, users.gender, users.birthday, users.email
+```
+
+#### 2. Schema 按接口隔离拆细（ISP）
+
+`schemas/user.py` + `schemas/profile.py` 共 11 个模型，每类交互一个：
+
+| 交互 | 模型 |
+|---|---|
+| 登录 | `LoginIn`（只有账号密码） |
+| 注册 | `RegisterIn`（+ 昵称 / 手机号） |
+| 改资料 | `ProfileBasicIn`（全可选，支持只改一项） |
+| 生成问卷 | `SurveyQuestionIn`（只有领域 + 数量） |
+| 提交问卷 | `SurveySubmitIn`（只有 `answers` 字典） |
+| 上传报告 | `ReportUploadIn`（只有文本 + 类型提示） |
+| 输出 | `ProfileOut` / `SummaryOut` / `UserOut` |
+
+> 没有任何一个「大而全」的模型承载所有参数。
+
+#### 3. Service 层（`services/profile/`，9 个文件）
+
+| 文件 | 类/职责 | 对应设计原则 |
+|---|---|---|
+| `llm_json.py` | `LLMJsonParser`：去 `<think>`、去代码围栏、修尾逗号、全角引号、括号配对扫描 | **CRP**（报告提取与问卷总结共用同一解析器） |
+| `prompts.py` | `SURVEY_QUESTION_PROMPT` / `REPORT_EXTRACT_PROMPT` / `SURVEY_EXTRACT_PROMPT` / `PROFILE_SUMMARY_PROMPT` | **OCP**（新增来源只加模板） |
+| `extractors.py` | `BaseProfileExtractor` 抽象 + `ReportExtractor` / `SurveyExtractor` | **DIP**（只依赖 `llm` 可调用对象）+ **LSP**（两实现同契约） |
+| `survey.py` | `SurveyQuestionGenerator`：LLM 出题 + 8 道内置题库兜底 | **SRP** |
+| `summarizer.py` | `ProfileSummarizer`：LLM 汇总 + 规则模板兜底 | **SRP** |
+| `repository.py` | `BaseProfileRepository` 抽象 + `ProfileRepository`(MySQL) + `InMemoryProfileRepository`(测试) | **DIP** |
+| `service.py` | `ProfileService`：编排 5 个业务动作 | **SRP**（不写 SQL、不拼 Prompt、不管 HTTP） |
+| `__init__.py` | 只导出编排器与抽象，隐藏内部实现 | **LoD** |
+
+**为什么双轨制最终汇合到同一条路径**：报告与问卷是两个 `BaseProfileExtractor` 子类，
+产出同一个结构（`{traits, preferences/summary}`），再统一走 `ProfileService.rebuild()`
+生成 `summary_text`。这样新增第三条轨道（比如性格测试）无需改 `rebuild()`。
+
+#### 4. 路由层（`routers/profile.py`，只做参数与响应）
+
+| 接口 | 职责 |
+|---|---|
+| `GET /api/profile` | 读画像（没有则返回空画像，不 404） |
+| `PUT /api/profile/basic` | 完善基础资料 |
+| `GET /api/profile/domains` | 问卷可选领域（前后端共用一份常量） |
+| `POST /api/profile/survey/questions` | 生成业务问卷（途径 B） |
+| `POST /api/profile/survey/submit` | 提交问卷并重算画像 |
+| `POST /api/profile/report/upload` | 解析报告并重算画像（途径 A） |
+| `POST /api/profile/summary/rebuild` | 手动重算 |
+| `DELETE /api/profile` | 清空画像 |
+
+#### 5. 画像注入 AI（0.12.0 核心）
+
+| 位置 | 改动 |
+|---|---|
+| `routers/ai.py` | `/chat` 加 `Depends(get_current_user)`（**未登录 401**）+ `Depends(get_db)` |
+| `routers/ai.py` | `_load_profile_summary()` 读画像，异常静默降级为空串 |
+| `rag_service.py` | 新增 `build_profile_section()`；`build_hybrid_prompt()` / `answer_with_hybrid()` / `generate_answer()` 均新增 `profile_context` 参数（**默认空串，向后兼容**） |
+| `HYBRID_FUSION_PROMPT` | 新增 `{profile_section}` 占位 |
+
+注入措辞统一为：
+
+```
+【考生画像】（用于个性化建议，不得据此编造任何数字）：
+你性格独立严谨，擅长逻辑分析……适合计算机、软件工程等研究型专业。
+请在回答中结合这些特征给出建议，但分数线、学费、位次等数字仍必须以事实数据为准。
+```
+
+> 关键约束：**画像只影响「建议口径」，不能成为数字来源**——避免模型拿「画像」当借口编造分数。
+
+#### 6. 前端
+
+| 文件 | 改动 |
+|---|---|
+| `views/Register.vue` | **新建** 注册页（昵称 / 手机号 / 用户名 / 密码 / 确认密码，含校验） |
+| `views/Profile.vue` | **新建** 个人主页（左：基础资料 + 报考信息；右：画像总结 + 特征标签 + 重建/清空） |
+| `components/Navbar.vue` | 登录后改为**头像下拉**（个人主页 / 构建画像 / 管理后台 / 退出）；未登录显示「注册 + 登录」 |
+| `views/student/AiChat.vue` | **新建抽屉**：Step1 双轨制选择 → Step2A 报告 / Step2B 领域勾选 + 卡片式问答 → Step3 画像总结；顶部显示「已结合你的画像」 |
+| `router/index.ts` | 新增 `/register`、`/profile`（`requiresLogin`） |
+| `types/user.ts`、`types/profile.ts`、`api/profile.ts`、`api/auth.ts`、`stores/user.ts` | 类型与 API 封装；store 新增 `displayName` / `avatarText` / `patchUser` |
+
+### 三、验证流程
+
+#### 1. 桩版单测（不连库、不调大模型）
+
+```bash
+cd backend
+python test_user_profile.py
+```
+
+```
+用例 1：LLMJsonParser 脏文本解析        10 个对象 + 1 个数组 通过
+用例 2：ReportExtractor / SurveyExtractor  归一化 + 空/垃圾输入安全降级
+用例 3：SurveyQuestionGenerator 兜底      内置 3 题 / LLM 3 题
+用例 4：ProfileSummarizer 规则兜底        106 字画像 + 空数据引导语
+用例 5：ProfileService 全流程             资料 → 报告 → 问卷 → both → 清空
+用例 5b：画像注入 Prompt 验证             ①② 含【考生画像】；③ 空画像不注入
+```
+
+#### 2. 真实链路（服务已启动）
+
+```bash
+python test_user_profile.py --real
+```
+
+| 步骤 | 结果 |
+|---|---|
+| ① 注册 | 200，昵称/手机号入库 |
+| ② 登录 | 200，`nickname=测试考生` |
+| ③ 初始画像 | `ready=False` |
+| ④ 完善资料 | `basic_info={'province':'河南','category':'物理类','score':600,'gender':'male',…}` |
+| ⑤ 报告解析（真实大模型） | 200，提取出 `mbti=INTJ` / `holland=IRC` / 5 条 traits / 4 个推荐专业 |
+| ⑥ 生成问卷（真实大模型） | 3 道，`fallback=False`，id 为 `region_preference / tuition_sensitivity / career_focus` |
+| ⑦ 提交问卷 | 200，`source=both`（两条轨道汇合） |
+| ⑧ 未登录调用 chat | **401** |
+| ⑨ 登录后 chat | 200，`profile_injected=True`，回答正文出现「根据您提供的【考生画像】…」 |
+| ⑩ 清空画像 | 200 |
+
+后端控制台打印（验收标准 4）：
+
+```
+[PROFILE] 已注入用户画像 user=5 长度=209：你具备INTJ人格特质，逻辑严密且擅长独立思考……
+```
+
+> 用 `print` 而非 `logger.info`：uvicorn 默认只输出 WARNING 以上的应用日志（0.10.0 的 OCR 日志踩过同一个坑）。
+
+#### 3. 回归
+
+```bash
+python smoke_test.py            # 通过
+python smoke_rag.py             # 通过（已改为带 Token 调用 chat）
+python test_hybrid_rag.py       # 0.9.1 通过
+python test_multimodal_rag.py   # 0.10.0 通过
+python test_national_engine.py --api   # 0.11.0 通过
+python test_data_cleaner.py --real     # 0.11.2 通过
+cd ../frontend && npm run build        # vue-tsc + vite build 通过
+```
+
+### 四、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 报告上传只收文本 | 未直接接收 PDF/图片：需先走 `/api/knowledge/upload` 的 OCR 转文本（合成复用，避免重复实现文件解析）。前端已在抽屉内提示 |
+| 画像只注入不缓存 | 每次 chat 都查一次 `user_profiles`（单行主键查询，开销可忽略）；未做进程内缓存，保证资料改动立即生效 |
+| 问卷领域由前端勾选 | 后端只提供 `ALLOWED_DOMAINS` 白名单与默认集合，不支持用户自定义领域名 |
+| `summary_text` 会覆盖 | 报告/问卷/重建都会重算整段画像，不做增量合并；若要保留历史版本需另做快照表 |
+| 未做画像版本管理 | 只存最新一份；`source` 字段记录来源（report / survey / both / manual） |
+
+### 五、后续演进方向（0.13.0）
+
+| 方向 | 说明 |
+|---|---|
+| 画像版本快照 | 每次汇总存一份历史，支持对比与回滚 |
+| 画像参与推荐排序 | 把「学费敏感 / 地域偏好」变成 `calculate_tiers` 的软排序因子 |
+| 多轮对话记忆 | 结合画像做上下文摘要，支持「上次说的那个专业」这类指代 |
+| 画像评估指标 | 在 0.8.0 的评估体系里加 `profile_hit_rate`，量化画像对回答相关性的贡献 |
+| 手机号验证码 | 当前只做格式校验，未接入短信服务 |
 
 ---
 

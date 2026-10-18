@@ -94,13 +94,15 @@ backend/
 │   ├── models/                   <span style="color:#888">// 动态表解析 + ORM 模型（与 SQL 表一一对应）</span>
 │   │   ├── dataset.py            <span style="color:#888">// 表名拼接 `table_name()`、维度归一 `resolve_batch/category`、选科匹配 `subject_match()`</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── knowledge.py          <span style="color:#888">// ORM：knowledge_files（上传文件台账）</span>
-│   │   └── user.py               <span style="color:#888">// ORM：users（admin / student）</span>
+│   │   ├── profile.py            <span style="color:#888">// 0.12.0 ORM：user_profiles（basic_info / external_reports / survey_answers / summary_text）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   └── user.py               <span style="color:#888">// ORM：users（admin / student，0.12.0 补 nickname/phone/gender/birthday/email）</span>
 │   ├── schemas/                  <span style="color:#888">// Pydantic 出入参模型（请求体与响应体的唯一契约）</span>
 │   │   ├── student.py            <span style="color:#888">// RecommendIn / RecommendFilters / RecommendItem / ScoreToRankOut …</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   └── user.py               <span style="color:#888">// 登录注册入参、UserInfo</span>
+│   │   ├── profile.py            <span style="color:#888">// 0.12.0 画像入出参：ProfileBasicIn / SurveyQuestionIn / SurveySubmitIn / ReportUploadIn / ProfileOut / SummaryOut（按接口拆细，ISP）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   └── user.py               <span style="color:#888">// LoginIn / RegisterIn（+昵称手机号）/ UserOut / TokenOut / ChangePasswordIn</span>
 │   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
-│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答；0.9.0 新增 use_graph 开关，返回 graph_hit/vector_hit/fusion_strategy/graph_cypher）、parse-intent、recommend-reason、status</span>
+│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答；0.9.0 use_graph、0.12.0 强制登录 + 注入用户画像，返回 profile_injected）、parse-intent、recommend-reason、status</span>
 │   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
 │   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
@@ -108,7 +110,8 @@ backend/
 │   │   ├── stats.py              <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
 │   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
 │   │   ├── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
-│   │   └── eval.py               <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（均仅 admin）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
+│   │   ├── eval.py               <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（均仅 admin）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
+│   │   └── profile.py            <span style="color:#888">// 0.12.0：/api/profile（读画像）、/basic、/domains、/survey/questions|submit、/report/upload、/summary/rebuild、DELETE（均需登录）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   ├── services/                 <span style="color:#888">// 业务与算法层（所有计算发生在这里）</span>
 │   │   ├── recommend_service.py  <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
@@ -117,6 +120,15 @@ backend/
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
 │   │   ├── dataset_access.py     <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、province/category/batch 条件构造、省份感知的批次归一</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── profile/              <span style="color:#888">// 0.12.0 双轨制用户画像（9 个文件；路由层零业务逻辑，全部下沉到这里）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   │   ├── llm_json.py       <span style="color:#888">// LLMJsonParser：去 &lt;think&gt; / 代码围栏 / 尾逗号 / 全角引号 + 括号配对扫描（CRP：报告提取与问卷总结共用）</span>
+│   │   │   ├── prompts.py        <span style="color:#888">// SURVEY_QUESTION / REPORT_EXTRACT / SURVEY_EXTRACT / PROFILE_SUMMARY 四套模板（OCP：新增来源只加模板）</span>
+│   │   │   ├── extractors.py     <span style="color:#888">// BaseProfileExtractor 抽象 + ReportExtractor / SurveyExtractor + EXTRACTOR_REGISTRY（DIP + LSP）</span>
+│   │   │   ├── survey.py         <span style="color:#888">// SurveyQuestionGenerator：LLM 出题 + 8 道内置题库兜底 + ALLOWED_DOMAINS 白名单</span>
+│   │   │   ├── summarizer.py     <span style="color:#888">// ProfileSummarizer：多源信息 → 画像正文（LLM + 规则模板兜底）</span>
+│   │   │   ├── repository.py     <span style="color:#888">// BaseProfileRepository 抽象 + ProfileRepository(MySQL) + InMemoryProfileRepository(测试)（DIP）</span>
+│   │   │   ├── service.py        <span style="color:#888">// ProfileService：update_basic / generate_survey / submit_survey / extract_report / rebuild 编排</span>
+│   │   │   └── __init__.py       <span style="color:#888">// 只导出编排器与抽象，隐藏内部实现（迪米特法则）</span>
 │   │   ├── multimodal/            <span style="color:#888">// 0.10.0 以文搜图（5 个类，合成复用；图像独立向量空间 gaokao_images）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 多模态</span>
 │   │   │   ├── image_extractor.py <span style="color:#888">// ImageExtractor：pdfplumber 抽 PDF 嵌图；扫描件退化为按页渲染（pypdfium2）</span>
 │   │   │   ├── image_encoder.py  <span style="color:#888">// BaseImageEncoder 抽象 + ChineseCLIPEncoder / CaptionEncoder + create_image_encoder() 工厂</span>
@@ -167,6 +179,7 @@ backend/
 ├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
 ├── test_national_engine.py       <span style="color:#888">// 0.11.0：全国多省自适应引擎（区域映射 + 多省位次 + 三档计算 + 非法传参 + 接口层）</span>
 ├── test_data_cleaner.py          <span style="color:#888">// 0.11.2：数据提纯（正则边界 + 列错位修复 + 各省填充率 + 接口整数校验）</span>
+├── test_user_profile.py          <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 服务编排 + 画像注入 Prompt + --real 端到端）</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -195,21 +208,25 @@ frontend/
 │   │   ├── user.ts               <span style="color:#888">// token + user（派生 isLogin / role / isAdmin）</span>
 │   │   └── knowledge.ts          <span style="color:#888">// files / keyword / backend 状态与动作</span>
 │   ├── views/
-│   │   ├── Login.vue             <span style="color:#888">// 登录；按 role 跳 `/admin/knowledge` 或 `/`</span>
+│   │   ├── Login.vue             <span style="color:#888">// 登录；按 role 跳 `/admin/knowledge` 或 `/`（0.12.0 增加「立即注册」入口）</span>
+│   │   ├── Register.vue          <span style="color:#888">// 0.12.0 注册页：昵称 / 手机号 / 用户名 / 密码 + 表单校验</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   ├── Profile.vue           <span style="color:#888">// 0.12.0 个人主页：基础资料 + 报考信息 + 画像总结/特征标签/重建/清空</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   ├── student/
 │   │   │   ├── Home.vue          <span style="color:#888">// 首页 ECharts 中国地图 + 快捷工具入口</span>
-│   │   │   ├── Volunteer.vue     <span style="color:#888">// 志愿填报主页面（分数 → 位次 → 冲稳保）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格）</span>
-│   │   │   └── AiChat.vue        <span style="color:#888">// AI 问答（可开关知识库增强，展示 sources）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   │   ├── Volunteer.vue     <span style="color:#888">// 志愿填报主页面（分数 → 位次 → 冲稳保；学费 0 显示免学费）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格；考生省份与院校所在地分开）</span>
+│   │   │   └── AiChat.vue        <span style="color:#888">// AI 问答 + 0.12.0「构建专属画像」抽屉（双轨制三步：选方式 → 报告/问卷 → 画像总结）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span> <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   └── admin/
 │   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）+ RAG 量化评估入口</span>
 │   │       ├── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │       └── RAGEval.vue       <span style="color:#888">// 0.8.0：一键评估 + 指标卡片 + 柱状/雷达/趋势图 + 诊断 + 一键应用建议 + 变更日志</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── components/
-│   │   ├── Navbar.vue            <span style="color:#888">// 顶部导航 + 登录态 + 退出</span>
+│   │   ├── Navbar.vue            <span style="color:#888">// 顶部导航 + 0.12.0 头像下拉（个人主页 / 构建画像 / 管理后台 / 退出）</span>
 │   │   ├── UploadModal.vue       <span style="color:#888">// el-upload 直传 /api/knowledge/upload（自带 Bearer）</span>
 │   │   └── ChatBubble.vue        <span style="color:#888">// 聊天气泡纯展示组件</span>
-│   ├── types/                    <span style="color:#888">// TS 类型：recommend / knowledge / user</span>
+│   ├── api/
+│   │   └── profile.ts            <span style="color:#888">// 0.12.0 画像 API 封装（fetchProfile / updateProfileBasic / generateSurvey / submitSurvey / uploadReport / rebuild / clear）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   ├── types/                    <span style="color:#888">// TS 类型：recommend / knowledge / user / profile（0.12.0 新增）</span>
 │   └── styles/main.css           <span style="color:#888">// 全局样式与 CSS 变量</span>
 ├── index.html                    <span style="color:#888">// Vite 入口 HTML</span>
 ├── vite.config.ts                <span style="color:#888">// dev server + /api 代理 + @ 别名</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
@@ -787,6 +804,52 @@ graph TD
 
 **内存与性能保护**：总表单表 43 万行（`enrollment_plan` 80 万行），所有查询都带 `LIMIT`（三档各 50 条、富化各 20 条），绝不 `SELECT *` 全量拉取；列类型收紧与索引脚本见 `backend/sql/05_national_tables_perf.sql`。
 
+### 4.8 主链七：用户画像（0.12.0 双轨制）
+
+入口：`AiChat.vue` 的「构建专属画像」抽屉 / `Profile.vue` 个人主页
+
+```mermaid
+graph TD
+    A["AiChat.vue<br/>构建专属画像"] --> B{"Step 1 选择方式"}
+    B -- 途径 A --> C["粘贴 MBTI / 霍兰德报告文本<br/>（PDF 先走知识库 OCR 转文字）"]
+    B -- 途径 B --> D["勾选领域<br/>地域 / 学费 / 专业 / 办学性质…"]
+
+    C --> E["POST /api/profile/report/upload"]
+    D --> F["POST /api/profile/survey/questions<br/>SurveyQuestionGenerator（LLM 出题 + 内置题库兜底）"]
+    F --> G["卡片式答题<br/>单选 / 多选 / 填空"]
+    G --> H["POST /api/profile/survey/submit"]
+
+    E --> I["ReportExtractor.extract()"]
+    H --> J["SurveyExtractor.extract()"]
+    I --> K["ProfileService.rebuild()<br/>ProfileSummarizer 汇总"]
+    J --> K
+    K --> L[("user_profiles<br/>summary_text")]
+    L --> M["AiChat.vue Step 3<br/>展示画像总结"]
+    L --> N["POST /api/ai/chat"]
+    N --> O["build_profile_section()<br/>拼进 HYBRID_FUSION_PROMPT"]
+    O --> P["ai_service.ask() 生成个性化回答"]
+
+    style K fill:#fff3e0,stroke:#ff6f00
+    style L fill:#fff3e0,stroke:#ff6f00
+    style O fill:#fff3cd,stroke:#d32f2f
+```
+
+**七项设计原则的落地位置**（答辩对照表）：
+
+| 原则 | 落地方式 | 代码位置 |
+|---|---|---|
+| **SRP 单一职责** | 路由只收参数/返响应；Prompt 组装、LLM 调用、JSON 清洗、落库全部在 Service 层 | `routers/profile.py` vs `services/profile/` |
+| **OCP 开闭** | 新增画像来源（性格测试等）只加 Prompt 模板 + Extractor 子类，不改 `service.py`、不动 `ai.py` | `prompts.py` + `EXTRACTOR_REGISTRY` |
+| **LSP 里氏替换** | `ReportExtractor` / `SurveyExtractor` 同继承 `BaseProfileExtractor`，契约一致（`extract` / `render`） | `extractors.py` |
+| **DIP 依赖倒置** | Service 依赖 `BaseProfileRepository` 抽象与 `llm` 可调用对象，不 import MySQL / HTTP | `repository.py`、`extractors.py:default_llm` |
+| **ISP 接口隔离** | 注册 / 改资料 / 出题 / 交卷 / 传报告各用一个独立 Schema，无「大而全」模型 | `schemas/profile.py`、`schemas/user.py` |
+| **LoD 迪米特** | 前端组件只调 `api/profile.ts`，不感知后端字段；`__init__.py` 只导出编排器 | `api/profile.ts`、`services/profile/__init__.py` |
+| **CRP 合成复用** | `LLMJsonParser` 同时服务「报告提取」与「问卷总结」；`build_profile_section()` 同时服务三路融合与防幻觉生成 | `llm_json.py`、`rag_service.py` |
+
+**画像注入的边界**：画像只影响「建议口径」（推荐什么方向、如何权衡地域与学费），**不能成为数字来源**。
+Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 / 位次仍必须来自图谱与 MySQL。
+`profile_context` 默认空串，为空时 Prompt 与 0.11.x 完全一致（向后兼容）。
+
 ---
 
 ## 五、接口清单
@@ -797,7 +860,7 @@ graph TD
 |---|---|---|---|---|
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路**（0.11.0 起走全国总表引擎，响应新增 `rank` / `tiers`；省份+科类非法返回 400） | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
@@ -814,9 +877,17 @@ graph TD
 | GET | `/api/universities` | 查大学（分页 / 筛选 / 概率） | 公开 | `University.vue:load()` → `listUniversities()` |
 | GET | `/api/majors` | 查专业 | 公开 | `University.vue:openMajors()` → `listMajors()` |
 | GET | `/api/stats/major-count-by-province` | 各省在豫招生专业数 | 公开 | `Home.vue:load()` → `majorCountByProvince()` |
-| POST | `/api/auth/login` | 登录（JSON / form），返回 JWT | 公开 | `userStore.login()` → `api/auth.ts:login()` |
-| POST | `/api/auth/register` | 注册（默认 student） | 公开 | `userStore.register()`（预留） |
-| GET | `/api/auth/me` | 当前用户信息 | 需登录 | `router/index.ts` 守卫 → `userStore.loadMe()` |
+| POST | `/api/auth/login` | 登录（JSON / form），返回 JWT | 公开 | `Login.vue:onSubmit()` → `userStore.login()` |
+| POST | `/api/auth/register` | 注册（0.12.0 支持 `nickname` / `phone`，手机号重复返回 400） | 公开 | `Register.vue:onSubmit()` → `userStore.register()` |
+| GET | `/api/auth/me` | 当前用户信息（含昵称/手机号/性别/生日/邮箱/display_name） | 需登录 | `router/index.ts` 守卫 → `userStore.loadMe()` |
+| GET | `/api/profile` | 读取用户画像（无画像时返回空视图，不 404） | 需登录 | `Profile.vue:load()` / `AiChat.vue:refreshCurrent()` |
+| PUT | `/api/profile/basic` | 完善基础资料（昵称/手机号/性别/生日/邮箱/生源地/科类/分数） | 需登录 | `Profile.vue:onSave()` → `updateProfileBasic()` |
+| GET | `/api/profile/domains` | 问卷可选领域（前后端共用白名单） | 需登录 | `AiChat.vue:refreshCurrent()` → `fetchProfileDomains()` |
+| POST | `/api/profile/survey/questions` | **途径 B** 按领域生成 3-5 道业务问卷题（大模型不可用返内置题，`fallback=true`） | 需登录 | `AiChat.vue:genQuestions()` → `generateSurvey()` |
+| POST | `/api/profile/survey/submit` | 提交问卷作答并重算画像 | 需登录 | `AiChat.vue:submitSurvey()` → `submitSurvey()` |
+| POST | `/api/profile/report/upload` | **途径 A** 解析 MBTI / 霍兰德报告文本并重算画像 | 需登录 | `AiChat.vue:submitReport()` → `uploadReport()` |
+| POST | `/api/profile/summary/rebuild` | 基于已有数据重新汇总画像 | 需登录 | `Profile.vue:onRebuild()` → `rebuildProfile()` |
+| DELETE | `/api/profile` | 清空画像（不影响账号） | 需登录 | `Profile.vue:onClear()` → `clearProfile()` |
 | POST | `/api/knowledge/upload` | 上传并向量化 | admin | `UploadModal.vue` el-upload 直传 |
 | GET | `/api/knowledge/list` | 文件列表 | admin | `Knowledge.vue` → `store.loadList()` |
 | GET | `/api/knowledge/detail/{id}` | 文件详情 | admin | `Knowledge.vue:viewDetail()` |

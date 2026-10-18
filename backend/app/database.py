@@ -107,7 +107,59 @@ _COLUMN_MIGRATIONS: Dict[str, List[tuple]] = {
         ("ocr_used", "INT DEFAULT 0"),
         ("image_count", "INT DEFAULT 0"),
     ],
+    # 0.12.0：用户个人资料（右上角「完善基础信息」用）
+    "users": [
+        ("nickname", "VARCHAR(50) NULL"),
+        ("phone", "VARCHAR(20) NULL"),
+        ("gender", "VARCHAR(10) NULL"),
+        ("birthday", "DATE NULL"),
+        ("email", "VARCHAR(120) NULL"),
+    ],
 }
+
+# 0.12.0：需要「建表」的迁移（同样幂等）。
+# 画像表结构较新、字段较多，用 CREATE TABLE IF NOT EXISTS 比逐列 ALTER 更清晰。
+_TABLE_MIGRATIONS: Dict[str, str] = {
+    "user_profiles": """
+        CREATE TABLE IF NOT EXISTS `user_profiles` (
+            `id` INT NOT NULL AUTO_INCREMENT,
+            `user_id` INT NOT NULL,
+            `basic_info` JSON NULL,
+            `external_reports` TEXT NULL,
+            `survey_answers` JSON NULL,
+            `summary_text` TEXT NULL,
+            `source` VARCHAR(20) NULL DEFAULT '',
+            `created_at` DATETIME NULL,
+            `updated_at` DATETIME NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uk_user_profiles_user_id` (`user_id`),
+            CONSTRAINT `fk_user_profiles_user`
+                FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+}
+
+
+def ensure_tables() -> List[str]:
+    """为新增的业务表建表（幂等，启动时调用）。
+
+    MySQL 的 `CREATE TABLE IF NOT EXISTS` 天然幂等，因此不需要先查 information_schema。
+    与外键相关的表（如 user_profiles → users）必须保证被引用表已存在，
+    这里 users 是项目原有表，顺序上安全。
+
+    :return: 实际创建的表名列表（仅用于启动日志）
+    """
+    created: List[str] = []
+    with engine.begin() as conn:
+        for table, ddl in _TABLE_MIGRATIONS.items():
+            if table_exists(table):
+                continue
+            try:
+                conn.execute(text(ddl))
+                created.append(table)
+            except Exception:  # noqa: BLE001 建表失败不阻塞启动，由使用时暴露明确错误
+                pass
+    return created
 
 
 def ensure_columns() -> List[str]:

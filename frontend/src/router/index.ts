@@ -28,8 +28,16 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAdmin: true }
   },
 
-  // 登录
+  // 账号（0.12.0：注册 / 个人主页）
   { path: '/login', name: 'login', component: () => import('@/views/Login.vue') },
+  { path: '/register', name: 'register', component: () => import('@/views/Register.vue') },
+  {
+    path: '/profile',
+    name: 'profile',
+    component: () => import('@/views/Profile.vue'),
+    // 个人主页必须登录（画像与资料都挂在 user_id 上）
+    meta: { requiresLogin: true }
+  },
 
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]
@@ -45,6 +53,11 @@ router.beforeEach(async (to, _from, next) => {
     await userStore.loadMe()
   }
   if (to.meta.requiresAdmin && userStore.role !== 'admin') {
+    next({ path: '/login', query: { redirect: to.fullPath } })
+    return
+  }
+  // 0.12.0：个人主页需要登录
+  if (to.meta.requiresLogin && !userStore.isLogin) {
     next({ path: '/login', query: { redirect: to.fullPath } })
     return
   }

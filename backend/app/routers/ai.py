@@ -1,9 +1,17 @@
-"""AI 接口：意图解析与推荐理由（Ollama + Qwen3，失败自动降级）。"""
+"""AI 接口：意图解析与推荐理由（Ollama + Qwen3，失败自动降级）。
+
+0.12.0：`/api/ai/chat` 改为**必须登录**，并在 Prompt 中注入用户画像
+（`user_profiles.summary_text`）。画像读取失败只记日志，不影响问答。
+"""
 import asyncio
+from typing import Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.routers.auth import get_current_user
 from app.schemas.student import (
     ParseIntentIn,
     ParseIntentOut,
@@ -68,19 +76,59 @@ async def recommend_reason(payload: RecommendReasonIn) -> RecommendReasonOut:
     return RecommendReasonOut(reason=text, source=source)
 
 
+def _load_profile_summary(db: Session, user_id: int) -> str:
+    """读取用户画像总结（供 Prompt 注入）。
+
+    单独抽成函数是为了让异常处理集中在一处：
+    画像只是「锦上添花」，任何失败都必须静默降级为空串，绝不能让问答 500。
+    """
+    try:
+        from app.services.profile import ProfileRepository, ProfileService
+
+        return ProfileService(ProfileRepository(db)).get_summary_for_prompt(user_id)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).info(
+            "[PROFILE] 读取画像失败，按无画像处理：%s", exc.__class__.__name__
+        )
+        return ""
+
+
 @router.post("/chat")
-async def chat(payload: dict) -> dict:
-    """志愿问答（可选 RAG）。
+async def chat(
+    payload: dict,
+    user: Dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """志愿问答（可选 RAG + 用户画像个性化）。
 
     0.7.2：整体链路改为 async + 线程池执行，防止同步 LLM 调用阻塞主事件循环，
     进而拖慢首页、登录等非 AI 接口。整体超时 120 秒，超时返回 504。
+
+    0.12.0：必须登录（画像与历史都挂在 user_id 上）；会话开始前读一次画像总结，
+    拼进系统 Prompt。`profile_injected` 字段告诉前端本次是否真的注入了画像。
     """
-    return await asyncio.wait_for(
-        run_in_threadpool(_chat_sync, payload), timeout=120.0
+    profile_context = await run_in_threadpool(_load_profile_summary, db, user["id"])
+    if profile_context:
+        # 便于验证「画像是否真的进了 Prompt」：控制台打印注入摘要。
+        # 用 print 而非 logger.info——uvicorn 默认只输出 WARNING 以上的应用日志，
+        # 用 logger 会看不到（0.10.0 的 OCR 日志踩过同一个坑）。
+        snippet = profile_context[:80].replace("\n", " ")
+        print(
+            f"[PROFILE] 已注入用户画像 user={user['id']} 长度={len(profile_context)}：{snippet}…",
+            flush=True,
+        )
+    result = await asyncio.wait_for(
+        run_in_threadpool(_chat_sync, payload, profile_context), timeout=120.0
     )
+    # 附带给前端一个明确标记，便于在界面上提示「已结合你的画像」
+    if isinstance(result, dict):
+        result.setdefault("profile_injected", bool(profile_context))
+    return result
 
 
-def _chat_sync(payload: dict) -> dict:
+def _chat_sync(payload: dict, profile_context: str = "") -> dict:
     """原 /chat 同步实现，独立出来便于在线程池中运行。
 
     0.9.0：新增 `use_graph` 开关（默认 true）。开启且 `GRAPH_ENABLED=1` 时走
@@ -90,6 +138,9 @@ def _chat_sync(payload: dict) -> dict:
     0.9.1：图谱分支升级为「图谱 + MySQL + 向量」三路融合
     （`rag_service.answer_with_hybrid`），按「图谱 > MySQL > 向量」优先级分发，
     响应新增 `mysql_hit` 字段。
+
+    0.12.0：`profile_context` 由调用方（已登录态）传入，逐层注入 Prompt；
+    为空串时所有链路行为与 0.11.x 完全一致。
     """
     from app.services import rag_service
     from app.services.ai_service import ai_enabled, ask
@@ -129,7 +180,11 @@ def _chat_sync(payload: dict) -> dict:
     use_graph = bool(payload.get("use_graph", True)) and rag_service.settings.GRAPH_ENABLED
     if use_rag and use_graph:
         try:
-            hybrid = rag_service.answer_with_hybrid(question, top_k=int(payload.get("top_k") or 5))
+            hybrid = rag_service.answer_with_hybrid(
+                question,
+                top_k=int(payload.get("top_k") or 5),
+                profile_context=profile_context,
+            )
             return {
                 "answer": hybrid["answer"],
                 "source": hybrid["source"],
@@ -185,7 +240,13 @@ def _chat_sync(payload: dict) -> dict:
     # ---- 0.4.0 ② 防幻觉生成：命中资料时用强约束 Prompt（temperature=0.1, top_p=0.1）----
     if use_rag and rag_snippets:
         # 0.4.1：top_p 从 0.1 放宽到 0.3，避免模型在极端保守采样下放弃生成
-        answer = rag_service.generate_answer(question, rag_snippets, temperature=0.1, top_p=0.3)
+        answer = rag_service.generate_answer(
+            question,
+            rag_snippets,
+            temperature=0.1,
+            top_p=0.3,
+            profile_context=profile_context,
+        )
         if not answer:
             raise HTTPException(status_code=504, detail="大模型响应超时")
         return {
@@ -199,6 +260,12 @@ def _chat_sync(payload: dict) -> dict:
     prompt_parts = [
         "你是高考志愿填报助手，回答要简洁实用，分点说明，不要编造具体院校分数线。",
     ]
+    # 0.12.0：画像优先于用户临时填的 background（画像是长期档案，更权威）
+    if profile_context:
+        prompt_parts.append(
+            f"【考生画像】{profile_context}\n"
+            "请结合上述画像给出个性化建议，但不得据此编造分数线、学费、位次等数字。"
+        )
     if background:
         prompt_parts.append(f"考生背景：{background}")
     if rag_snippets:

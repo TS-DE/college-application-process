@@ -21,6 +21,9 @@
       </el-form>
 
       <div class="tips muted">
+        还没有账号？<el-link type="primary" @click="$router.push('/register')">立即注册</el-link>
+      </div>
+      <div class="tips muted">
         默认管理员：admin / admin123（由 backend/scripts/create_admin.py 创建）
       </div>
     </el-card>
@@ -38,7 +41,11 @@ const router = useRouter()
 const route = useRoute()
 
 const loading = ref(false)
-const form = reactive({ username: 'admin', password: 'admin123' })
+// 0.12.0：注册成功后会带 username 回到登录页，自动回填
+const form = reactive({
+  username: (route.query.username as string) || 'admin',
+  password: (route.query.username as string) ? '' : 'admin123'
+})
 
 async function onSubmit() {
   if (!form.username || !form.password) {

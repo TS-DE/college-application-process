@@ -14,8 +14,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import settings
-from app.database import TableNotFound, ensure_columns, ensure_indexes
-from app.routers import ai, auth, eval as eval_router, knowledge, meta, recommend, stats, student, university
+from app.database import TableNotFound, ensure_columns, ensure_indexes, ensure_tables
+from app.routers import (
+    ai,
+    auth,
+    eval as eval_router,
+    knowledge,
+    meta,
+    profile as profile_router,
+    recommend,
+    stats,
+    student,
+    university,
+)
 
 app = FastAPI(
     title="高考志愿填报系统",
@@ -44,6 +55,8 @@ app.include_router(auth.router)
 app.include_router(knowledge.router)
 # RAG 量化评估（0.8.0）
 app.include_router(eval_router.router)
+# 用户画像（0.12.0）
+app.include_router(profile_router.router)
 
 
 # 健康检查缓存：避免每次 /api/health 都探测 Ollama / Chroma，防止 AI 通道拖慢非 AI 接口
@@ -55,17 +68,25 @@ _HEALTH_TTL_SECONDS = 5.0
 
 
 async def _background_indexes() -> None:
-    """后台补建索引 + 补列，不阻塞服务启动。"""
+    """后台补建索引 + 建表 + 补列，不阻塞服务启动。
+
+    0.12.0：新增 `ensure_tables()`，负责创建 `user_profiles`。
+    顺序很关键——先建表（画像表有指向 users 的外键），再补列（users 新字段）。
+    """
     try:
+        tables = await run_in_threadpool(ensure_tables)
+        if tables:
+            print(f"[startup] 已建表：{', '.join(tables)}")
         created = await run_in_threadpool(ensure_indexes)
         if created:
             print(f"[startup] 已创建索引：{', '.join(created)}")
-        # 0.10.0：knowledge_files 新增 ocr_used / image_count，老库需要幂等补列
+        # 0.10.0：knowledge_files 新增 ocr_used / image_count
+        # 0.12.0：users 新增 nickname / phone / gender / birthday / email
         added = await run_in_threadpool(ensure_columns)
         if added:
             print(f"[startup] 已补列：{', '.join(added)}")
     except Exception as exc:  # noqa: BLE001
-        print(f"[startup] 索引检查跳过：{exc}")
+        print(f"[startup] 索引/建表检查跳过：{exc}")
 
 
 async def _background_rag_info() -> None:
