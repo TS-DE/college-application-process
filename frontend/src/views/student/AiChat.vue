@@ -28,19 +28,26 @@
               </span>
             </el-tooltip>
           </div>
-          <!-- 0.13.0：唯一入口，替代原来的 RAG 开关与「构建专属画像」按钮 -->
-          <el-button
-            v-if="userStore.isLogin"
-            class="counselor-btn"
-            type="primary"
-            size="small"
-            @click="$router.push('/counselor')"
-          >
-            想让我更了解你吗？
-          </el-button>
-          <el-tag v-else type="warning" size="small" @click="$router.push('/login')">
-            登录后可用
-          </el-tag>
+          <!-- 0.14.0：人机协同志愿规划入口 -->
+          <div class="head-right">
+            <template v-if="userStore.isLogin">
+              <el-button size="small" @click="$router.push('/plan')">
+                🤖 智能生成志愿方案
+              </el-button>
+              <!-- 0.13.0：画像空间入口 -->
+              <el-button
+                class="counselor-btn"
+                type="primary"
+                size="small"
+                @click="$router.push('/counselor')"
+              >
+                想让我更了解你吗？
+              </el-button>
+            </template>
+            <el-tag v-else type="warning" size="small" @click="$router.push('/login')">
+              登录后可用
+            </el-tag>
+          </div>
         </div>
       </template>
 
@@ -270,6 +277,12 @@ onBeforeUnmount(() => {
 }
 .counselor-btn {
   border-radius: 16px;
+}
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .messages {
   height: 470px;

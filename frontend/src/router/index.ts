@@ -45,6 +45,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/student/Counselor.vue'),
     meta: { requiresLogin: true }
   },
+  {
+    // 0.14.0：人机协同志愿规划（LangGraph HITL：生成初稿 → 人工干预 → 终稿）
+    path: '/plan',
+    name: 'plan',
+    component: () => import('@/views/student/PlanGenerator.vue'),
+    meta: { requiresLogin: true }
+  },
 
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]

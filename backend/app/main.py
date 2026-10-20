@@ -21,6 +21,7 @@ from app.routers import (
     eval as eval_router,
     knowledge,
     meta,
+    plan as plan_router,
     profile as profile_router,
     recommend,
     stats,
@@ -57,6 +58,8 @@ app.include_router(knowledge.router)
 app.include_router(eval_router.router)
 # 用户画像（0.12.0）
 app.include_router(profile_router.router)
+# 人机协同志愿规划（0.14.0）—— 独立模块，不影响上面的 RAG / Agent
+app.include_router(plan_router.router)
 
 
 # 健康检查缓存：避免每次 /api/health 都探测 Ollama / Chroma，防止 AI 通道拖慢非 AI 接口
