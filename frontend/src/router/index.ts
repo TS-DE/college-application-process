@@ -38,6 +38,13 @@ const routes: RouteRecordRaw[] = [
     // 个人主页必须登录（画像与资料都挂在 user_id 上）
     meta: { requiresLogin: true }
   },
+  {
+    // 0.13.0：心理与画像空间（云端心理师 + 报告上传 + 画像展示）
+    path: '/counselor',
+    name: 'counselor',
+    component: () => import('@/views/student/Counselor.vue'),
+    meta: { requiresLogin: true }
+  },
 
   { path: '/:pathMatch(.*)*', redirect: '/' }
 ]

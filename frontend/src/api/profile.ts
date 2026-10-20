@@ -59,16 +59,17 @@ export function uploadReport(text: string, sourceHint?: string) {
 /**
  * 途径 A（文件版）：上传 PDF / 图片 / 文档报告。
  *
- * ★ 隐私隔离（0.12.1）：该接口走独立链路，文件提取完即删除，
- * 既不进 Chroma 公共知识库，也不写知识库台账——管理员的
- * 「知识库管理」页看不到普通用户上传的报告。
- * 必须登录；走独立长超时实例（OCR + 大模型解析可能较慢）。
+ * ★ 隐私隔离（0.13.0 物理级解耦）：
+ *   接口为 `/profile/report-upload`，与知识库上传**不是同一条链路**——
+ *   文件落在 `{UPLOAD_ROOT}/reports/`、解析后立即删除、**不写 Chroma**、
+ *   不写 `knowledge_files` 台账，管理员的知识库页看不到。
+ *   必须登录；走独立长超时实例（OCR + 大模型解析可能较慢）。
  */
 export function uploadReportFile(file: File) {
   const form = new FormData()
   form.append('file', file)
   return httpAI<SummaryResult>({
-    url: '/profile/report/upload-file',
+    url: '/profile/report-upload',
     method: 'POST',
     data: form,
     timeout: 180000

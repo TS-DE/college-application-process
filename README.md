@@ -98,7 +98,8 @@ backend/
 │   │   └── user.py               <span style="color:#888">// ORM：users（admin / student，0.12.0 补 nickname/phone/gender/birthday/email）</span>
 │   ├── schemas/                  <span style="color:#888">// Pydantic 出入参模型（请求体与响应体的唯一契约）</span>
 │   │   ├── student.py            <span style="color:#888">// RecommendIn / RecommendFilters / RecommendItem / ScoreToRankOut …</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>
+│   │   ├── ai.py                 <span style="color:#888">// 0.13.0 CounselorIn / CounselorOut / ChatMessage / AgentChatOut（接口隔离：本地问答与云端心理师各自建模）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── profile.py            <span style="color:#888">// 0.12.0 画像入出参：ProfileBasicIn / SurveyQuestionIn / SurveySubmitIn / ReportUploadIn / ProfileOut / SummaryOut（按接口拆细，ISP）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   └── user.py               <span style="color:#888">// LoginIn / RegisterIn（+昵称手机号）/ UserOut / TokenOut / ChangePasswordIn</span>
 │   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
@@ -120,6 +121,15 @@ backend/
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
 │   │   ├── dataset_access.py     <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、province/category/batch 条件构造、省份感知的批次归一</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── agent/                <span style="color:#888">// 0.13.0 本地 Agent 调度（Function Calling：模型自主决定查向量/MySQL/图谱）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
+│   │   │   ├── base.py           <span style="color:#888">// BaseTool 抽象 + ToolResult / ToolCall 统一契约（LSP：所有工具返回一致，绝不抛异常）</span>
+│   │   │   ├── tools.py          <span style="color:#888">// VectorSearchTool / MySQLSearchTool / GraphSearchTool（SRP：只管执行 + 转人话）</span>
+│   │   │   ├── registry.py       <span style="color:#888">// ToolRegistry：注册、按名取用、生成 tools 规格、剔除不可用工具（OCP：加工具只改一行）</span>
+│   │   │   ├── ollama_tools.py   <span style="color:#888">// OllamaToolClient：/api/chat + tools，自动注入 /no_think；400 时降级为 JSON 规划</span>
+│   │   │   ├── prompts.py        <span style="color:#888">// Agent 系统提示词 / PLANNER_PROMPT / FINAL_ANSWER_PROMPT（策略与机制分离）</span>
+│   │   │   ├── runner.py         <span style="color:#888">// AgentRunner：规划 → 执行工具 → 再规划 → 生成；含答案清洗与生成失败兜底</span>
+│   │   │   └── agent_result.py   <span style="color:#888">// AgentAnswer / ToolTrace 数据契约（ISP：路由与前端只依赖需要的字段）</span>
+│   │   ├── counselor.py          <span style="color:#888">// 0.13.0 CounselorService：云端心理师（强制 Ali 多轮，注入画像，不降级本地）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   ├── profile/              <span style="color:#888">// 0.12.0 双轨制用户画像（9 个文件；路由层零业务逻辑，全部下沉到这里）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   │   ├── llm_json.py       <span style="color:#888">// LLMJsonParser：去 &lt;think&gt; / 代码围栏 / 尾逗号 / 全角引号 + 括号配对扫描（CRP：报告提取与问卷总结共用）</span>
 │   │   │   ├── prompts.py        <span style="color:#888">// SURVEY_QUESTION / REPORT_EXTRACT / SURVEY_EXTRACT / PROFILE_SUMMARY 四套模板（OCP：新增来源只加模板）</span>
@@ -182,6 +192,7 @@ backend/
 ├── test_data_cleaner.py          <span style="color:#888">// 0.11.2：数据提纯（正则边界 + 列错位修复 + 各省填充率 + 接口整数校验）</span>
 ├── test_user_profile.py          <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 服务编排 + 画像注入 Prompt + --real 端到端）</span>
 ├── test_hotfix_0_12_1.py         <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 主观咨询放行 + 规划师模式 + 超时贯通</span>
+├── test_agent_0_13_0.py          <span style="color:#888">// 0.13.0：Agent 工具调用（4 条路径）+ 答案清洗 + 云端心理师 + 报告隐私 AST 检查 + --real</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -217,7 +228,8 @@ frontend/
 │   │   │   ├── Home.vue          <span style="color:#888">// 首页 ECharts 中国地图 + 快捷工具入口</span>
 │   │   │   ├── Volunteer.vue     <span style="color:#888">// 志愿填报主页面（分数 → 位次 → 冲稳保；学费 0 显示免学费）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格；考生省份与院校所在地分开）</span>
-│   │   │   └── AiChat.vue        <span style="color:#888">// AI 问答 + 0.12.0「构建专属画像」抽屉（双轨制三步：选方式 → 报告/问卷 → 画像总结）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span> <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   │   ├── AiChat.vue        <span style="color:#888">// 本地 Agent 问答（0.13.0 去掉 RAG 开关与画像按钮，只保留「想让我更了解你吗？」入口 + 思考动画）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
+│   │   │   └── Counselor.vue     <span style="color:#888">// 0.13.0 心理与画像空间：云端心理师多轮对话 + 报告上传区 + 画像展示区 + 业务问卷</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   └── admin/
 │   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）+ RAG 量化评估入口</span>
 │   │       ├── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
@@ -871,6 +883,83 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 各通道 `chat(timeout=…)` 三层贯通；`CHAT_TOTAL_TIMEOUT`（100s）兜底，
 `GRAPH_LLM_TIMEOUT`（20s）约束图谱的两次 LLM 调用。
 
+### 4.9 主链八：本地 Agent 调度（0.13.0 Function Calling）
+
+入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat` → `routers/ai.py:chat()`
+
+```mermaid
+graph TD
+    A["AiChat.vue<br/>发送问题（无 RAG 开关）"] -->|"POST /api/ai/chat<br/>{question}"| B["routers/ai.py:chat()<br/>读画像 summary_text"]
+    B --> C["services/agent/run_agent()<br/>AgentRunner.run()"]
+    C --> D["registry.specs()<br/>生成 3 个工具的说明书"]
+    D --> E["OllamaToolClient.chat(messages, tools)<br/>qwen3:4b 自主判断"]
+    E -->|"无 tool_calls"| F["直接回答<br/>source=agent_no_tool"]
+    E -->|"有 tool_calls"| G["registry.execute(name, query)"]
+    G --> G1["tool_search_vector → Chroma 政策库"]
+    G --> G2["tool_search_mysql → _all 总表"]
+    G --> G3["tool_search_graph → Neo4j（未启动则自动剔除）"]
+    G1 --> H["结果转文本回填 role=tool"]
+    G2 --> H
+    G3 --> H
+    H --> I["第 2 轮：基于工具结果生成答案"]
+    I -->|"成功"| J["clean_answer() 剥掉推理旁白<br/>source=agent"]
+    I -->|"超时/空"| K["用工具结果直接作答<br/>source=agent_tool_only"]
+    J --> L["返回 {answer, sources, tool_trace, steps, model}"]
+    K --> L
+    F --> L
+
+    style C fill:#e3f2fd,stroke:#1976d2
+    style E fill:#fff3cd,stroke:#d32f2f
+    style K fill:#fff3e0,stroke:#ff6f00
+```
+
+**与 0.12.x 的本质区别**：0.12.x 的 `_chat_sync()` 用 if/else 写死「先查向量再查 SQL」，
+加一路数据源就要改函数（违反开闭原则）；0.13.0 把三路封装成工具，**由模型决定查哪路**，
+新增数据源只需继承 `BaseTool` 并在 `registry` 注册一行。
+
+**四种产出路径**（都有测试固化）：
+
+| `source` | 触发条件 | 含义 |
+|---|---|---|
+| `agent` | 模型调工具后成功生成 | 正常路径 |
+| `agent_no_tool` | 模型判断不需要工具（闲聊） | 省掉全部检索开销 |
+| `agent_tool_only` | 工具查到内容但生成轮超时 | 用检索原文兜底，不让用户白等 |
+| `agent_failed` | 首轮就失败且无工具结果 | 路由层回落 0.12.x 确定性融合链路 |
+
+**三个实测踩出来的细节**：
+
+1. `think: false` 对 qwen3 **无效**，只有 `/no_think` 软开关能用；已在传输层
+   （`ollama_tools._with_no_think`）统一注入，不污染 Prompt。
+2. 推理会占用 token 预算：`num_predict=300/400` 时 `done_reason=length` 且经常拿不到
+   `tool_calls`；**768 实测 3/3 稳定**。
+3. 本机 CPU 推理约 10 token/s，两轮 Agent 需 110-155 秒 → 前端加思考动画、
+   `AGENT_TOTAL_TIMEOUT=200`、生成轮单独 110s 超时。
+
+### 4.10 主链九：心理与画像空间（0.13.0）
+
+入口：`AiChat.vue` 标题栏「想让我更了解你吗？」→ `/counselor` → `student/Counselor.vue`
+
+| 区域 | 能力 | 后端 |
+|---|---|---|
+| 左：谈心 | 多轮对话、情绪共情、自然采集偏好 | `POST /api/ai/counselor`（**云端 qwen3.7-flash，不降级**） |
+| 右上：报告上传 | PDF / 图片 / TXT / MD / DOCX，或粘贴文字 | `POST /api/profile/report-upload`（独立链路，不碰知识库） |
+| 右下：画像展示 | 总结正文、MBTI / 霍兰德 / 特质标签、更新时间 | `GET /api/profile` |
+
+**两个 AI 角色的分工**（答辩常问）：
+
+> 普通查询走本地小模型，保证数据安全与毫秒级响应；心理辅导涉及复杂的情感推理，
+> 走云端大模型，同时结合单独存放在 MySQL 的用户画像，实现千人千面的报考建议。
+
+| 维度 | 志愿助手 `/chat` | 心理师 `/counselor` |
+|---|---|---|
+| 模型 | 本地 `qwen3:4b` | 云端 `qwen3.7-flash` |
+| 数据 | 不出本机 | 上传云端 |
+| 能力 | Function Calling 查政策/分数 | 多轮共情与疏导 |
+| 降级 | 失败回落确定性检索 | **不降级**（本地 4b 谈心会说教，宁可报错） |
+
+**隐私边界**：心理师只读 `summary_text` 作为背景，不读原始报告文字；
+报告文件在解析后被 `ReportReader` 立即删除，磁盘不留副本。
+
 ---
 
 ## 五、接口清单
@@ -881,6 +970,7 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 |---|---|---|---|---|
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
+| POST | `/api/ai/counselor` | **云端心理师（0.13.0）** 多轮谈心 / 疏导 / 画像采集。强制 Ali 通道、不降级本地；注入 `summary_text`；响应 `{answer, model, elapsed_ms, profile_injected}` | 需登录 | `Counselor.vue:send()` → `counselorChat()` |
 | POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
@@ -907,7 +997,8 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 | POST | `/api/profile/survey/questions` | **途径 B** 按领域生成 3-5 道业务问卷题（大模型不可用返内置题，`fallback=true`） | 需登录 | `AiChat.vue:genQuestions()` → `generateSurvey()` |
 | POST | `/api/profile/survey/submit` | 提交问卷作答并重算画像 | 需登录 | `AiChat.vue:submitSurvey()` → `submitSurvey()` |
 | POST | `/api/profile/report/upload` | **途径 A** 解析 MBTI / 霍兰德报告文本并重算画像 | 需登录 | `AiChat.vue:submitReport()` → `uploadReport()` |
-| POST | `/api/profile/report/upload-file` | **途径 A（文件版）** 上传 PDF / 图片 / 文档报告。**0.12.1 隐私隔离**：文件落 `{UPLOAD_ROOT}/reports/`、提取后立即删除、不写 Chroma、不写 knowledge_files 台账 | 需登录 | `AiChat.vue:onReportUpload()` → `uploadReportFile()` |
+| POST | `/api/profile/report-upload` | **用户报告上传（0.13.0 规范名）** 上传 PDF / 图片 / 文档 → 提取画像。**物理隔离**：落 `{UPLOAD_ROOT}/reports/`、解析后立即删除、不写 Chroma、不写 `knowledge_files`、处理函数与知识库完全独立 | 需登录 | `Counselor.vue:onFileUpload()` → `uploadReportFile()` |
+| POST | `/api/profile/report/upload-file` | 0.12.1 旧路径，保留兼容（`include_in_schema=False`） | 需登录 | 旧前端缓存 |
 | POST | `/api/profile/summary/rebuild` | 基于已有数据重新汇总画像 | 需登录 | `Profile.vue:onRebuild()` → `rebuildProfile()` |
 | DELETE | `/api/profile` | 清空画像（不影响账号） | 需登录 | `Profile.vue:onClear()` → `clearProfile()` |
 | POST | `/api/knowledge/upload` | 上传并向量化 | admin | `UploadModal.vue` el-upload 直传 |
@@ -929,7 +1020,8 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 | Python | 3.11+ | 后端 |
 | Node.js | 18+ | 前端 |
 | MySQL | 5.7+ / 8.0 | 数据库 `gaokao` |
-| Ollama | 最新版 | 本地兜底 LLM + Embedding |
+| Ollama | 最新版 | 本地 LLM（0.13.0 起主力是 `qwen3:4b`）+ Embedding |
+| **Neo4j** | 5.x / 2025+ | 0.13.0 起必需（知识图谱工具）。未启动时系统仍可用，但 `tool_search_graph` 会被自动剔除 |
 
 ### 6.2 后端
 
@@ -958,16 +1050,42 @@ ALI_EMBED_DIMENSION=128     # 实际会优先对齐已有 Chroma 集合维度
 ALI_TIMEOUT=30
 ALI_ENABLE_THINKING=0       # 思考模式关掉：同一请求实测 9.7s → 2.6s
 
-# 本地兜底
+# 本地模型（0.13.0：主力模型，Agent 的 Function Calling 执行者）
 OLLAMA_URL=http://localhost:11434
-OLLAMA_FALLBACK_MODEL=qwen3:1.7b
+OLLAMA_MODEL=qwen3:4b
+OLLAMA_TIMEOUT=120
 OLLAMA_EMBED_MODEL=nomic-embed-text
+
+# 0.13.0 Agent（Function Calling）
+AGENT_ENABLED=1
+AGENT_MAX_STEPS=2
+AGENT_PLAN_TOKENS=768        # 规划轮：太小会拿不到 tool_calls
+AGENT_ANSWER_TOKENS=768      # 生成轮：qwen3 无法真正关思考，需留足预算
+AGENT_PLAN_TIMEOUT=90
+AGENT_ANSWER_TIMEOUT=110
+
+# 0.13.0 云端心理师
+COUNSELOR_TIMEOUT=60
+COUNSELOR_MAX_HISTORY=20
 ```
 
+> ★ **`.env` 必须在 `backend/` 目录**（不是 `backend/app/`）。
+> 0.13.0 修了 `_load_dotenv()` 的搜索路径：现在依次读 `backend/.env` → `backend/app/.env`，
+> 且真实环境变量优先级最高。0.13.0 之前改 `.env` 其实**不生效**。
+
 ```bash
-# 2) 拉取本地兜底模型
-ollama pull qwen3:1.7b
-ollama pull nomic-embed-text
+# 2) 拉取本地模型
+ollama pull qwen3:4b            # 0.13.0 主力：Agent 执行模型
+ollama pull nomic-embed-text    # 本地 embedding
+
+# 3) 启动 Neo4j（0.13.0 新增，知识图谱工具依赖它）
+#    Windows 用 .bat；路径按本机安装位置调整
+"E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" console
+#    首次启动后浏览器打开 http://localhost:7474 ，默认账号 neo4j / neo4j
+#    若修改过密码，需同步到 backend/.env 的 NEO4J_PASSWORD
+#
+#    ⚠ 未启动 Neo4j 时后端仍能运行，启动日志会打印红色警告：
+#      [WARN] Neo4j 未启动！知识图谱功能将不可用。请执行 "...neo4j.bat" console
 
 # 3) 建表 + 导入数据
 mysql -u root -p gaokao < backend/sql/04_rag_tables.sql
@@ -1001,6 +1119,8 @@ cd backend
 python test_llm_channel.py   # 0.7.1：通道自检 + 端到端 10 秒验证（推荐首先跑）
 python smoke_test.py         # 14 个业务接口
 python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → 删除
+python test_agent_0_13_0.py  # 0.13.0：Agent 工具调用 / 心理师 / 报告隐私隔离（桩版秒级）
+python test_agent_0_13_0.py --real   # 同上 + 真实 HTTP（需服务与 Ollama，约 4-6 分钟）
 ```
 
 ---
@@ -1015,7 +1135,10 @@ python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → �
 | 回答很慢（>10s） | 检索前预处理、多路召回、相关性判断各自一次网络往返 | 已做：关思考（9.7s→2.6s）、ThreadPool 并发、embedding 批量 + 缓存、短问句跳过预处理。仍慢可设 `ALI_ENABLE_THINKING=0`、`QUERY_PREPROCESS_MIN_LEN` 调大、`ADVANCED_RAG_STRATEGY=standard` |
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
 | 上传成功但检索为空 | Ollama / Ali embedding 都失败，或 `status=失败` | 看 `GET /api/knowledge/status` 与后端日志 `[LLM]` 开头的告警 |
-| 回答没有引用知识库 | `/api/ai/chat` 需传 `use_rag=true` 且已登录 | 前端 `AiChat.vue` 的「知识库增强」开关需打开 |
+| 回答很慢（100 秒以上） | 0.13.0 本地 Agent 要跑两轮推理（选工具 + 生成答案），本机 CPU 推理约 10 token/s | 属正常范围（实测 110-155 秒）。换 GPU 或改用非思考模型（如 `qwen2.5:3b-instruct`）可大幅改善；`AGENT_ENABLED=0` 可退回 0.12.x 的确定性检索链路（约 40 秒） |
+| AI 回答里出现「好的，用户问…」这类旁白 | qwen3 是思考型模型，`think:false` 对其无效，只能靠 `/no_think` 抑制，但自由作答时仍会漏出 | 已在 `runner.clean_answer()` 里剥离开头的推理旁白；若仍出现，可调小 `AGENT_ANSWER_TOKENS` 或换非思考模型 |
+| 工具一直只有 `tool_search_vector` 被调用 | `tool_search_mysql` 需要问题里出现具体院校/专业名（否则为避免全表扫描会主动 skip）；`tool_search_graph` 需要 Neo4j 启动 | 两类都属于设计行为。确认 Neo4j 已启动可看启动日志是否有红色 `[WARN] Neo4j 未启动` |
+| 知识库管理里看不到用户上传的报告 | **这是正确行为**（0.13.0 隐私隔离） | 用户报告走 `/api/profile/report-upload`，只写 `user_profiles`，不进 Chroma、不写台账 |
 | `npm install` 报 `ECONNREFUSED 127.0.0.1:7890` | `~/.npmrc` 里的代理未启动 | `npm install --userconfig .npmrc.local` |
 | `AttributeError: module 'bcrypt'` / passlib 报错 | bcrypt 版本过高 | 安装 `bcrypt==4.0.1` |
 | 推荐结果为空 | 科类 / 批次与年份不匹配 | 2024 用理科/文科，2025 用物理类/历史类 |

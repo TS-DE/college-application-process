@@ -269,7 +269,8 @@ async function onClear() {
 }
 
 function goBuild() {
-  router.push({ path: '/ai-chat', query: { build: '1' } })
+  // 0.13.0：画像构建与报告上传统一收敛到「心理与画像空间」
+  router.push('/counselor')
 }
 
 onMounted(async () => {

@@ -175,21 +175,28 @@ async def upload_report(
 # ---------------------------------------------------------------- 汇总 / 清空
 
 
-@router.post("/report/upload-file", response_model=SummaryOut)
+@router.post("/report-upload", response_model=SummaryOut)
+@router.post("/report/upload-file", response_model=SummaryOut, include_in_schema=False)
 async def upload_report_file(
     file: UploadFile = File(...),
     user: Dict = Depends(get_current_user),
     service: ProfileService = Depends(get_profile_service),
 ) -> SummaryOut:
-    """**途径 A（文件版）**：上传 PDF / 图片 / 文档报告，解析出画像特征。
+    """**用户测评报告上传（0.13.0 独立接口）**：PDF / 图片 / 文档 → 画像特征。
 
-    ## 隐私隔离（0.12.1 核心修复）
-    本接口与知识库上传**完全独立**：
-      · 文件落在 `{UPLOAD_ROOT}/reports/`，不在 `KNOWLEDGE_DIR`；
+    > 路径说明：0.13.0 起规范名为 `POST /api/profile/report-upload`
+    > （任务书要求），`/report/upload-file` 作为 0.12.1 的旧路径保留兼容，
+    > 不出现在 OpenAPI 文档里。
+
+    ## 隐私隔离（物理级解耦）
+    本接口与**知识库上传完全无关**，不复用任何 knowledge 代码路径：
+      · 文件落在 `{UPLOAD_ROOT}/reports/`，与 `KNOWLEDGE_DIR` 不同目录；
       · 提取完文本后**立即删除**文件，不在磁盘留私人副本；
       · **不写 Chroma**（既不进 `gaokao_knowledge` 也不进 `gaokao_images`）；
-      · **不写 knowledge_files 台账**——知识库管理页看不到这份报告。
-    提取出的特质只进当前登录用户的 `user_profiles` 表。
+      · **不写 knowledge_files 台账**——管理员的知识库管理页看不到这份报告；
+      · 特质只写入当前登录用户的 `user_profiles.external_reports`。
+
+    权限：仅限已登录用户，且只能读写自己的 `user_id`（Service 层强制隔离）。
 
     若只需粘贴文字，请用 `/api/profile/report/upload`。
     """
