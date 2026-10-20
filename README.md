@@ -21,6 +21,8 @@
 AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻译成人话」两件事；
 政策类问答则走完整的 RAG 链路（检索前改写 → 多路召回 → Rerank 精排 → Self-RAG / Corrective RAG → 防幻觉生成）。
 任一环节失败都会**静默降级**：推荐理由退化为规则文案、Embedding 退化为本地模型、LLM 退化为本地 Ollama。
+前端侧，**聊天记录按会话缓存在浏览器端**（0.16.0，sessionStorage）：切换路由或刷新页面都不丢，
+按账号隔离，关闭标签页即释放。
 
 ### 技术栈一览
 
@@ -30,7 +32,7 @@ AI 只承担「把自然语言翻译成筛选条件」和「把计算结果翻�
 |---|---|---|---|
 | 前端框架 | Vue 3 + TypeScript + Vite | 组合式 API，`/api` 反向代理到 8000 | ★ `frontend/vite.config.ts` |
 | UI 库 | Element Plus | 表单 / 表格 / 上传 / 消息 | ★ `frontend/src/main.ts`（全量注册） |
-| 状态管理 | Pinia | `user`（登录态）、`knowledge`（文件与向量库状态） | ★ `frontend/src/stores/*.ts` |
+| 状态管理 | Pinia | `user`（登录态）、`knowledge`（文件与向量库状态）、`chat`（0.16.0 聊天记录会话级缓存） | ★ `frontend/src/stores/*.ts` |
 | 图表 | ECharts + 中国地图 GeoJSON | 首页「各省在豫招生专业数」热力地图 | ★ `frontend/src/views/student/Home.vue:116` |
 | 后端框架 | FastAPI | 路由按域拆分，全局 `TableNotFound` 处理 | ★ `backend/app/main.py:32-41` |
 | 数据访问 | SQLAlchemy Core + PyMySQL | 动态反射表 + `fetch_all()` 返回 dict | ★ `backend/app/database.py:64` |
@@ -224,7 +226,8 @@ frontend/
 │   │   ├── auth.ts               <span style="color:#888">// login / register / fetchMe</span>
 │   │   └── eval.ts               <span style="color:#888">// 0.8.0：runEval / getReport / listReports / applySuggestion / listChanges / rollback / datasets</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
 │   ├── stores/
-│   │   ├── user.ts               <span style="color:#888">// token + user（派生 isLogin / role / isAdmin）</span>
+│   │   ├── user.ts               <span style="color:#888">// token + user（派生 isLogin / role / isAdmin）；0.16.0 logout 时联动清空聊天记录</span>
+│   │   ├── chat.ts               <span style="color:#888">// 0.16.0 聊天记录会话级持久化：messages / draftQuestion / ownerUserId 存入 sessionStorage（按 userId 分桶，账号隔离）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 会话缓存</span>
 │   │   └── knowledge.ts          <span style="color:#888">// files / keyword / backend 状态与动作</span>
 │   ├── views/
 │   │   ├── Login.vue             <span style="color:#888">// 登录；按 role 跳 `/admin/knowledge` 或 `/`（0.12.0 增加「立即注册」入口）</span>
@@ -1045,6 +1048,40 @@ graph TD
 （前端会收到 404，需重新生成）。生产环境换 `SqliteSaver` 只需改
 `build_plan_graph(checkpointer=...)` 一处。
 
+### 4.12 主链十一：聊天记录会话级缓存（0.16.0）
+
+入口：AI 助手页（`/ai-chat`）→ 切到「志愿填报」或刷新页面后回来，记录仍在。
+
+```mermaid
+graph TD
+    A["AiChat.vue"] -->|"push 用户消息"| B["useChatStore.push()"]
+    B --> C["messages（最多 100 条）"]
+    C --> D["persist()"]
+    D --> E["sessionStorage<br/>key = gaokao_chat_&lt;userId&gt;"]
+    A -->|"watch userStore.user?.id"| F["loadForUser(userId)"]
+    F --> G["读 sessionStorage"]
+    G -->|"脏数据"| H["console.warn + 丢弃重建"]
+    G -->|"正常"| C
+    E -.->|"退出登录"| I["userStore.logout() → chatStore.clear()"]
+
+    style E fill:#f3e5f5,stroke:#6a1b9a
+    style H fill:#fff3e0,stroke:#ff6f00
+```
+
+**为什么用 sessionStorage 而不是 localStorage**：后者在同一浏览器的所有标签页共享，
+登录 A、B 两个账号会互相串号；前者按标签页隔离，关闭标签页即释放。
+
+**账号隔离**：存储 key 按 userId 分桶；`loadForUser` 发现归属用户变化时，
+会把上一个账号的记录一并删除；退出登录时 `userStore.logout()` 调用 `chatStore.clear()`。
+依赖方向 `user → chat` 是单向的，`api/request.ts` 不反向 import store，无循环依赖。
+
+**健壮性**：非 JSON / 结构不符 → 告警并丢弃重建；单条 >4000 字截断；
+写入失败（配额超限）→ 降级为仅内存，不让页面白屏；超过 100 条 → 丢弃最早消息并提示
+「更早的记录已清理」。
+
+**加载时机**：用 `watch(() => userStore.user?.id)` 而非 `onMounted` —— `/ai-chat` 是公开页，
+0.15.1 之后守卫不再等待 `/auth/me`，进页面时 `user` 可能仍是 null。
+
 ---
 
 ## 五、接口清单
@@ -1386,6 +1423,7 @@ python -m tests.auth.test_auth_isolation --concurrency 12   # 更严苛的并发
 # 0.15.1：前端判据与守卫结构验证（无需启动服务）
 cd frontend
 npm run verify:auth    # 401 同步登出 / 超时保留 token / 守卫公开页不阻塞
+npm run verify:chat    # 0.16.0：聊天记录会话级持久化（23 项断言：切页/刷新/草稿/换账号/上限/脏数据）
 ```
 
 ---

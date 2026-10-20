@@ -8,7 +8,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "verify:auth": "node tests/auth/verify_401_logout.cjs && node tests/auth/verify_router_guard.cjs"
+    "verify:auth": "node tests/auth/verify_401_logout.cjs && node tests/auth/verify_router_guard.cjs",
+    "verify:chat": "node tests/chat/test_chat_store.cjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

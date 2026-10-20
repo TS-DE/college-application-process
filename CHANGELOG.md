@@ -65,8 +65,167 @@
 | **0.13.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **极速模式**（默认走确定性链路）+ **环境状态指示灯** | 同上（问答延迟 150s → 9.5s） | ✅ 已发布 |
 | **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 已发布 |
 | **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 已发布 |
-| **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 本次修复 |
+| **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 已发布 |
+| **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.16.0] - 2026-10-20 · 聊天记录会话级持久化
+
+### 一、原有缺陷 / 原有设计
+
+在 AI 问答页聊了几句后，切换到「志愿填报」或刷新页面，再回到问答页，**聊天记录全部清空**。
+
+根因（已核实）：
+
+| # | 现状 | 位置 | 后果 |
+|---|---|---|---|
+| 1 | `const messages = ref<Msg[]>([])` —— 组件内局部状态 | `AiChat.vue:108` | 组件卸载即销毁，切路由/刷新全部丢失 |
+| 2 | `const question = ref('')` —— 输入框草稿同样是局部状态 | `AiChat.vue:105` | 切页后打了一半的字也没了 |
+| 3 | 项目中**没有对应的 Pinia store**，也没有任何持久化 | — | 无处可恢复 |
+| 4 | 欢迎语是写死的独立 `ChatBubble` | `AiChat.vue:55-58` | 有历史记录时仍显示欢迎语 |
+
+### 二、改进技术与方案
+
+#### 1. 新增 `useChatStore`（Pinia + 手写 sessionStorage）
+
+| state | 说明 |
+|---|---|
+| `messages` | `{ id, role, text, sources?, createdAt }[]` |
+| `draftQuestion` | 输入框草稿 |
+| `ownerUserId` | 当前记录归属用户，用于账号隔离 |
+| `sessionId` | 会话标识，便于排查 |
+| `trimmed` | 是否发生过「更早记录被清理」，供 UI 提示 |
+
+| action | 说明 |
+|---|---|
+| `loadForUser(userId)` | 读 sessionStorage；`ownerUserId` 不匹配则**清掉旧账号的记录**再重建 |
+| `push(msg)` | 追加 + 持久化；超 100 条裁剪最早消息并置 `trimmed` |
+| `setDraft(text)` | 更新草稿 + 持久化 |
+| `clear()` | 清空消息与草稿，并删除存储 |
+| `acknowledgeTrimmed()` | UI 提示后复位 `trimmed` |
+
+#### 2. 为什么用 sessionStorage 而不是 localStorage
+
+`localStorage` 在同一浏览器的**所有标签页共享**：登录 A 账号和 B 账号会互相串号
+（两个标签页读到同一份记录）。`sessionStorage` 按**标签页**隔离，
+符合「聊天记录属于当前这次会话」的语义；关闭标签页即释放，也不会长期占空间。
+**未引入任何持久化插件**（如 `pinia-plugin-persistedstate`），全部手写。
+
+存储布局：key = `gaokao_chat_<userId>`，value = `{ messages, draftQuestion, sessionId, savedAt }`。
+
+#### 3. 健壮性约定
+
+| 场景 | 处理 |
+|---|---|
+| sessionStorage 无数据 | 按空会话处理（全新会话） |
+| 脏数据（非 JSON） | `console.warn` + 丢弃重建，**页面不崩** |
+| 脏数据（JSON 合法但结构不符） | 同上 |
+| 单条消息 > 4000 字 | 截断存储，避免撑爆配额 |
+| 序列化/写入失败（配额超限） | 只告警，降级为「仅内存」，**不让页面白屏** |
+| 超过 100 条 | 丢弃最早消息，UI 提示「更早的记录已清理」 |
+
+#### 4. 账号隔离与退出登录
+
+- 存储 key 按 userId 分桶，天然隔离；
+- `loadForUser` 发现 `ownerUserId` 与当前用户不一致时，**把上一个账号的记录一并删除**；
+- `userStore.logout()` 中调用 `chatStore.clear()`。
+  依赖方向是 `user → chat`（**单向**），`stores/chat.ts` 不 import `stores/user.ts`，
+  `api/request.ts` 也不反向 import store，因此**不存在循环依赖**。
+
+#### 5. `AiChat.vue` 改造要点
+
+- 移除本地 `messages` / `question` / `Msg` 接口，全部读写 `chatStore`；
+- 欢迎语改为 `v-if="chatStore.isEmpty"`，**只在空会话时渲染**；
+- 输入框 `v-model="chatStore.draftQuestion"`；
+- 发送流程：**先 push 用户消息**（立即持久化）→ 调接口 → push AI 消息；
+  **接口失败也 push 一条失败提示并持久化**，避免「发完就没了」；
+- 头部新增「清空对话」按钮，`ElMessageBox` 二次确认后 `clear()`；
+- **加载时机用 `watch` 而非 `onMounted`**：`/ai-chat` 是公开页，0.15.1 之后路由守卫
+  **不再等待** `/auth/me`，进页面时 `userStore.user` 可能还是 null（后台拉取中）。
+  `watch(() => userStore.user?.id, ..., { immediate: true })` 可覆盖两种时序。
+
+### 三、对应代码位置
+
+| 文件 | 函数 / 区块 | 改动 |
+|---|---|---|
+| `frontend/src/stores/chat.ts` | **新建**（240 行） | `useChatStore` + `ChatMessage` 接口 + 读写/校验工具函数 |
+| `frontend/src/stores/chat.ts` | `readSession` / `writeSession` / `removeSession` / `truncate` | 持久化与降级 |
+| `frontend/src/stores/user.ts` | `logout()` | 增加 `useChatStore().clear()` |
+| `frontend/src/views/student/AiChat.vue` | 模板 `head-right` | 新增「清空对话」按钮 |
+| `frontend/src/views/student/AiChat.vue` | 模板 `messages` 区 | 欢迎语加 `v-if="chatStore.isEmpty"`；`v-for` 改读 `chatStore.messages`（key 用 `m.id`） |
+| `frontend/src/views/student/AiChat.vue` | 模板 `composer` | `v-model` 改绑 `chatStore.draftQuestion` |
+| `frontend/src/views/student/AiChat.vue` | `send()` | 改用 `chatStore.push` / `setDraft`，失败也落记录 |
+| `frontend/src/views/student/AiChat.vue` | `onClearChat()`（新增） | 二次确认后清空 |
+| `frontend/src/views/student/AiChat.vue` | `watch(userStore.user?.id)` / `watch(chatStore.trimmed)` | 加载时机与「更早记录已清理」提示 |
+| `frontend/tests/chat/test_chat_store.cjs` | **新建** | 23 项验收断言 |
+
+### 四、验证流程与实测结果
+
+```bash
+cd frontend
+npm run verify:chat
+```
+
+用 esbuild 打包**真实的** `src/stores/chat.ts`，在 Node 里用真实 pinia 运行，
+sessionStorage 用内存实现打桩 —— 验证的是线上跑的同一份源码。
+
+```
+=== ① 发 3 条 → 切走再切回 ===
+  PASS  切页后仍能读到 3 条  实际 3 条
+
+=== ② 刷新页面（重建 pinia）===
+  PASS  刷新后 3 条仍在  实际 3 条
+  PASS  刷新后内容一致
+  PASS  消息带 id 与 createdAt
+
+=== ③ 关闭标签页重新打开 ===
+  PASS  重新打开是全新空会话
+  PASS  欢迎语条件成立（isEmpty）
+
+=== ④ 输入框草稿跨页保留 ===
+  PASS  草稿仍在  实际 "河南本科批平行志"
+
+=== ⑤ 换账号登录 ===
+  PASS  A 账号有 2 条
+  PASS  B 账号看不到 A 的记录  实际 0 条
+  PASS  A 的存储键已被清除
+  PASS  B 拥有独立的存储键
+  PASS  B 的记录独立保存
+
+=== ⑥ 连续发送超过 100 条 ===
+  PASS  只保留 100 条  实际 100 条
+  PASS  保留的是最新 100 条
+  PASS  trimmed 标志已置位（UI 可提示）
+  PASS  写入不卡顿（26ms < 3000ms）
+
+=== ⑦ 脏 JSON 降级 ===
+  PASS  页面不崩，按空会话处理
+  PASS  控制台有告警  （[CHAT] 会话数据解析失败（非合法 JSON），已丢弃重建…）
+  PASS  结构不符也降级为空会话
+  PASS  结构不符有告警
+
+=== 附加：超长截断与写入失败降级 ===
+  PASS  超长文本被截断到 4000  实际 4000 字
+  PASS  写入失败不抛异常（不白屏）
+  PASS  写入失败有告警
+
+===== 汇总 =====
+共 23 项，通过 23 项，失败 0 项
+```
+
+**回归**：`npm run build`（vue-tsc + vite）通过；`npm run verify:auth`（0.15.1 的 401 判据与守卫结构）
+仍全 PASS；后端**未做任何改动**。
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 关闭标签页即丢 | sessionStorage 的固有语义，符合「会话级缓存」定位；要跨会话保留需改用 localStorage + 账号隔离设计 |
+| 草稿每次按键都写一次 | JSON 序列化 + 同步写入，实测 105 条消息累计 26ms，无卡顿；若消息量再增可加节流 |
+| `AiChat.vue` 387 行 | 超出「单文件 ≤300 行」约定；该文件改动前已 344 行，本次为功能改造未做范围外重构 |
+| 浏览器手工复核 | 上述断言覆盖 store 全部逻辑；「点击路由跳转」这一交互层未做浏览器实测（本机 playwright 不可用） |
 
 ---
 
