@@ -1056,8 +1056,8 @@ graph TD
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
 | POST | `/api/ai/counselor` | **云端心理师（0.13.0）** 多轮谈心 / 疏导 / 画像采集。强制 Ali 通道、不降级本地；注入 `summary_text`；响应 `{answer, model, elapsed_ms, profile_injected}` | 需登录 | `Counselor.vue:send()` → `counselorChat()` |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**） | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
-| POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件 | 需登录 | `api/ai.ts:parseIntent()`（预留） |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**；**0.15.0 起走 AI 专用线程池，与认证接口隔离**；**0.15.1 起在途超限返回 503「AI 服务繁忙」**) | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件（0.15.1 起走 AI 专用线程池） | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路**（0.11.0 起走全国总表引擎，响应新增 `rank` / `tiers`；省份+科类非法返回 400） | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
 | POST | `/api/recommend/national` | 0.11.0 纯全国引擎版：只返回 `{rank, province, category, year, tiers}` | 公开 | 预留（只要结构化结果的场景） |
@@ -1175,6 +1175,8 @@ PLAN_FINAL_PER_TIER=8   # 终稿每档条数
 AUTH_TIMEOUT_SECONDS=30        # 认证接口超时预算（前端 axios 同为 30s）
 AI_THREADPOOL_SIZE=8           # AI 专用线程池，与认证彻底隔离
 AI_QUEUE_WAIT_WARN_SECONDS=5   # 排队超时告警阈值
+# 0.15.1 AI 过载保护：在途上限 = AI_THREADPOOL_SIZE × 本系数，超出直接 503
+AI_MAX_INFLIGHT_FACTOR=2
 ```
 
 > ★ **`.env` 必须在 `backend/` 目录**（不是 `backend/app/`）。
@@ -1380,6 +1382,10 @@ python test_plan_workflow.py --real  # 同上 + 真实 HTTP 三段式流程
 # 0.15.0：认证线程隔离验收（需先启动服务）
 python -m tests.auth.test_auth_isolation            # 6 并发 AI 期间测 /auth/me 与登录
 python -m tests.auth.test_auth_isolation --concurrency 12   # 更严苛的并发
+
+# 0.15.1：前端判据与守卫结构验证（无需启动服务）
+cd frontend
+npm run verify:auth    # 401 同步登出 / 超时保留 token / 守卫公开页不阻塞
 ```
 
 ---
@@ -1397,6 +1403,7 @@ python -m tests.auth.test_auth_isolation --concurrency 12   # 更严苛的并发
 | 回答很慢（60 秒以上） | 启用了 Agent 模式（`AGENT_FAST_MODE=0`），本地 4b 要跑两轮推理 | 0.13.1 默认 `AGENT_FAST_MODE=1` 走确定性链路（实测 9.5 秒）。若确认是 Agent 模式，属正常范围（60-90 秒），前端会显示「约需 1 分钟」；换 GPU 或非思考模型可改善 |
 | **刷新页面就掉登录 / 点登录一直转圈** | 0.15.0 前：`/auth/me` 超时被当成登录失效清 token；根因是 AI 请求占满 anyio 线程池，认证接口排不上 | 0.15.0 已修：① 只有 **401** 才登出，超时/5xx 一律保留 token；② AI 改用独立线程池（`AI_THREADPOOL_SIZE`），认证不再排队；③ 认证接口独立 30s 超时 + 连接失败重试。排查：看日志 `[AUTH] /me 耗时=` 是否 <100ms、有无 `[AI] 线程池排队告警` |
 | AI 忙碌时登录/认证变慢 | AI 与认证共用线程池 | 0.15.0 已隔离。若仍慢，调大 `AI_THREADPOOL_SIZE`（默认 8）观察 `[AI] 线程池排队告警` 是否消失 |
+| AI 问答返回 503「AI 服务繁忙」 | 0.15.1 过载保护：在途数达到 `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR`（默认 16）时直接拒绝，不再无界排队 | 属预期行为，稍后重试即可。若频繁出现，调大 `AI_THREADPOOL_SIZE` 或 `AI_MAX_INFLIGHT_FACTOR`；日志 `[AI] 过载拒绝(入口)` 可确认 |
 | 政策库/图谱指示灯是红的 | 知识库无文档 / Neo4j 未启动 | 悬浮指示灯看具体原因。政策库红→管理员上传政策文件；图谱红→按 **6.3 节**启动 Neo4j **并执行 `graph_builder` 建库**，然后重启后端（状态接口有 30 秒缓存，稍等或刷新） |
 | AI 回答里出现「好的，用户问…」这类旁白 | qwen3 是思考型模型，`think:false` 对其无效，只能靠 `/no_think` 抑制，但自由作答时仍会漏出 | 已在 `runner.clean_answer()` 里剥离开头的推理旁白；若仍出现，可调小 `AGENT_ANSWER_TOKENS` 或换非思考模型 |
 | 工具一直只有 `tool_search_vector` 被调用 | `tool_search_mysql` 需要问题里出现具体院校/专业名（否则为避免全表扫描会主动 skip）；`tool_search_graph` 需要 Neo4j 启动 | 两类都属于设计行为。确认 Neo4j 已启动可看启动日志是否有红色 `[WARN] Neo4j 未启动` |
