@@ -193,6 +193,7 @@ backend/
 ├── test_user_profile.py          <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 服务编排 + 画像注入 Prompt + --real 端到端）</span>
 ├── test_hotfix_0_12_1.py         <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 主观咨询放行 + 规划师模式 + 超时贯通</span>
 ├── test_agent_0_13_0.py          <span style="color:#888">// 0.13.0：Agent 工具调用（4 条路径）+ 答案清洗 + 云端心理师 + 报告隐私 AST 检查 + --real</span>
+├── test_hotfix_0_13_1.py         <span style="color:#888">// 0.13.1：极速模式配置 + 全程旁白过滤 + 生成轮兜底前缀 + 状态接口契约/缓存 + 延迟断言</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -935,6 +936,30 @@ graph TD
 3. 本机 CPU 推理约 10 token/s，两轮 Agent 需 110-155 秒 → 前端加思考动画、
    `AGENT_TOTAL_TIMEOUT=200`、生成轮单独 110s 超时。
 
+**0.13.1 极速模式（默认开启）**：
+
+| 开关 | 链路 | 实测耗时 | 用途 |
+|---|---|---|---|
+| `AGENT_FAST_MODE=1`（默认） | 0.12.x 确定性融合链路（最终生成走 Ali） | **9.5s** | 日常使用 / 演示 |
+| `AGENT_FAST_MODE=0` | Agent 两轮工具推理（本地 4b） | 60-90s | 展示 Function Calling 能力 |
+
+调优后的 Agent 预算（0.13.1）：
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `AGENT_PLAN_TOKENS` | 350 | 实测可靠下限（150/250 拿不到 `tool_calls`） |
+| `AGENT_ANSWER_TOKENS` | 300 | 回答 200-300 字够用 |
+| `AGENT_PLAN_TIMEOUT` | 60s | 规划轮愿意等 |
+| `AGENT_ANSWER_TIMEOUT` | 25s | 生成轮快速失败，立刻返回检索摘要 |
+| `AGENT_TOTAL_TIMEOUT` | 90s | 整体上限 |
+
+生成轮超时后的回答会带明确前缀：
+
+```
+（受限于本地算力，已为你直接提取检索结果）
+1. 河南本科批实行平行志愿，分数优先、遵循志愿、一轮投档。…
+```
+
 ### 4.10 主链九：心理与画像空间（0.13.0）
 
 入口：`AiChat.vue` 标题栏「想让我更了解你吗？」→ `/counselor` → `student/Counselor.vue`
@@ -978,6 +1003,7 @@ graph TD
 | POST | `/api/recommend/national` | 0.11.0 纯全国引擎版：只返回 `{rank, province, category, year, tiers}` | 公开 | 预留（只要结构化结果的场景） |
 | POST | `/api/recommend/ai-reasons` | 批量生成 AI 理由 | 公开 | 预留 |
 | GET | `/api/meta/options` | 年份/科类/批次下拉 + `provinces` / `categories_map` / `province_modes`（0.11.1 起前端三处页面均用它做省份→科类级联） | 公开 | `Volunteer.vue` / `University.vue` / `Home.vue` → `metaOptions()` |
+| GET | `/api/meta/agent-status` | **AI 环境状态（0.13.1）**：`vector_ready` / `vector_count` / `graph_ready` / `graph_error` / `local_model` / `agent_mode`，30 秒 TTL 缓存 | 公开 | `AiChat.vue:loadStatus()` → `agentStatus()` |
 | GET | `/api/score-to-rank` | 分数 → 位次 | 公开 | 预留（页面走 score-check） |
 | GET | `/api/rank-to-score` | 位次 → 分数 | 公开 | 预留 |
 | POST | `/api/student/profile` | 保存考生信息并返回换算位次 | 公开 | 预留 |
@@ -1056,13 +1082,17 @@ OLLAMA_MODEL=qwen3:4b
 OLLAMA_TIMEOUT=120
 OLLAMA_EMBED_MODEL=nomic-embed-text
 
-# 0.13.0 Agent（Function Calling）
+# Agent（Function Calling）
 AGENT_ENABLED=1
+# 0.13.1：极速模式默认开启（走确定性链路，实测 9.5s）；
+#         设为 0 才启用 Agent 两轮工具推理（60-90s），用于演示
+AGENT_FAST_MODE=1
 AGENT_MAX_STEPS=2
-AGENT_PLAN_TOKENS=768        # 规划轮：太小会拿不到 tool_calls
-AGENT_ANSWER_TOKENS=768      # 生成轮：qwen3 无法真正关思考，需留足预算
-AGENT_PLAN_TIMEOUT=90
-AGENT_ANSWER_TIMEOUT=110
+AGENT_PLAN_TOKENS=350        # 实测可靠下限（150/250 拿不到 tool_calls）
+AGENT_ANSWER_TOKENS=300      # 回答 200-300 字够用
+AGENT_PLAN_TIMEOUT=60
+AGENT_ANSWER_TIMEOUT=25      # 生成轮快速失败，立刻返回检索摘要
+AGENT_TOTAL_TIMEOUT=90
 
 # 0.13.0 云端心理师
 COUNSELOR_TIMEOUT=60
@@ -1121,6 +1151,8 @@ python smoke_test.py         # 14 个业务接口
 python smoke_rag.py          # 登录 → 上传 → 检索 → RAG 问答 → 删除
 python test_agent_0_13_0.py  # 0.13.0：Agent 工具调用 / 心理师 / 报告隐私隔离（桩版秒级）
 python test_agent_0_13_0.py --real   # 同上 + 真实 HTTP（需服务与 Ollama，约 4-6 分钟）
+python test_hotfix_0_13_1.py         # 0.13.1：极速模式 / 答案清洗 / 状态接口（桩版秒级）
+python test_hotfix_0_13_1.py --real  # 同上 + 延迟测量（校验 Fast Mode <30s）
 ```
 
 ---
@@ -1135,7 +1167,8 @@ python test_agent_0_13_0.py --real   # 同上 + 真实 HTTP（需服务与 Ollam
 | 回答很慢（>10s） | 检索前预处理、多路召回、相关性判断各自一次网络往返 | 已做：关思考（9.7s→2.6s）、ThreadPool 并发、embedding 批量 + 缓存、短问句跳过预处理。仍慢可设 `ALI_ENABLE_THINKING=0`、`QUERY_PREPROCESS_MIN_LEN` 调大、`ADVANCED_RAG_STRATEGY=standard` |
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
 | 上传成功但检索为空 | Ollama / Ali embedding 都失败，或 `status=失败` | 看 `GET /api/knowledge/status` 与后端日志 `[LLM]` 开头的告警 |
-| 回答很慢（100 秒以上） | 0.13.0 本地 Agent 要跑两轮推理（选工具 + 生成答案），本机 CPU 推理约 10 token/s | 属正常范围（实测 110-155 秒）。换 GPU 或改用非思考模型（如 `qwen2.5:3b-instruct`）可大幅改善；`AGENT_ENABLED=0` 可退回 0.12.x 的确定性检索链路（约 40 秒） |
+| 回答很慢（60 秒以上） | 启用了 Agent 模式（`AGENT_FAST_MODE=0`），本地 4b 要跑两轮推理 | 0.13.1 默认 `AGENT_FAST_MODE=1` 走确定性链路（实测 9.5 秒）。若确认是 Agent 模式，属正常范围（60-90 秒），前端会显示「约需 1 分钟」；换 GPU 或非思考模型可改善 |
+| 政策库/图谱指示灯是红的 | 知识库无文档 / Neo4j 未启动 | 悬浮指示灯看具体原因。政策库红→管理员上传政策文件；图谱红→ `"...\neo4j.bat" console` 启动 Neo4j 后重启后端（状态接口有 30 秒缓存，稍等或刷新） |
 | AI 回答里出现「好的，用户问…」这类旁白 | qwen3 是思考型模型，`think:false` 对其无效，只能靠 `/no_think` 抑制，但自由作答时仍会漏出 | 已在 `runner.clean_answer()` 里剥离开头的推理旁白；若仍出现，可调小 `AGENT_ANSWER_TOKENS` 或换非思考模型 |
 | 工具一直只有 `tool_search_vector` 被调用 | `tool_search_mysql` 需要问题里出现具体院校/专业名（否则为避免全表扫描会主动 skip）；`tool_search_graph` 需要 Neo4j 启动 | 两类都属于设计行为。确认 Neo4j 已启动可看启动日志是否有红色 `[WARN] Neo4j 未启动` |
 | 知识库管理里看不到用户上传的报告 | **这是正确行为**（0.13.0 隐私隔离） | 用户报告走 `/api/profile/report-upload`，只写 `user_profiles`，不进 Chroma、不写台账 |

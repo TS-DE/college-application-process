@@ -148,29 +148,36 @@ class Settings:
     # 是否启用 Agent 模式（默认开启）。关闭后 /api/ai/chat 回落到 0.12.x 的三路融合，
     # 保留这条回退路径是为了「模型不支持 tools 时系统仍可用」。
     AGENT_ENABLED: bool = _env("AGENT_ENABLED", "1") not in {"0", "false", "False"}
+    # 0.13.1：**极速模式**（默认开启）。
+    # 实测纯 CPU 下 qwen3:4b 跑两轮 Agent 要 150 秒（规划 32-55s + 工具 + 生成 70-90s），
+    # 演示不可接受；而 0.12.x 的确定性融合链路最终生成走 Ali 通道，通常 6-15 秒。
+    # 默认走快速链路；把 AGENT_FAST_MODE 设为 0 才启用 Agent（用于演示工具调用能力）。
+    AGENT_FAST_MODE: bool = _env("AGENT_FAST_MODE", "1") not in {"0", "false", "False"}
     # 单轮问答最多允许几轮「模型 → 工具 → 模型」，防止小模型陷入循环。
     # 默认 2：实测本机 CPU 推理单次约 20-45 秒，3 轮必然超过前端耐心上限。
     AGENT_MAX_STEPS: int = int(_env("AGENT_MAX_STEPS", "2"))
     # 单个工具的执行超时（秒）：向量检索 ~1s、MySQL ~1s、图谱可能 40s，分开给预算
     AGENT_TOOL_TIMEOUT: float = float(_env("AGENT_TOOL_TIMEOUT", "60"))
-    # 规划轮 / 生成轮的 token 预算。实测 qwen3:4b 会**先把推理写进 content**
-    # （Ollama 的 think:false 对 qwen3 不生效，只能靠 `/no_think` 软开关抑制），
-    # 预算给到 512 时约一半概率推理没写完就被截断（done_reason=length）→ 无 tool_calls；
-    # 给到 768 实测 3/3 稳定返回。这是「可靠性 vs 耗时」的实测折中。
-    AGENT_PLAN_TOKENS: int = int(_env("AGENT_PLAN_TOKENS", "768"))
-    # 生成轮 512：回答本身 300 字以内，留一半给残留推理；给到 768 会让
-    # 本机 CPU 推理超过 120 秒的 Ollama 超时（实测打满后返回空）。
-    AGENT_ANSWER_TOKENS: int = int(_env("AGENT_ANSWER_TOKENS", "768"))
+    # 规划轮 / 生成轮的 token 预算。
+    #
+    # ★ 0.13.1 实测（短 Prompt + /no_think + 本机 CPU）：
+    #     num_predict=150 → 3/3 拿不到 tool_calls（推理吃光预算，done_reason=length）
+    #     num_predict=250 → 1/2 拿到（政策类问题仍失败）
+    #     num_predict=350 → 2/2 拿到，耗时 20-27s  ← 可靠下限
+    #   任务书建议的 150 不可行，故取 350；配合精简 Prompt，
+    #   规划轮从 0.13.0 的 32-55s 压到 20-27s。
+    AGENT_PLAN_TOKENS: int = int(_env("AGENT_PLAN_TOKENS", "350"))
+    # 生成轮 300：回答本身 200-300 字即可；超出就走兜底（返回清洗后的检索摘要）
+    AGENT_ANSWER_TOKENS: int = int(_env("AGENT_ANSWER_TOKENS", "300"))
     # 单路工具结果喂回模型的字符上限（越长越慢）
     AGENT_TOOL_TEXT_LIMIT: int = int(_env("AGENT_TOOL_TEXT_LIMIT", "600"))
-    # 分工超时：规划轮只输出 tool_calls，需要留给推理；生成轮必须快速失败，
-    # 否则一旦卡住会把整体拖到 2 分钟以上（实测曾有 160 秒的失败案例）。
-    AGENT_PLAN_TIMEOUT: float = float(_env("AGENT_PLAN_TIMEOUT", "90"))
-    AGENT_ANSWER_TIMEOUT: float = float(_env("AGENT_ANSWER_TIMEOUT", "110"))
-    # Agent 链路整体预算（比旧链路宽，因为本地 4b 本身慢）
-    # 实测本机（CPU 推理，约 10 token/s）：规划 32-55s + 工具 5-10s + 生成 70-90s，
-    # 全链路 110-155s 属正常范围；前端配合显示「AI 正在思考」动画。
-    AGENT_TOTAL_TIMEOUT: float = float(_env("AGENT_TOTAL_TIMEOUT", "200"))
+    # 分工超时：规划轮愿意等；生成轮必须快速失败——
+    # 0.13.0 实测生成轮 110s 仍会超时，白等 1 分半；0.13.1 压到 25s，
+    # 超时立刻返回「已为你直接提取检索结果」，整体控制在 60s 内。
+    AGENT_PLAN_TIMEOUT: float = float(_env("AGENT_PLAN_TIMEOUT", "60"))
+    AGENT_ANSWER_TIMEOUT: float = float(_env("AGENT_ANSWER_TIMEOUT", "25"))
+    # Agent 链路整体预算：规划 27s + 工具 10s + 生成 25s ≈ 62s，留余量取 90
+    AGENT_TOTAL_TIMEOUT: float = float(_env("AGENT_TOTAL_TIMEOUT", "90"))
     # 传给本地模型的候选工具条数上限（工具太多小模型会选错）
     AGENT_MAX_TOOLS: int = int(_env("AGENT_MAX_TOOLS", "8"))
     # 是否让 Agent 看到用户画像（本地模型上下文小，样本长时可关掉）

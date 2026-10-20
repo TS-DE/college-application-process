@@ -147,8 +147,23 @@ async def chat(
         flush=True,
     )
 
-    # ---- ① 本地 Agent（默认）----
-    use_agent = bool(payload.get("use_agent", True)) and settings.AGENT_ENABLED
+    # ---- ① 本地 Agent（0.13.1 起默认让位给极速模式）----
+    # 决策顺序：
+    #   1) 请求显式 use_agent=false → 不用 Agent
+    #   2) AGENT_ENABLED=0          → 不用 Agent
+    #   3) AGENT_FAST_MODE=1        → 不用 Agent（默认，走 0.12.x 快速链路，6-15s）
+    #   4) 其余情况                 → 走 Agent（演示工具调用时把 AGENT_FAST_MODE 设为 0）
+    use_agent = (
+        bool(payload.get("use_agent", True))
+        and settings.AGENT_ENABLED
+        and not settings.AGENT_FAST_MODE
+    )
+    if not use_agent and settings.AGENT_FAST_MODE and settings.AGENT_ENABLED:
+        print(
+            "[AI] 极速模式：跳过 Agent 两轮推理，直接走确定性融合链路"
+            "（设 AGENT_FAST_MODE=0 可启用 Agent 演示）",
+            flush=True,
+        )
     if use_agent:
         try:
             # ★ 用 AGENT_TOTAL_TIMEOUT（200s）而不是 CHAT_TOTAL_TIMEOUT（100s）：
