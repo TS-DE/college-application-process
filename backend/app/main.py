@@ -15,19 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.config import settings
 from app.database import TableNotFound, ensure_columns, ensure_indexes, ensure_tables
-from app.routers import (
-    ai,
-    auth,
-    eval as eval_router,
-    knowledge,
-    meta,
-    plan as plan_router,
-    profile as profile_router,
-    recommend,
-    stats,
-    student,
-    university,
-)
+from app.api import ALL_ROUTERS
 
 app = FastAPI(
     title="高考志愿填报系统",
@@ -43,23 +31,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 业务路由
-app.include_router(student.router)
-app.include_router(recommend.router)
-app.include_router(university.router)
-app.include_router(meta.router)
-app.include_router(ai.router)
-# 统计（首页地图）
-app.include_router(stats.router)
-# 鉴权与知识库（RAG）
-app.include_router(auth.router)
-app.include_router(knowledge.router)
-# RAG 量化评估（0.8.0）
-app.include_router(eval_router.router)
-# 用户画像（0.12.0）
-app.include_router(profile_router.router)
-# 人机协同志愿规划（0.14.0）—— 独立模块，不影响上面的 RAG / Agent
-app.include_router(plan_router.router)
+# 业务路由：0.17.0 起集中在 app/api/__init__.py 汇总，此处一处注册
+# 顺序：推荐域 → 对话域（本地问答 / 云端心理师）→ 统计 → 账号 → 知识库 → 评估 → 规划
+for _router in ALL_ROUTERS:
+    app.include_router(_router)
 
 
 # 健康检查缓存：避免每次 /api/health 都探测 Ollama / Chroma，防止 AI 通道拖慢非 AI 接口

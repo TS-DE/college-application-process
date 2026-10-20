@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.routers.auth import get_current_user
+from app.api.account.auth_router import get_current_user
 from app.schemas.profile import (
     ProfileBasicIn,
     ProfileOut,

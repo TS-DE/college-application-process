@@ -1,26 +1,11 @@
-"""AI 接口。
+"""AI 问答入口：/status、/parse-intent、/recommend-reason、/chat。
 
-## 两个角色，两条链路
-
-| 接口 | 模型 | 用途 |
-|---|---|---|
-| `POST /api/ai/chat` | **本地** `qwen3:4b`（Agent / Function Calling） | 政策、分数、院校查询 |
-| `POST /api/ai/counselor` | **云端** `qwen3.7-flash` | 心理疏导、多轮谈心、画像采集 |
-
-0.13.0 变更：
-  · `/chat` 默认走 **Agent 模式**——把「向量库 / MySQL / 图谱」封装成工具，
-    由本地模型自主决定查哪一路，不再由代码写死检索顺序；
-  · 前端不再有「RAG 增强」开关，进页面即默认启用；
-  · 新增 `/counselor`，**强制云端通道**（本地 4b 的情感推理不足，不降级）。
-
-0.12.1 保留：整体超时可配置、超时返回 504、分阶段耗时日志。
+0.17.0 从 `routers/ai.py` 拆出，路由路径、响应模型、函数体均未改动。
+线程池与过载保护在 `services/llm/ai_executor.py`。
 """
 import asyncio
-import functools
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict
+from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -28,153 +13,20 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.routers.auth import get_current_user
-from app.schemas.ai import CounselorIn, CounselorOut
+from app.api.account.auth_router import get_current_user
 from app.schemas.student import (
     ParseIntentIn,
     ParseIntentOut,
     RecommendReasonIn,
     RecommendReasonOut,
 )
-
-router = APIRouter(prefix="/api/ai", tags=["ai"])
-
-# ============================================================ AI 专用线程池（0.15.0）
-#
-# ## 为什么必须拆出来
-# FastAPI 的同步 `def` 端点与 `run_in_threadpool` 共用 anyio 默认线程池（上限 40）。
-# `/chat` 单次可占用 100-200 秒，几个并发请求就能把池子占满，
-# 此时同步的 `/auth/me`、`/api/students/*` 全部排队，
-# 前端 10 秒超时后误判为「登录失效」→ 清 token → 用户被踢出登录。
-#
-# 拆出独立池后，**AI 再忙也不会挤占认证与普通查询的线程**。
-# 池大小取 `AI_THREADPOOL_SIZE`（默认 8）：本机 CPU 推理并发过高只会互相拖慢。
-_AI_EXECUTOR = ThreadPoolExecutor(
-    max_workers=settings.AI_THREADPOOL_SIZE,
-    thread_name_prefix="ai-worker",
+from app.services.llm.ai_executor import (
+    _load_profile_summary,
+    _reject_if_overloaded,
+    _run_ai,
 )
 
-
-def _timed_call(recorder: Dict[str, Any], fn, args: tuple) -> Any:
-    """在线程内记录「真正开始执行」的时刻，用于算排队时间。"""
-    recorder["started_at"] = time.perf_counter()
-    return fn(*args)
-
-
-# ============================================================ 在途计数（0.15.1 过载保护）
-#
-# ## 为什么线程池还不够
-# `ThreadPoolExecutor` 的**队列是无界的**：池子（8 线程）占满后，
-# 后续任务会无限排队，直到各自超时才返回 504 —— 用户白等 25-200 秒，
-# 期间连接与内存都还占着。对「AI 推理」这种重任务，排队不如直接拒绝。
-#
-# 上限 = `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR`（默认 8×2=16），
-# 含义是「跑着一批 + 等一批」；再多就说明确实过载，立刻 503 更诚实。
-_INFLIGHT_LOCK = threading.Lock()
-_inflight_count = 0
-
-
-def _inflight_limit() -> int:
-    return max(1, settings.AI_THREADPOOL_SIZE * settings.AI_MAX_INFLIGHT_FACTOR)
-
-
-def _try_acquire_inflight() -> bool:
-    """尝试占用一个在途名额；超过上限返回 False。"""
-    global _inflight_count
-    with _INFLIGHT_LOCK:
-        if _inflight_count >= _inflight_limit():
-            return False
-        _inflight_count += 1
-        return True
-
-
-def _release_inflight() -> None:
-    """释放名额（`max(0, …)` 防御性下限，避免任何路径把计数压成负数）。"""
-    global _inflight_count
-    with _INFLIGHT_LOCK:
-        _inflight_count = max(0, _inflight_count - 1)
-
-
-def _current_inflight() -> int:
-    """当前在途数（供日志与测试读取）。"""
-    with _INFLIGHT_LOCK:
-        return _inflight_count
-
-
-def _reject_if_overloaded(label: str) -> None:
-    """请求**入口**的快速预检（0.15.1）。
-
-    与 `_run_ai` 内的检查分工：
-      · 这里只读计数、不占名额，作用是「已过载就别再跑读画像等前置步骤」；
-      · `_run_ai` 里的 acquire 才是原子的准入控制，负责并发竞态下的最终裁决。
-
-    实测：20 个请求同刻到达时，若等到第一个 `_run_ai` 才发现过载，
-    请求已经排过一轮队（约 2 秒）才被拒；入口预检能把这段省掉。
-    """
-    current = _current_inflight()
-    if current >= _inflight_limit():
-        print(
-            f"[AI] 过载拒绝(入口) {label}：在途 {current}/{_inflight_limit()}",
-            flush=True,
-        )
-        raise HTTPException(status_code=503, detail="AI 服务繁忙，请稍后重试")
-
-
-async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
-    """把阻塞调用提交到 **AI 专用线程池**，施加超时，并做过载保护。
-
-    与 `run_in_threadpool` 的区别有三点：
-      1. 用 `_AI_EXECUTOR` 而非 anyio 默认池 → 不挤占认证/业务接口；
-      2. 记录**排队耗时**与执行耗时，超过 `AI_QUEUE_WAIT_WARN_SECONDS` 打告警；
-      3. 在途数超过 `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR` 时
-         **立刻 503**，不让请求在无界队列里空等到超时。
-
-    超时后 `wait_for` 会取消 future，但**线程本身无法被强制终止**
-    （Python 的已知限制）；被放弃的任务仍会跑完再释放槽位。
-    因此 `timeout` 应小于前端 axios 超时，让前端先拿到明确的 504。
-
-    :raises HTTPException: 503（过载）
-    """
-    if not _try_acquire_inflight():
-        print(
-            f"[AI] 过载拒绝 {label}：在途 {_current_inflight()}/{_inflight_limit()}"
-            f"（池大小 {settings.AI_THREADPOOL_SIZE} × 系数 {settings.AI_MAX_INFLIGHT_FACTOR}）",
-            flush=True,
-        )
-        raise HTTPException(status_code=503, detail="AI 服务繁忙，请稍后重试")
-
-    try:
-        loop = asyncio.get_running_loop()
-        recorder: Dict[str, Any] = {"started_at": 0.0}
-        submitted_at = time.perf_counter()
-
-        future = loop.run_in_executor(
-            _AI_EXECUTOR, functools.partial(_timed_call, recorder, fn, args)
-        )
-        try:
-            return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            waited = time.perf_counter() - submitted_at
-            print(
-                f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
-                f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
-                flush=True,
-            )
-            raise
-        finally:
-            if recorder["started_at"]:
-                queue_wait = recorder["started_at"] - submitted_at
-                if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
-                    print(
-                        f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
-                        f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
-                        f"池大小 {settings.AI_THREADPOOL_SIZE}）",
-                        flush=True,
-                    )
-    finally:
-        # ★ 必须放在最外层 finally：超时、异常、正常返回都要归零，
-        #   否则一次失败就永久吃掉一个名额，最终整个 AI 服务被 503 锁死。
-        _release_inflight()
+router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 
 @router.get("/status")
@@ -237,25 +89,6 @@ async def recommend_reason(payload: RecommendReasonIn) -> RecommendReasonOut:
         label="recommend-reason",
     )
     return RecommendReasonOut(reason=text, source=source)
-
-
-def _load_profile_summary(db: Session, user_id: int) -> str:
-    """读取用户画像总结（供 Prompt 注入）。
-
-    单独抽成函数是为了让异常处理集中在一处：
-    画像只是「锦上添花」，任何失败都必须静默降级为空串，绝不能让问答 500。
-    """
-    try:
-        from app.services.profile import ProfileRepository, ProfileService
-
-        return ProfileService(ProfileRepository(db)).get_summary_for_prompt(user_id)
-    except Exception as exc:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).info(
-            "[PROFILE] 读取画像失败，按无画像处理：%s", exc.__class__.__name__
-        )
-        return ""
 
 
 @router.post("/chat")
@@ -415,66 +248,6 @@ def _run_agent_sync(
     out = answer.to_dict()
     out["profile_injected"] = bool(profile_context)
     return out
-
-
-@router.post("/counselor", response_model=CounselorOut)
-async def counselor(
-    body: CounselorIn,
-    user: Dict = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> CounselorOut:
-    """云端「心理师 / 画像构建师」多轮对话（0.13.0）。
-
-    ## 与 /chat 的分工
-    · `/chat`   本地 qwen3:4b + 工具，查政策与数据，毫秒级，数据不出本机；
-    · `/counselor` 云端 qwen3.7-flash，谈心、疏导、采集画像，**不降级到本地**。
-
-    ## 为什么必须登录
-    画像与历史都挂在 `user_id` 上；同时把 `summary_text` 注入 system prompt，
-    让云端模型知道「这个考生已经说过什么」，避免反复问同样的问题。
-    """
-    from app.services.counselor import CounselorService
-
-    _t0 = time.time()
-    # 0.15.1：入口预检，过载时立刻拒绝
-    _reject_if_overloaded("counselor")
-
-    # 0.15.0：读画像与云端生成都走 AI 专用线程池，不挤占认证接口
-    profile_summary = await _run_ai(
-        _load_profile_summary,
-        db,
-        user["id"],
-        timeout=settings.AUTH_TIMEOUT_SECONDS,
-        label="read-profile",
-    )
-    _t_profile = time.time()
-
-    service = CounselorService()
-    result = await _run_ai(
-        service.chat,
-        [m.model_dump() for m in body.messages],
-        profile_summary,
-        timeout=settings.COUNSELOR_TIMEOUT,
-        label="counselor",
-    )
-    if result.get("error"):
-        print(f"[COUNSELOR] 失败 user={user['id']}：{result['error']}", flush=True)
-        raise HTTPException(status_code=503, detail=result["error"])
-
-    print(
-        f"[COUNSELOR] user={user['id']} 读画像={_t_profile - _t0:.2f}s "
-        f"生成={result.get('elapsed_ms', 0)}ms model={result.get('model')} "
-        f"画像注入={result.get('profile_injected')}",
-        flush=True,
-    )
-    return CounselorOut(
-        answer=result["answer"],
-        source=result["source"],
-        model=result.get("model"),
-        elapsed_ms=result.get("elapsed_ms", 0),
-        profile_injected=result.get("profile_injected", False),
-        error=None,
-    )
 
 
 def _chat_sync(payload: dict, profile_context: str = "") -> dict:

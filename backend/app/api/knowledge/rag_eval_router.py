@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from app.config import settings
-from app.routers.auth import get_current_admin
+from app.api.account.auth_router import get_current_admin
 from app.services.eval.auto_tuner import AutoTuner
 from app.services.eval.data_builder import EvalDataBuilder, ProjectRAGRunner
 from app.services.eval.diagnoser import RAGDiagnoser

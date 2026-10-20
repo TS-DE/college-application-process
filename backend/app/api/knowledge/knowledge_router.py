@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.knowledge import KnowledgeFile
 from app.models.user import User
-from app.routers.auth import get_current_admin, get_current_user
+from app.api.account.auth_router import get_current_admin, get_current_user
 from app.schemas.knowledge import (
     ChunkHit,
     KnowledgeFileOut,
