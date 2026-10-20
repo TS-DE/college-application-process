@@ -3,9 +3,12 @@
 - 使用 OAuth2PasswordBearer + python-jose(JWT) + passlib(bcrypt)
 - get_current_user：解析 Token；get_current_admin：校验 role=admin
 """
-from typing import Dict
+import asyncio
+import time
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,10 +38,14 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 
 # ---------------- 依赖注入 ----------------
 
-def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db),
-) -> Dict:
+def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict:
+    """解析 JWT 并返回用户身份（**纯 CPU 计算，不碰数据库/外部服务**）。
+
+    0.15.0：移除原先未使用的 `db: Session = Depends(get_db)` 参数。
+    它虽未被函数体引用，但 FastAPI 仍会为**每一次鉴权**从连接池取一个会话，
+    在 AI 请求把线程池占满时，这一步本身就是额外的排队点。
+    保持「只解码、只读 payload」是这条依赖能被高频调用的前提。
+    """
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -119,9 +126,41 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
     return UserOut.model_validate(user)
 
 
+def _fetch_user(db: Session, user_id: int) -> Optional[User]:
+    """同步 ORM 读取（在线程池中执行，不占用事件循环）。"""
+    return db.get(User, user_id)
+
+
 @router.get("/me", response_model=UserOut)
-def me(user: Dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    db_user = db.get(User, user["id"])
+async def me(user: Dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """当前用户信息。
+
+    0.15.0：改为 `async def` + 线程池执行 DB 访问。
+    此前是同步 `def`，由 anyio 默认线程池调度；AI 请求把池子占满时，
+    这个「刷新页面必调一次」的接口就要排队，前端 10 秒超时后误判掉登录。
+    现在它走独立调度，并用 `AUTH_TIMEOUT_SECONDS` 兜底，超时直接 503
+    （5xx 会让前端**保留 token**，而不是登出）。
+    """
+    _t0 = time.perf_counter()
+    try:
+        db_user = await asyncio.wait_for(
+            run_in_threadpool(_fetch_user, db, user["id"]),
+            timeout=settings.AUTH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        print(
+            f"[AUTH] /me 超时 >{settings.AUTH_TIMEOUT_SECONDS}s user={user['id']}",
+            flush=True,
+        )
+        raise HTTPException(
+            status_code=503, detail="服务繁忙，请稍后重试（登录状态已保留）"
+        ) from None
+    finally:
+        print(
+            f"[AUTH] /me 耗时={(time.perf_counter() - _t0) * 1000:.0f}ms user={user['id']}",
+            flush=True,
+        )
+
     if db_user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     return UserOut.model_validate(db_user)
