@@ -35,7 +35,7 @@ import abc
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import requests
 
@@ -219,6 +219,45 @@ class AliLLMChannel(BaseLLMChannel):
             return text or None
         except Exception as exc:  # noqa: BLE001 超时 / 403 / 网络错误 → 交给我方降级
             logger.warning("%s Ali 通道失败，降级到 Ollama：%s %s", LOG_PREFIX, exc.__class__.__name__, str(exc)[:200])
+            return None
+
+    def chat_messages(
+        self,
+        messages: List[dict],
+        temperature: float = 0.6,
+        max_tokens: int = 800,
+        top_p: Optional[float] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[str]:
+        """多轮对话（0.13.0 新增，供云端「心理师」使用）。
+
+        与 `chat()` 的区别：直接接受完整的 OpenAI messages 列表，
+        保留 system / user / assistant 的轮次结构——心理疏导必需多轮上下文，
+        把历史压成单条 user_prompt 会丢掉「谁在什么时候说了什么」。
+
+        这是**新增方法**而不是改 `chat()`，因此所有既有调用方行为不变（开闭原则）。
+        """
+        if not self.available():
+            return None
+        try:
+            kwargs: Dict = {"temperature": temperature, "max_tokens": max_tokens}
+            if top_p is not None:
+                kwargs["top_p"] = top_p
+            if not self.enable_thinking:
+                kwargs["extra_body"] = {"enable_thinking": False}
+            kwargs["timeout"] = timeout or self.timeout
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                **kwargs,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            return text or None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "%s Ali 多轮对话失败：%s %s",
+                LOG_PREFIX, exc.__class__.__name__, str(exc)[:200],
+            )
             return None
 
 

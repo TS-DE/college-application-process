@@ -120,6 +120,81 @@ def _log_ocr_channel() -> None:
     )
 
 
+_NEO4J_CANDIDATE_DIRS = (
+    r"E:\Neo4j_NOSQL",
+    r"E:\neo4j",
+    r"D:\neo4j",
+    r"C:\neo4j",
+)
+
+
+def _find_neo4j_bat() -> str:
+    """尽量找到本项目机器上的 neo4j.bat，好在警告里直接给出可复制的命令。
+
+    找不到就返回空串，由调用方给出通用示例。
+    """
+    import os
+
+    for root in _NEO4J_CANDIDATE_DIRS:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            if "neo4j.bat" in filenames:
+                return os.path.join(dirpath, "neo4j.bat")
+            # 只在浅层找，避免大目录全盘遍历拖慢启动
+            if dirpath.count(os.sep) - root.count(os.sep) >= 3:
+                _dirnames[:] = []
+    return ""
+
+
+def _check_neo4j_sync() -> None:
+    """检测 Neo4j 连通性，不可用时打印**红色**警告（0.13.0）。
+
+    为什么做成启动检查：
+    图谱通道不可用时，Agent 的 `tool_search_graph` 会被静默排除，
+    用户只看到「图谱没命中」，很难联想到是 Neo4j 没启动。
+    在启动日志里红字提示 + 给出启动命令，能省掉大量排查时间。
+    """
+    if not settings.GRAPH_ENABLED:
+        print("[startup] 知识图谱：已关闭（GRAPH_ENABLED=0），问答只用向量库 + 数据库")
+        return
+
+    try:
+        from app.services.graph.graph_store import GraphStore
+
+        GraphStore().get_schema()
+        print(f"[startup] Neo4j 连接正常（{settings.NEO4J_URI}），知识图谱可用")
+    except Exception as exc:  # noqa: BLE001 连接失败就是没启动，不需要细分异常类型
+        bat = _find_neo4j_bat()
+        hint = (
+            f'请执行："{bat}" console'
+            if bat
+            else r"请执行：<Neo4j安装目录>\bin\neo4j.bat console"
+        )
+        red = "\033[91m"
+        reset = "\033[0m"
+        print(
+            f"{red}[WARN] Neo4j 未启动！知识图谱功能将不可用。"
+            f"{reset}\n"
+            f"{red}       {hint}{reset}\n"
+            f"{red}       连接串：{settings.NEO4J_URI}  原因：{exc.__class__.__name__}{reset}",
+            flush=True,
+        )
+
+
+async def _background_neo4j_check() -> None:
+    """后台检测 Neo4j（限时 8 秒，绝不阻塞启动）。"""
+    try:
+        await asyncio.wait_for(run_in_threadpool(_check_neo4j_sync), timeout=8.0)
+    except asyncio.TimeoutError:
+        print(
+            "\033[91m[WARN] Neo4j 连接检测超时（8s）！知识图谱功能可能不可用。\033[0m",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[startup] Neo4j 检测跳过：{exc.__class__.__name__}")
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     # 0.7.2：启动阶段严禁同步调用 AI / Embedding / Ollama 探测，防止前端首个请求被阻塞
@@ -127,6 +202,8 @@ async def on_startup() -> None:
     asyncio.create_task(_background_rag_info())
     # 0.10.0：打印 OCR 通道配置（base_url 与文本通道不同，是最常见的配错点）
     _log_ocr_channel()
+    # 0.13.0：检测 Neo4j，未启动时红字提示启动命令
+    asyncio.create_task(_background_neo4j_check())
 
 
 async def _refresh_health() -> None:

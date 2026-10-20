@@ -1,12 +1,22 @@
-"""AI 接口：意图解析与推荐理由（Ollama + Qwen3，失败自动降级）。
+"""AI 接口。
 
-0.12.0：`/api/ai/chat` 改为**必须登录**，并在 Prompt 中注入用户画像
-（`user_profiles.summary_text`）。画像读取失败只记日志，不影响问答。
+## 两个角色，两条链路
 
-0.12.1：整体超时改为可配置（`CHAT_TOTAL_TIMEOUT`），超时明确返回 504 并打印
-分阶段耗时；意图路由新增主观咨询白名单（不再误拦截「我该去哪」类问题）。
+| 接口 | 模型 | 用途 |
+|---|---|---|
+| `POST /api/ai/chat` | **本地** `qwen3:4b`（Agent / Function Calling） | 政策、分数、院校查询 |
+| `POST /api/ai/counselor` | **云端** `qwen3.7-flash` | 心理疏导、多轮谈心、画像采集 |
+
+0.13.0 变更：
+  · `/chat` 默认走 **Agent 模式**——把「向量库 / MySQL / 图谱」封装成工具，
+    由本地模型自主决定查哪一路，不再由代码写死检索顺序；
+  · 前端不再有「RAG 增强」开关，进页面即默认启用；
+  · 新增 `/counselor`，**强制云端通道**（本地 4b 的情感推理不足，不降级）。
+
+0.12.1 保留：整体超时可配置、超时返回 504、分阶段耗时日志。
 """
 import asyncio
+import time
 from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.routers.auth import get_current_user
+from app.schemas.ai import CounselorIn, CounselorOut
 from app.schemas.student import (
     ParseIntentIn,
     ParseIntentOut,
@@ -105,35 +116,78 @@ async def chat(
     user: Dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """志愿问答（可选 RAG + 用户画像个性化）。
+    """志愿问答：**本地 Agent 模式**（默认）+ 用户画像个性化。
 
-    0.7.2：整体链路改为 async + 线程池执行，防止同步 LLM 调用阻塞主事件循环，
-    进而拖慢首页、登录等非 AI 接口。整体超时 120 秒，超时返回 504。
+    0.13.0 核心变更：
+      不再由代码写死「先查向量库再查 SQL」，而是把三路数据源包装成工具
+      （`tool_search_vector` / `tool_search_mysql` / `tool_search_graph`）
+      交给本地 `qwen3:4b`，由模型自己决定调用哪个。
+      模型判断不需要工具（闲聊）时直接回答，省掉全部检索开销。
 
-    0.12.0：必须登录（画像与历史都挂在 user_id 上）；会话开始前读一次画像总结，
-    拼进系统 Prompt。`profile_injected` 字段告诉前端本次是否真的注入了画像。
+    降级：Agent 不可用（模型未启动 / 协议异常）→ 回落 0.12.x 的融合链路
+    `_chat_sync()`，保证「再差也能答」。
 
-    0.12.1：整体超时从 120 秒收紧到 `CHAT_TOTAL_TIMEOUT`（默认 100 秒），
-    超时明确抛 504 并提示「哪一步慢了」，前端不再无限转圈。
+    0.12.0：必须登录（画像与历史都挂在 user_id 上）。
+    0.12.1：整体超时 `CHAT_TOTAL_TIMEOUT`，超时明确抛 504。
     """
-    import time
-
     _t0 = time.time()
+    question = (payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question 不能为空")
+
     profile_context = await run_in_threadpool(_load_profile_summary, db, user["id"])
-    _t_profile = time.time()
     if profile_context:
-        # 便于验证「画像是否真的进了 Prompt」：控制台打印注入摘要。
-        # 用 print 而非 logger.info——uvicorn 默认只输出 WARNING 以上的应用日志，
-        # 用 logger 会看不到（0.10.0 的 OCR 日志踩过同一个坑）。
         snippet = profile_context[:80].replace("\n", " ")
         print(
             f"[PROFILE] 已注入用户画像 user={user['id']} 长度={len(profile_context)}：{snippet}…",
             flush=True,
         )
     print(
-        f"[AI] 阶段耗时 读画像={_t_profile - _t0:.2f}s（画像长度={len(profile_context)}）",
+        f"[AI] 阶段耗时 读画像={time.time() - _t0:.2f}s（画像长度={len(profile_context)}）",
         flush=True,
     )
+
+    # ---- ① 本地 Agent（默认）----
+    use_agent = bool(payload.get("use_agent", True)) and settings.AGENT_ENABLED
+    if use_agent:
+        try:
+            # ★ 用 AGENT_TOTAL_TIMEOUT（200s）而不是 CHAT_TOTAL_TIMEOUT（100s）：
+            #   Agent 要跑「规划 + 工具 + 生成」两轮本地推理，实测 110-155 秒，
+            #   沿用 100 秒会在生成轮前就被掐断（0.13.0 首次联调的真实故障）。
+            agent_out = await asyncio.wait_for(
+                run_in_threadpool(
+                    _run_agent_sync,
+                    question,
+                    profile_context,
+                    payload.get("province") or "",
+                    payload.get("category") or "",
+                    int(payload.get("top_k") or 5),
+                ),
+                timeout=settings.AGENT_TOTAL_TIMEOUT,
+            )
+            if agent_out.get("answer"):
+                print(
+                    f"[AI] 阶段耗时 总链路={time.time() - _t0:.2f}s "
+                    f"mode=agent tools={agent_out.get('tools_used')}",
+                    flush=True,
+                )
+                return agent_out
+            print("[AI] Agent 未产出答案，回落三路融合链路", flush=True)
+        except asyncio.TimeoutError:
+            # 已经等满 200 秒，再回落旧链路只会让用户多等 40 秒。
+            # 直接 504 并说明原因，比「看起来卡死」更诚实。
+            print(f"[AI] Agent 超时 {settings.AGENT_TOTAL_TIMEOUT}s，直接返回 504", flush=True)
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"AI 思考超时（>{settings.AGENT_TOTAL_TIMEOUT:.0f} 秒）。"
+                    "本地模型在 CPU 上推理较慢，可稍后重试或把问题问得更具体。"
+                ),
+            ) from None
+        except Exception as exc:  # noqa: BLE001 Agent 任何异常都不应让问答失败
+            print(f"[AI] Agent 异常 {exc.__class__.__name__}，回落三路融合链路", flush=True)
+
+    # ---- ② 回落：0.12.1 融合链路 ----
     try:
         result = await asyncio.wait_for(
             run_in_threadpool(_chat_sync, payload, profile_context),
@@ -142,14 +196,14 @@ async def chat(
     except asyncio.TimeoutError:
         print(
             f"[AI] 整体超时 {settings.CHAT_TOTAL_TIMEOUT}s（已耗时 {time.time() - _t0:.2f}s）"
-            f" question={(payload.get('question') or '')[:40]}",
+            f" question={question[:40]}",
             flush=True,
         )
         raise HTTPException(
             status_code=504,
             detail=(
                 f"AI 响应超时（>{settings.CHAT_TOTAL_TIMEOUT:.0f} 秒）。"
-                "可尝试：关闭知识库增强后重试、缩短问题长度，或稍后再试。"
+                "请稍后重试，或缩短问题长度。"
             ),
         ) from None
     print(
@@ -157,10 +211,79 @@ async def chat(
         f" source={result.get('source') if isinstance(result, dict) else '?'}",
         flush=True,
     )
-    # 附带给前端一个明确标记，便于在界面上提示「已结合你的画像」
     if isinstance(result, dict):
         result.setdefault("profile_injected", bool(profile_context))
     return result
+
+
+def _run_agent_sync(
+    question: str,
+    profile_context: str,
+    province: str,
+    category: str,
+    top_k: int,
+) -> dict:
+    """线程池里执行 Agent（同步阻塞，不能占用事件循环）。"""
+    from app.services.agent import run_agent
+
+    answer = run_agent(
+        question,
+        profile_context=profile_context,
+        province=province,
+        category=category,
+        top_k=top_k,
+    )
+    out = answer.to_dict()
+    out["profile_injected"] = bool(profile_context)
+    return out
+
+
+@router.post("/counselor", response_model=CounselorOut)
+async def counselor(
+    body: CounselorIn,
+    user: Dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> CounselorOut:
+    """云端「心理师 / 画像构建师」多轮对话（0.13.0）。
+
+    ## 与 /chat 的分工
+    · `/chat`   本地 qwen3:4b + 工具，查政策与数据，毫秒级，数据不出本机；
+    · `/counselor` 云端 qwen3.7-flash，谈心、疏导、采集画像，**不降级到本地**。
+
+    ## 为什么必须登录
+    画像与历史都挂在 `user_id` 上；同时把 `summary_text` 注入 system prompt，
+    让云端模型知道「这个考生已经说过什么」，避免反复问同样的问题。
+    """
+    from app.services.counselor import CounselorService
+
+    _t0 = time.time()
+    profile_summary = await run_in_threadpool(_load_profile_summary, db, user["id"])
+    _t_profile = time.time()
+
+    service = CounselorService()
+    result = await run_in_threadpool(
+        service.chat,
+        [m.model_dump() for m in body.messages],
+        profile_summary,
+    )
+    if result.get("error"):
+        print(f"[COUNSELOR] 失败 user={user['id']}：{result['error']}", flush=True)
+        raise HTTPException(status_code=503, detail=result["error"])
+
+    print(
+        f"[COUNSELOR] user={user['id']} 读画像={_t_profile - _t0:.2f}s "
+        f"生成={result.get('elapsed_ms', 0)}ms model={result.get('model')} "
+        f"画像注入={result.get('profile_injected')}",
+        flush=True,
+    )
+    return CounselorOut(
+        answer=result["answer"],
+        source=result["source"],
+        model=result.get("model"),
+        elapsed_ms=result.get("elapsed_ms", 0),
+        profile_injected=result.get("profile_injected", False),
+        error=None,
+    )
 
 
 def _chat_sync(payload: dict, profile_context: str = "") -> dict:

@@ -13,18 +13,40 @@ def _env(key: str, default: str) -> str:
     return value if value not in (None, "") else default
 
 
+# .env 搜索顺序（先找到的先写入，后面的只补空缺）
+# ★ 0.13.0 修复：原先只读 `app/.env`，而项目真实的 `.env` 在 `backend/` 下，
+#   导致 README/文档里让用户改的配置**全部不生效**（一直走 config.py 的硬编码默认值）。
+#   这个 bug 极难排查：配置看起来改了、日志却还是旧值。
+#   现在优先读 `backend/.env`，`app/.env` 仅作历史兼容（只补前者的空缺）。
+_ENV_FILES = (
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),  # backend/.env
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),                  # backend/app/.env
+)
+
+
 def _load_dotenv() -> None:
-    """极简 .env 加载，避免额外依赖 python-dotenv。"""
-    path = os.path.join(os.path.dirname(__file__), ".env")
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    """极简 .env 加载，避免额外依赖 python-dotenv。
+
+    用 `setdefault` 写入：**真实环境变量优先级最高**（例如 Windows 系统
+    环境变量里配的 `Ali_API_KEY` 不会被 `.env` 覆盖）。
+    """
+    for path in _ENV_FILES:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    key = k.strip()
+                    val = v.strip().strip('"').strip("'")
+                    # 空值不写入，保持「空 = 用默认值」的语义
+                    if key and val:
+                        os.environ.setdefault(key, val)
+        except OSError:
+            continue
 
 
 _load_dotenv()
@@ -41,8 +63,11 @@ class Settings:
 
     # ---------- 本地大模型 ----------
     OLLAMA_URL: str = _env("OLLAMA_URL", "http://localhost:11434")
-    OLLAMA_MODEL: str = _env("OLLAMA_MODEL", "qwen3:1.7b")
-    OLLAMA_TIMEOUT: float = float(_env("OLLAMA_TIMEOUT", "45"))
+    # 0.13.0：本地问答模型由 qwen3:1.7b 升级为 qwen3:4b。
+    # 1.7b 在「工具调用 + 多轮规划」上稳定性不足（经常不按 JSON 返回、选错工具），
+    # 4b 能稳定输出 tool_calls，且响应仍在秒级，适合做本地 Agent 的执行模型。
+    OLLAMA_MODEL: str = _env("OLLAMA_MODEL", "qwen3:4b")
+    OLLAMA_TIMEOUT: float = float(_env("OLLAMA_TIMEOUT", "60"))
     AI_ENABLED: bool = _env("AI_ENABLED", "1") not in {"0", "false", "False", "no"}
     # 并发调用大模型的线程数（批量生成推荐理由时使用）
     AI_MAX_WORKERS: int = int(_env("AI_MAX_WORKERS", "3"))
@@ -118,6 +143,47 @@ class Settings:
     # 两次调用，若沿用默认 30 秒，最坏 60 秒会挤占最终生成的预算。
     # 图谱是增强项，宁可快速失败回落到 MySQL/向量，也不要拖死整条链路。
     GRAPH_LLM_TIMEOUT: float = float(_env("GRAPH_LLM_TIMEOUT", "20"))
+
+    # ---------------- 0.13.0 本地 Agent（Function Calling） ----------------
+    # 是否启用 Agent 模式（默认开启）。关闭后 /api/ai/chat 回落到 0.12.x 的三路融合，
+    # 保留这条回退路径是为了「模型不支持 tools 时系统仍可用」。
+    AGENT_ENABLED: bool = _env("AGENT_ENABLED", "1") not in {"0", "false", "False"}
+    # 单轮问答最多允许几轮「模型 → 工具 → 模型」，防止小模型陷入循环。
+    # 默认 2：实测本机 CPU 推理单次约 20-45 秒，3 轮必然超过前端耐心上限。
+    AGENT_MAX_STEPS: int = int(_env("AGENT_MAX_STEPS", "2"))
+    # 单个工具的执行超时（秒）：向量检索 ~1s、MySQL ~1s、图谱可能 40s，分开给预算
+    AGENT_TOOL_TIMEOUT: float = float(_env("AGENT_TOOL_TIMEOUT", "60"))
+    # 规划轮 / 生成轮的 token 预算。实测 qwen3:4b 会**先把推理写进 content**
+    # （Ollama 的 think:false 对 qwen3 不生效，只能靠 `/no_think` 软开关抑制），
+    # 预算给到 512 时约一半概率推理没写完就被截断（done_reason=length）→ 无 tool_calls；
+    # 给到 768 实测 3/3 稳定返回。这是「可靠性 vs 耗时」的实测折中。
+    AGENT_PLAN_TOKENS: int = int(_env("AGENT_PLAN_TOKENS", "768"))
+    # 生成轮 512：回答本身 300 字以内，留一半给残留推理；给到 768 会让
+    # 本机 CPU 推理超过 120 秒的 Ollama 超时（实测打满后返回空）。
+    AGENT_ANSWER_TOKENS: int = int(_env("AGENT_ANSWER_TOKENS", "768"))
+    # 单路工具结果喂回模型的字符上限（越长越慢）
+    AGENT_TOOL_TEXT_LIMIT: int = int(_env("AGENT_TOOL_TEXT_LIMIT", "600"))
+    # 分工超时：规划轮只输出 tool_calls，需要留给推理；生成轮必须快速失败，
+    # 否则一旦卡住会把整体拖到 2 分钟以上（实测曾有 160 秒的失败案例）。
+    AGENT_PLAN_TIMEOUT: float = float(_env("AGENT_PLAN_TIMEOUT", "90"))
+    AGENT_ANSWER_TIMEOUT: float = float(_env("AGENT_ANSWER_TIMEOUT", "110"))
+    # Agent 链路整体预算（比旧链路宽，因为本地 4b 本身慢）
+    # 实测本机（CPU 推理，约 10 token/s）：规划 32-55s + 工具 5-10s + 生成 70-90s，
+    # 全链路 110-155s 属正常范围；前端配合显示「AI 正在思考」动画。
+    AGENT_TOTAL_TIMEOUT: float = float(_env("AGENT_TOTAL_TIMEOUT", "200"))
+    # 传给本地模型的候选工具条数上限（工具太多小模型会选错）
+    AGENT_MAX_TOOLS: int = int(_env("AGENT_MAX_TOOLS", "8"))
+    # 是否让 Agent 看到用户画像（本地模型上下文小，样本长时可关掉）
+    AGENT_INJECT_PROFILE: bool = _env("AGENT_INJECT_PROFILE", "1") not in {"0", "false", "False"}
+
+    # ---------------- 0.13.0 云端「心理师」通道 ----------------
+    # 心理疏导与画像采集**强制**走云端大模型（本地 4b 的情感推理能力不足），
+    # 因此这里单独配置模型与超时，不走 LLMClient 的「Ali → Ollama」降级链。
+    COUNSELOR_MODEL: str = _env("COUNSELOR_MODEL", "")   # 空表示沿用 ALI_LLM_MODEL
+    COUNSELOR_TIMEOUT: float = float(_env("COUNSELOR_TIMEOUT", "60"))
+    # 多轮上下文最多保留多少条历史（user + assistant 各算一条）
+    COUNSELOR_MAX_HISTORY: int = int(_env("COUNSELOR_MAX_HISTORY", "20"))
+
     # 切片参数
     CHUNK_SIZE: int = int(_env("CHUNK_SIZE", "500"))
     CHUNK_OVERLAP: int = int(_env("CHUNK_OVERLAP", "50"))
@@ -131,7 +197,7 @@ class Settings:
     # ---------------- 0.7.0 检索后优化（Re-ranking）+ 高级 RAG ----------------
     # 注：统一模型名已上移为 ALI_LLM_MODEL（0.7.1 起 Ali API Key 与 Ollama 共用一套通道）
     # 本地兜底模型（Ollama）
-    OLLAMA_FALLBACK_MODEL: str = _env("OLLAMA_FALLBACK_MODEL", _env("OLLAMA_MODEL", "qwen3:1.7b"))
+    OLLAMA_FALLBACK_MODEL: str = _env("OLLAMA_FALLBACK_MODEL", _env("OLLAMA_MODEL", "qwen3:4b"))
     # Rerank 总开关：1=开启（默认用向量余弦精排，无需额外模型）
     RERANK_ENABLED: bool = _env("RERANK_ENABLED", "1") not in {"0", "false", "False"}
     # CrossEncoder 模型路径（留空则用项目 embedding 做余弦精排；配置了则优先用 CrossEncoder）

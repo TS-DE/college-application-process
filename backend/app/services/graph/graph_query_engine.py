@@ -75,8 +75,8 @@ class GraphQueryEngine:
     ) -> None:
         self.store = store or GraphStore()
         # 0.12.1：默认装配时注入图谱专用 LLM 通道（短超时）
-        self.extractor = extractor or EntityExtractor(llm=graph_llm)
-        self.generator = generator or CypherGenerator(llm=graph_llm)
+        self.extractor = extractor or EntityExtractor(llm_chat=graph_llm)
+        self.generator = generator or CypherGenerator(llm_chat=graph_llm)
 
     # ---------------- 对外入口 ----------------
 
@@ -175,10 +175,10 @@ def build_default_engine() -> GraphQueryEngine:
     """
     from app.config import settings
 
-    extractor = EntityExtractor(llm=graph_llm, use_llm=settings.GRAPH_LLM_EXTRACT_ENABLED)
+    extractor = EntityExtractor(llm_chat=graph_llm, use_llm=settings.GRAPH_LLM_EXTRACT_ENABLED)
     if settings.GRAPH_DICT_EXTRACT_ENABLED:
         try:
             extractor.load_entity_dict_from_mysql()
         except Exception as exc:  # noqa: BLE001 词典加载失败 → 只剩 LLM 抽取路
             logger.info("[GRAPH] 实体词典加载失败，仅用 LLM 抽取路：%s", exc.__class__.__name__)
-    return GraphQueryEngine(extractor=extractor, generator=CypherGenerator(llm=graph_llm))
+    return GraphQueryEngine(extractor=extractor, generator=CypherGenerator(llm_chat=graph_llm))

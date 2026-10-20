@@ -63,8 +63,8 @@ function onCommand(cmd: string) {
       router.push('/profile')
       break
     case 'profile-build':
-      // 画像构建入口在 AI 助手页，带 query 让页面自动打开抽屉
-      router.push({ path: '/ai-chat', query: { build: '1' } })
+      // 0.13.0：画像入口独立成「心理与画像空间」页面
+      router.push('/counselor')
       break
     case 'admin':
       router.push('/admin/knowledge')

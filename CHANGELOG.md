@@ -60,8 +60,186 @@
 | **0.11.1** | 2026-10-18 | 父子块（不变） | 三路融合（不变）+ 全国引擎（不变 **＋前后端全链路打通**） | 同上（数据源彻底统一到 `_all` 总表） | ✅ 已发布 |
 | **0.11.2** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + **数据提纯层**（从 `major_note` 正则补学费/学制） | 同上（补齐广西/四川/安徽等省的缺失字段） | ✅ 已发布 |
 | **0.12.0** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + **账号体系与双轨制用户画像**（报告提取 / 业务问卷 → 画像注入 Prompt） | 同上 + **用户画像**（个性化建议） | ✅ 已发布 |
-| **0.12.1** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + 用户画像（**＋隐私隔离 / 规划师模式 / 超时贯通**） | 同上（修复地图统计与问答拒答） | ✅ 本次热修复 |
+| **0.12.1** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + 用户画像（**＋隐私隔离 / 规划师模式 / 超时贯通**） | 同上（修复地图统计与问答拒答） | ✅ 已发布 |
+| **0.13.0** | 2026-10-20 | 父子块（不变） | **本地 Agent（Function Calling）**：向量/MySQL/图谱封装成工具，由 qwen3:4b 自主选择；云端心理师独立成链路 | 父块 + 图谱 + MySQL + 图像 + **用户画像（物理隔离上传）** | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.13.0] - 2026-10-20 · UI 重构 + 本地 Agent 调度（Function Calling）+ 报告物理隔离
+
+### 一、四个改动与动机
+
+| # | 改动 | 为什么 |
+|---|---|---|
+| 1 | 去掉「RAG 增强」开关，进页面即默认检索 | 普通考生不理解 RAG 是什么，开关只会增加决策负担；检索能力应默认开启 |
+| 2 | 新增「想让我更了解你吗？」→ 独立心理与画像空间 | 志愿查询与心理疏导是两种完全不同的对话，混在一个聊天框会让本地小模型「既查数据又谈心」 |
+| 3 | 用户报告改走 `POST /api/profile/report-upload` | 0.12.x 虽然已从知识库剥离，但路径仍在 `/report/upload-file` 下，语义上仍与知识库纠缠；新路径从命名到实现完全独立 |
+| 4 | 本地模型 1.7b → **qwen3:4b** + Function Calling | 1.7b 无法稳定输出 `tool_calls`；4b 在实测中 3/3 稳定返回 |
+
+### 二、核心架构变化：从「写死流水线」到「模型自主调度」
+
+**0.12.x（旧）** —— 检索顺序由代码决定：
+
+```python
+# ai.py:_chat_sync() 里的分支链
+if 多模态关键词: 以文搜图
+elif use_graph: 图谱 + MySQL + 向量 三路并行 → 融合
+elif use_rag:   纯向量检索
+else:           通用 Prompt
+```
+
+问题：每加一路数据源都要改这个函数（违反开闭原则）；简单闲聊也要跑完所有检索。
+
+**0.13.0（新）** —— 把数据源变成工具，由模型决定：
+
+```python
+# services/agent/runner.py
+reply = llm.chat(messages, tools=registry.specs())   # 模型返回 tool_calls
+for call in reply.tool_calls:
+    result = registry.execute(call.name, call.arguments["query"])
+    messages.append({"role": "tool", "content": result.to_model_text()})
+answer = llm.chat(messages, tools=None)              # 基于工具结果作答
+```
+
+新增文件（`backend/app/services/agent/`，7 个）：
+
+| 文件 | 职责 | 对应设计原则 |
+|---|---|---|
+| `base.py` | `BaseTool` 抽象 + `ToolResult` / `ToolCall` 统一契约 | **LSP**（所有工具返回结构一致）/ **DIP**（依赖抽象） |
+| `tools.py` | `VectorSearchTool` / `MySQLSearchTool` / `GraphSearchTool` | **SRP**（只管执行 + 转人话） |
+| `registry.py` | 工具注册、按名取用、生成 tools 规格 | **OCP**（加工具只改一行） |
+| `ollama_tools.py` | Ollama `/api/chat` 原生 tools 客户端 + 降级 | **SRP**（只负责一次带工具的对话） |
+| `prompts.py` | Agent 系统提示词 / JSON 规划兜底 / 最终生成 | 策略与机制分离 |
+| `runner.py` | 调度器：规划 → 执行 → 再规划 → 生成 | **LoD**（不关心工具内部） |
+| `agent_result.py` | `AgentAnswer` / `ToolTrace` 数据契约 | **ISP**（路由/前端只依赖需要的字段） |
+
+### 三、三处必须知道的技术细节（都是实测踩出来的）
+
+#### 1. `think: false` 对 qwen3 无效，只有 `/no_think` 能用
+
+```python
+# 实测（Ollama 0.6+ / qwen3:4b）
+{"think": False}                      → tool_calls 恒为空，推理全写进 content
+system 末尾加 "/no_think"              → 正确返回 tool_calls ✅
+```
+
+处理位置：`ollama_tools._with_no_think()`——**在传输层统一注入**，不污染 `prompts.py`。
+
+#### 2. 推理会吃掉 token 预算，规划轮必须给到 768
+
+| `num_predict` | done_reason | tool_calls | 结论 |
+|---|---|---|---|
+| 300 | `length` | 0 | 推理没写完就被截断 |
+| 400 | `length` | 1/2（不稳定） | 时好时坏 |
+| **768** | `stop` | **3/3** | 稳定 |
+
+#### 3. 本机 CPU 推理约 10 token/s，两轮 Agent 需要 110-155 秒
+
+| 阶段 | 实测耗时 |
+|---|---|
+| 规划轮（选工具） | 32-55s |
+| 工具执行（向量检索） | 5-10s |
+| 生成轮（基于结果作答） | 70-90s |
+
+因此：
+- `AGENT_TOTAL_TIMEOUT=200`、前端 axios 超时 200s；
+- 前端加「AI 正在思考…」动画，文案随阶段切换（判断→检索→整理）；
+- **生成轮失败时用工具结果兜底**（`source=agent_tool_only`），而不是让用户等两分钟后拿到空白。
+
+### 四、云端心理师：本地查数据，云端谈心事
+
+| 维度 | 志愿助手 `/api/ai/chat` | 心理师 `/api/ai/counselor` |
+|---|---|---|
+| 模型 | 本地 `qwen3:4b` | 云端 `qwen3.7-flash` |
+| 能力 | Function Calling 查政策/分数 | 多轮对话、情感推理 |
+| 数据 | 不出本机 | 传输到云端 |
+| 降级 | 失败回落确定性融合链路 | **不降级**（本地 4b 谈心会说教，宁可报错） |
+
+`CounselorService`（`services/counselor.py`）：
+
+- 强制使用 `AliLLMChannel.chat_messages()`（0.13.0 新增的多轮方法，保留 system/user/assistant 轮次结构）；
+- 注入 `user_profiles.summary_text` 到 system prompt，标注「不要直接念给考生听」；
+- `_trim()` 过滤非法的 `system` 角色 —— **防止前端注入覆盖人设**。
+
+### 五、报告隐私：从「逻辑隔离」升级为「物理解耦」
+
+| 维度 | 知识库（Admin） | 用户报告（User） |
+|---|---|---|
+| 接口 | `POST /api/knowledge/upload` | `POST /api/profile/report-upload` |
+| 处理函数 | `upload_knowledge` | `upload_report_file`（**不同函数**） |
+| 落盘 | `KNOWLEDGE_DIR/` | `{UPLOAD_ROOT}/reports/`（读后即删） |
+| 台账 | `knowledge_files` | 无 |
+| 向量库 | `gaokao_knowledge` + `gaokao_images` | **不写** |
+
+测试用 **AST 静态检查**验证：解析 `upload_report_file` 的函数体，断言不存在
+`add_documents` / `ImageStore` / `ImageExtractor` 调用，也不存在 `knowledge_files` 的
+`INSERT/UPDATE` 语句字符串。（用 AST 而不是字符串匹配，是因为 docstring 里会
+正当地提到 `gaokao_knowledge`。）
+
+### 六、顺手修掉的一个长期配置 bug
+
+`config._load_dotenv()` 只读 `app/.env`，而项目真实配置在 `backend/.env`——
+**README 让用户改的配置从来没生效过**，一直走 `config.py` 的硬编码默认值。
+0.13.0 改为按顺序读 `backend/.env` → `app/.env`，并用 `setdefault`
+（真实环境变量优先级最高，Windows 系统环境变量里的 `Ali_API_KEY` 不受影响）。
+
+> 这个 bug 极难排查：配置看起来改了、日志却还是旧值。0.13.0 之前
+> `OLLAMA_TIMEOUT` 一直是代码里的 60，改 `.env` 到 120 完全无效。
+
+### 七、Neo4j 启动提示
+
+`main.py` 启动时后台检测 Neo4j（限时 8 秒，不阻塞启动），失败时红字输出：
+
+```
+[WARN] Neo4j 未启动！知识图谱功能将不可用。
+       请执行："E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" console
+       连接串：bolt://localhost:7687  原因：GraphConnectionError
+```
+
+路径由 `_find_neo4j_bat()` 自动探测（扫 `E:\Neo4j_NOSQL` 等常见目录），
+换机器也能给出可直接复制的命令。
+
+### 八、验证结果
+
+```
+python test_agent_0_13_0.py          # 桩版：零网络零数据库
+用例 1：配置检查            OLLAMA_MODEL=qwen3:4b，规划/生成超时分离
+用例 2：工具注册表          3 个工具 + 规格合法 + 不可用工具自动剔除
+用例 3：工具执行            向量/MySQL 正常；无院校名 skipped；异常吞并为 ok=False
+用例 4：Agent 调度          4a 调工具后作答 / 4b 闲聊不调工具 / 4c 生成失败兜底 / 4d 首轮失败
+用例 5：答案清洗            剥掉「用户问/我需要」旁白，保留正文
+用例 6：云端心理师          画像注入 system、过滤非法 system、不可用时不降级
+用例 7：报告隐私隔离        AST 检查无 Chroma/台账写入，处理函数与知识库不同
+0.13.0 桩版全部通过
+```
+
+真实链路（`--real`）实测：
+
+| 验收标准 | 结果 |
+|---|---|
+| 1. AI 助手无 RAG 开关，问「河南本科批怎么填报」自动调政策库工具 | ✅ `tools_used=['tool_search_vector']`，`sources=['高考志愿录取顺序.pdf']` |
+| 2. 心理空间上传 PDF 能解析出画像 | ✅ `POST /api/profile/report-upload` 200，画像 `ready=true` |
+| 3. 后台知识库看不到这份 PDF | ✅ 知识库文件列表无 `mbti` 记录 |
+| 4. 个人主页能看到画像 | ✅ `GET /api/profile` → `ready=true` |
+
+### 九、已知限制（本机硬件决定）
+
+| 项 | 说明 |
+|---|---|
+| 问答需 110-155 秒 | CPU 推理约 10 token/s。换 GPU 或换更小的非思考模型可显著改善 |
+| 生成轮偶发超时 | 超时后走 `agent_tool_only`，返回检索到的原文而非自然语言总结 |
+| qwen3 无法真正关闭思考 | `/no_think` 只能抑制「选工具」时的推理，自由作答仍会有旁白（已用 `clean_answer` 剥离） |
+| 图谱工具需 Neo4j | 未启动时 `tool_search_graph` 自动从候选列表剔除，模型只会在剩下两个工具里选 |
+
+### 十、后续演进方向（0.14.0）
+
+| 方向 | 说明 |
+|---|---|
+| 流式输出 | 边生成边显示，把「等待 2 分钟」变成「逐步看到结果」 |
+| 规划轮缓存 | 同类问题复用上次的工具选择，省掉 32-55 秒 |
+| 心理师画像回写 | 从对话中自动抽取兴趣/偏好，写回 `user_profiles` |
+| 换非思考模型 | 如 qwen2.5:3b-instruct，无推理开销，延迟可降到 20-30 秒 |
 
 ---
 
