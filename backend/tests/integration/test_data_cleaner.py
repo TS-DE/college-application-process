@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 from app.utils.data_cleaner import clean_item, extract_duration, extract_tuition
 
@@ -101,8 +101,8 @@ def test_clean_item() -> None:
 
 def test_real() -> None:
     """用例 3 + 4：真实库验证各省填充率与接口返回。"""
-    from app.services.rank_service import score_to_rank
-    from app.services.recommend_service import _plan_index, calculate_tiers, enrich_with_plan
+    from app.services.recommend.rank_service import score_to_rank
+    from app.services.recommend.recommend_service import _plan_index, calculate_tiers, enrich_with_plan
 
     print("用例 3：各省招生计划索引填充率（提纯前后对比的关键指标）")
     expect = {

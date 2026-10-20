@@ -10,11 +10,11 @@
 """
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
-from app.services import rag_service
-from app.services.query_rewrite import QueryDecomposer, QueryExpander, QueryPreprocessor, QueryRewriter
-from app.services.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
+from app.services.rag import rag_service
+from app.services.rag.query_rewrite import QueryDecomposer, QueryExpander, QueryPreprocessor, QueryRewriter
+from app.services.rag.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
 
 TEST_COLLECTION = "test_v241"
 

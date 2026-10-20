@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 
 # ---------------------------------------------------------------- 用例 1：地图统计
@@ -18,7 +18,7 @@ sys.path.insert(0, ".")
 def test_map_stats() -> None:
     """用例 1：地图统计口径修复（山东/江西不再 0，吉林给出明确降级提示）。"""
     print("用例 1：地图统计口径")
-    from app.routers.stats import major_count_by_province
+    from app.api.recommend.stats_router import major_count_by_province
 
     # 山东：university_code 整列为空，旧口径 university_count=0 / major_count=101
     shandong = major_count_by_province(province="山东", year=2025, category="综合", batch="本科批")
@@ -62,7 +62,7 @@ def test_map_stats() -> None:
 def test_subjective_intent() -> None:
     """用例 2：主观咨询白名单（不再被意图路由拦截）。"""
     print("用例 2：主观咨询意图识别")
-    from app.services.rag_service import SUBJECTIVE_INTENT_KEYWORDS, _has_subjective_intent
+    from app.services.rag.rag_service import SUBJECTIVE_INTENT_KEYWORDS, _has_subjective_intent
 
     should_pass = [
         "你能猜到我想去哪所学校吗",
@@ -94,7 +94,7 @@ def test_subjective_intent() -> None:
 def test_router_prompt() -> None:
     """用例 3：ROUTER_PROMPT 已包含主观咨询放行规则。"""
     print("用例 3：ROUTER_PROMPT 放行规则")
-    from app.services.rag_service import ROUTER_PROMPT
+    from app.services.rag.rag_service import ROUTER_PROMPT
 
     assert "主观咨询" in ROUTER_PROMPT, "Prompt 应明确主观咨询类判 YES"
     assert "我该去哪" in ROUTER_PROMPT or "该去哪" in ROUTER_PROMPT
@@ -107,7 +107,7 @@ def test_router_prompt() -> None:
 def test_advisory_fallback() -> None:
     """用例 4：三路无资料 + 主观意图 → 走规划师兜底而非拒答。"""
     print("用例 4：规划师兜底逻辑")
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     prompt = rag_service.build_advisory_prompt(
         "我高考502分，根据我的用户画像，我该去哪里",
@@ -127,7 +127,7 @@ def test_advisory_fallback() -> None:
     print("  有检索内容时进入【参考资料】，不再触发拒答")
 
     # 用桩 ask 验证 answer_with_hybrid 的空结果分支走 advisory
-    from app.services import ai_service
+    from app.services.llm import ai_service
 
     captured = {}
     original = ai_service.ask
@@ -163,7 +163,8 @@ def test_advisory_fallback() -> None:
 def test_advisory_branch_forced() -> None:
     """用例 4b：强制三路全空，验证 advisory 分支确实被触发（确定性）。"""
     print("用例 4b：强制三路全空时的 advisory 分支")
-    from app.services import ai_service, rag_service
+    from app.services.llm import ai_service
+    from app.services.rag import rag_service
 
     captured = {}
     original = ai_service.ask
@@ -270,14 +271,14 @@ def test_timeout_config() -> None:
     # ai_service.ask 是否把 timeout 传给门面
     import inspect
 
-    from app.services import ai_service
+    from app.services.llm import ai_service
 
     src = inspect.getsource(ai_service.ask)
     assert "timeout=timeout" in src, "ask() 必须把 timeout 传给 llm_client"
     print("  ai_service.ask 已透传 timeout")
 
     # 门面是否透传给通道
-    from app.services import llm_client
+    from app.services.llm import llm_client
 
     src = inspect.getsource(llm_client.LLMClient.chat)
     assert "timeout=timeout" in src, "LLMClient.chat 必须透传 timeout"

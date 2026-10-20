@@ -14,10 +14,12 @@
 import sys
 import time
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
-from app.services import llm_client, rag_service
-from app.services.reranker import Reranker
+from app.services.llm import llm_client
+
+from app.services.rag import rag_service
+from app.services.rag.reranker import Reranker
 
 # 强制本地兜底（只影响本进程，不改动项目代码）
 llm_client.get_api_key = lambda: ""

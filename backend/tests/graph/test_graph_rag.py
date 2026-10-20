@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 import time
 
 QUESTION = "福州大学至诚学院计算机专业学费多少"
@@ -161,7 +163,7 @@ def test_graph_channel_degrade() -> None:
 
 def test_fusion_layer() -> None:
     """用例 5：双通道并行 + Level 1 优先级 + Level 2 Token 配额。"""
-    from app.services import rag_service as rs
+    from app.services.rag import rag_service as rs
 
     # 用桩替换两个通道（依赖倒置：不碰真实 Neo4j / Chroma）
     rs._graph_engine = type(
@@ -206,7 +208,7 @@ def _fake_graph_result(question: str):
 
 def test_token_quota_handover() -> None:
     """用例 6：图谱没用满时，剩余额度让给向量通道。"""
-    from app.services import rag_service as rs
+    from app.services.rag import rag_service as rs
 
     long_vector = "招生政策补充说明。" * 800   # 约 6400 字符
     got = rs._truncate_by_tokens(long_vector, 4000)   # 4000 token ≈ 6000 字符
@@ -243,7 +245,7 @@ def test_real() -> None:
 
 def test_compare() -> None:
     """双通道对比：同一问题 use_graph=false vs use_graph=true。"""
-    from app.services import rag_service as rs
+    from app.services.rag import rag_service as rs
 
     q = QUESTION
     print("  --- use_graph=false（纯向量 RAG）---")

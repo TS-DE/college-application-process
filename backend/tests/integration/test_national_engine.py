@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 # 任务书指定的三个最小验证场景
 CASES = [
@@ -71,8 +71,8 @@ def test_region_mapper() -> None:
 
 def test_rank_and_tiers() -> None:
     """用例 2 + 3：位次换算与三档计算（真实库）。"""
-    from app.services.rank_service import score_to_rank
-    from app.services.recommend_service import _tier_probability, calculate_tiers
+    from app.services.recommend.rank_service import score_to_rank
+    from app.services.recommend.recommend_service import _tier_probability, calculate_tiers
 
     print("用例 2：score_to_rank 多省位次换算")
     for name, prov, cat, score, expect_hit in CASES:
@@ -125,7 +125,7 @@ def test_probability_mapping() -> None:
       · 稳：p = 70 - 15x   （x = gap/buffer，-1~1 → 85~55）
       · 保：p = 98 - 10x   （gap=buffer → 94.7；gap=3×buffer → 88）
     """
-    from app.services.recommend_service import _tier_probability
+    from app.services.recommend.recommend_service import _tier_probability
 
     print("用例 3b：概率线性映射边界")
     b = 5000
@@ -162,7 +162,7 @@ def test_invalid_params() -> None:
     try:
         from fastapi import HTTPException
 
-        from app.routers.recommend import _validate_province_category
+        from app.api.recommend.recommend_router import _validate_province_category
     except Exception as exc:  # noqa: BLE001
         print(f"  [SKIP] 无法导入路由层：{exc.__class__.__name__}")
         return

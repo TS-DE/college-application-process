@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """0.13.0 验证：本地 Agent（Function Calling）/ 云端心理师 / 报告隐私隔离。
 
 用法：
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 
 # ---------------------------------------------------------------- 用例 1：配置
@@ -300,8 +300,8 @@ def test_privacy() -> None:
     print("用例 7：报告隐私隔离")
     import inspect
 
-    from app.routers import knowledge as knowledge_router
-    from app.routers import profile as profile_router
+    from app.api.knowledge import knowledge_router
+    from app.api.account import profile_router
 
     # 新版 FastAPI 把 include_router 存成惰性的 _IncludedRouter，
     # 直接遍历 app.routes 拿不到子路由，因此从 router 对象上取。

@@ -9,10 +9,11 @@ import sys
 import time
 from typing import List, Optional
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 from app.config import settings
-from app.services import llm_client, rag_service
+from app.services.llm import llm_client
+from app.services.rag import rag_service
 
 
 def probe_channels() -> None:

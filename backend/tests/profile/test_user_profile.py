@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 from app.services.profile import (
     InMemoryProfileRepository,
@@ -230,7 +230,8 @@ def test_service_flow() -> None:
 def test_prompt_injection() -> None:
     """用例 5b：画像确实被拼进了 Prompt（捕获 ask 的入参）。"""
     print("用例 5b：画像注入 Prompt 验证")
-    from app.services import ai_service, rag_service
+    from app.services.llm import ai_service
+    from app.services.rag import rag_service
 
     captured = {}
     original = ai_service.ask

@@ -18,7 +18,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, List
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 QUESTION = "福州大学至诚学院计算机专业学费是多少？选科要求是什么？"
 QUESTION_FAKE = "福州大学至诚学院计算机专业在冥王星星球 3025 年的量子学费是多少？"
@@ -77,7 +77,7 @@ def _session_factory(rows=None, boom=False):
 
 def test_intent() -> None:
     """用例 1：结构化意图识别。"""
-    from app.services.rag_service import detect_structured_intent
+    from app.services.rag.rag_service import detect_structured_intent
 
     got = detect_structured_intent(QUESTION)
     assert got == ["tuition", "subject_req"], got
@@ -94,7 +94,7 @@ def test_intent() -> None:
 
 def test_mysql_engine() -> None:
     """用例 2：MySQLQueryEngine 结构化查询（桩 Session，不连真库）。"""
-    from app.services.sql_query_engine import MySQLQueryEngine
+    from app.services.sql.sql_query_engine import MySQLQueryEngine
 
     engine = MySQLQueryEngine(session_factory=_session_factory())
     res = engine.query_structured({
@@ -154,8 +154,8 @@ def test_hybrid_mysql_only(monkeypatch=None) -> None:
 
     把图谱路与向量路都打成空，只留 MySQL 路，验证优先级分发与返回结构。
     """
-    from app.services import rag_service
-    from app.services.sql_query_engine import MySQLQueryEngine
+    from app.services.rag import rag_service
+    from app.services.sql.sql_query_engine import MySQLQueryEngine
 
     rag_service._graph_engine = False          # 图谱引擎不可用
     monkeypatch_search(rag_service, [])        # 向量路无命中
@@ -197,7 +197,7 @@ def test_hybrid_mysql_only(monkeypatch=None) -> None:
 
 def test_hybrid_all_empty(monkeypatch=None) -> None:
     """用例 4：三路全空 → hybrid_empty + 拒答话术，不调大模型。"""
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     rag_service._graph_engine = False
     monkeypatch_search(rag_service, [])
@@ -205,7 +205,7 @@ def test_hybrid_all_empty(monkeypatch=None) -> None:
     def _stub(self, filters):
         return {"hit": False, "context": "", "raw": [], "error": ""}
 
-    from app.services.sql_query_engine import MySQLQueryEngine
+    from app.services.sql.sql_query_engine import MySQLQueryEngine
 
     orig = MySQLQueryEngine.query_structured
     MySQLQueryEngine.query_structured = _stub
@@ -227,7 +227,7 @@ def test_hybrid_all_empty(monkeypatch=None) -> None:
 
 def test_mysql_channel_failure() -> None:
     """用例 5：MySQL 路异常只跳过该路，不影响其他路。"""
-    from app.services.sql_query_engine import MySQLQueryEngine
+    from app.services.sql.sql_query_engine import MySQLQueryEngine
 
     engine = MySQLQueryEngine(session_factory=_session_factory(boom=True))
     res = engine.query_structured({
@@ -241,7 +241,7 @@ def test_mysql_channel_failure() -> None:
 
 def test_compat_alias() -> None:
     """用例 6：0.9.0 兼容别名仍可用。"""
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     assert callable(rag_service.answer_with_graph)
     assert rag_service.answer_with_graph.__doc__ and "answer_with_hybrid" in rag_service.answer_with_graph.__doc__
@@ -255,7 +255,7 @@ def monkeypatch_search(rag_service, hits) -> None:
 
 def test_real() -> None:
     """真实链路：连 MySQL；图谱与向量视环境可用性自动降级。"""
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     engine = rag_service._get_graph_engine()
     print(f"  图谱引擎：{'可用' if engine else '不可用（将自动降级）'}")

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """0.13.1 验证：Fast Mode 降级 / 生成轮短超时兜底 / 环境状态接口 / 答案清洗增强。
 
 用法：
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 
 # ---------------------------------------------------------------- 用例 1：配置
@@ -152,7 +152,7 @@ def test_fallback_prefix() -> None:
 def test_agent_status() -> None:
     """用例 4：/api/meta/agent-status 契约与容错。"""
     print("用例 4：环境状态接口")
-    from app.routers import meta as meta_router
+    from app.api.recommend import meta_router
 
     # 接口已注册
     paths = {r.path for r in meta_router.router.routes}
@@ -188,7 +188,7 @@ def test_fast_mode_routing() -> None:
     print("用例 5：Fast Mode 路由决策")
     import inspect
 
-    from app.routers import ai as ai_router
+    from app.api.chat import chat_router as ai_router
 
     src = inspect.getsource(ai_router.chat)
     assert "settings.AGENT_FAST_MODE" in src, "路由层必须判断极速模式"

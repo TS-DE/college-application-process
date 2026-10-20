@@ -12,9 +12,9 @@
 """
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
-from app.services import rag_service
+from app.services.rag import rag_service
 
 V21_COLLECTION = "test_pc_v21"   # 0.2.0 基线：只索引 500 字父块
 V22_COLLECTION = "test_pc_v22"   # 0.3.0：只索引 120 字子块 + docstore 存父块

@@ -15,7 +15,8 @@ import os
 import sys
 from typing import Dict, List
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/eval：同级 import rag_eval
+sys.path.insert(1, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 from app.services.eval.auto_tuner import PARAM_SPECS, AutoTuner
 from app.services.eval.data_builder import BaseRAGRunner, EvalDataBuilder, ProjectRAGRunner
@@ -25,7 +26,11 @@ from app.services.eval.evaluator import RAGEvaluator
 from app.services.eval.report_generator import ReportGenerator
 
 DATASET = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "eval", "gaokao_qa.json"
+    # 0.17.0：原逻辑是「backend 的上级目录」，即项目根；移动后按层级显式取 parents[3]
+    str(__import__("pathlib").Path(__file__).resolve().parents[3]),
+    "data",
+    "eval",
+    "gaokao_qa.json",
 )
 
 # 桩召回语料：故意留一部分噪声，让 context_precision 偏低、从而触发诊断规则

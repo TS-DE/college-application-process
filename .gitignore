@@ -35,3 +35,6 @@ data/eval_reports/
 backend/.env.bak.*
 # 注意：*.log 已被上方忽略（含 backend/app/services/eval/changes.log）
 frontend/tests/**/*.tmp_chat.cjs
+
+# 0.17.0：重构前测试基线（对照用，不入库）
+backend/tests/_baseline/

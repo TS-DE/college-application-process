@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """0.14.0 验证：LangGraph 人机回环（HITL）志愿规划。
 
 用法：
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 
 def _item(univ, major, prov, score=600, rank=40000, tuition=None):
@@ -269,7 +269,7 @@ def test_routes() -> None:
     print("用例 6：路由契约")
     from pydantic import ValidationError
 
-    from app.routers import plan as plan_router
+    from app.api.plan import plan_router
     from app.schemas.plan import PlanStartIn
 
     paths = {r.path for r in plan_router.router.routes}

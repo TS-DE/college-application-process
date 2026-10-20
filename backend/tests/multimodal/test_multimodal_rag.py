@@ -21,7 +21,7 @@ import glob
 import os
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
 SCANNED_PDF = glob.glob("knowledge_files/*高考志愿录取顺序.pdf")
 QUESTION_IMG = "福州大学至诚学院计算机专业有哪些课程"
@@ -100,7 +100,7 @@ def test_image_extract() -> None:
 
 def test_trigger() -> None:
     """用例 5：触发关键词。"""
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     print("用例 5：触发关键词")
     a = rag_service.should_use_multimodal(QUESTION_IMG)
@@ -200,7 +200,7 @@ def test_retriever_stub() -> None:
 
 def test_real() -> None:
     """用例 8：真实链路 OCR + 以文搜图。"""
-    from app.services import rag_service
+    from app.services.rag import rag_service
 
     print("用例 8：真实链路")
     if not SCANNED_PDF:

@@ -13,10 +13,10 @@
 """
 import sys
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))  # 0.17.0：指向 backend/
 
-from app.services import rag_service
-from app.services.ai_service import ask
+from app.services.rag import rag_service
+from app.services.llm.ai_service import ask
 
 # 有学费信息的上下文（数字必须来自这里）
 CONTEXT_WITH_TUITION = (
