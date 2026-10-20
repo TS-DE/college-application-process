@@ -130,9 +130,27 @@ class OllamaToolClient:
             # 带 tools 且成功返回 → 说明支持
             self._tools_supported = True
 
-        content = _THINK_RE.sub("", message.get("content") or "").strip()
+        content = self._strip_think(message.get("content") or "")
         calls = self._parse_tool_calls(message.get("tool_calls") or [])
         return LLMReply(content=content, tool_calls=calls, raw=data)
+
+    @staticmethod
+    def _strip_think(text: str) -> str:
+        """剥掉 qwen3 的思考标签（0.13.1）。
+
+        两种形态都要处理：
+          ① 完整块 `<think>…</think>` → 直接删；
+          ② **只有闭合标签**（token 预算耗尽，开标签被截断）→ 取最后一个
+             `</think>` 之后的内容，前面全是推理。
+        实测问候语曾被形态 ② 污染成「…所以不调用任何工具。</think>你好！…」。
+        """
+        if not text:
+            return ""
+        cleaned = _THINK_RE.sub("", text)
+        if "</think>" in cleaned:
+            cleaned = cleaned.rsplit("</think>", 1)[-1]
+        cleaned = cleaned.replace("<think>", "").replace("</think>", "")
+        return cleaned.strip()
 
     # ---------------- 模型适配 ----------------
 

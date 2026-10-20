@@ -31,6 +31,99 @@ router = APIRouter(prefix="/api/meta", tags=["meta"])
 
 _YEAR_IN_TABLE = re.compile(r"_(\d{4})_")
 
+# ---------------------------------------------------------------- 环境探测（0.13.1）
+#
+# 前端要用两个指示灯告诉用户「为什么有些问题答不上来」：
+#   · 政策库红灯 → 知识库里没有任何文档（向量检索必然落空）
+#   · 图谱红灯   → Neo4j 未启动（tool_search_graph 已被自动剔除）
+# 探测本身有成本（Chroma count / Neo4j 连接），因此做 30 秒 TTL 缓存，
+# 避免每次进 AI 页面都打一次外部依赖。
+_ENV_STATUS_TTL = 30.0
+_env_status_cache: Dict[str, object] = {"at": 0.0, "data": None}
+
+
+def _probe_vector() -> Dict:
+    """探测向量库：集合存在且文档数 > 0 才算「政策库就绪」。"""
+    try:
+        from app.services.rag_service import backend_info
+
+        info = backend_info()
+        count = int(info.get("count") or 0)
+        return {
+            "vector_ready": bool(info.get("ready")) and count > 0,
+            "vector_count": count,
+            "vector_error": "" if count > 0 else (info.get("error") or "知识库暂无文档"),
+            "embedding_model": info.get("embedding_model") or "",
+        }
+    except Exception as exc:  # noqa: BLE001 探测失败不能影响页面
+        return {
+            "vector_ready": False,
+            "vector_count": 0,
+            "vector_error": f"{exc.__class__.__name__}",
+            "embedding_model": "",
+        }
+
+
+def _probe_graph(timeout: float = 3.0) -> Dict:
+    """探测 Neo4j（限时，避免连接超时把接口拖死）。"""
+    if not settings.GRAPH_ENABLED:
+        return {"graph_ready": False, "graph_error": "图谱通道已关闭（GRAPH_ENABLED=0）"}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeout
+
+        from app.services.graph.graph_store import GraphStore
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(GraphStore().available)
+            try:
+                ok = bool(future.result(timeout=timeout))
+            except FutureTimeout:
+                return {"graph_ready": False, "graph_error": "Neo4j 连接超时"}
+        return {
+            "graph_ready": ok,
+            "graph_error": "" if ok else "Neo4j 未启动",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"graph_ready": False, "graph_error": f"{exc.__class__.__name__}"}
+
+
+@router.get("/agent-status")
+def agent_status(refresh: bool = Query(default=False, description="true 表示跳过缓存")) -> Dict:
+    """AI 环境状态：前端据此点亮「政策库 / 图谱」指示灯（0.13.1）。
+
+    返回：
+        {
+          "vector_ready": true,        # 政策库有文档
+          "graph_ready": false,        # Neo4j 可连接
+          "local_model": "qwen3:4b",
+          "agent_mode": "fast",        # fast=确定性链路 / agent=两轮工具推理
+          "vector_count": 3,
+          "graph_error": "Neo4j 未启动"
+        }
+    """
+    import time as _time
+
+    now = _time.time()
+    cached = _env_status_cache.get("data")
+    if not refresh and cached and (now - float(_env_status_cache.get("at") or 0)) < _ENV_STATUS_TTL:
+        return dict(cached)  # type: ignore[arg-type]
+
+    data: Dict = {}
+    data.update(_probe_vector())
+    data.update(_probe_graph())
+    data.update(
+        {
+            "local_model": settings.OLLAMA_MODEL,
+            "agent_mode": "fast" if settings.AGENT_FAST_MODE else "agent",
+            "agent_enabled": settings.AGENT_ENABLED,
+            "checked_at": now,
+        }
+    )
+    _env_status_cache["at"] = now
+    _env_status_cache["data"] = data
+    return dict(data)
+
 
 def _available_years(province: str = "") -> List[int]:
     """扫描 information_schema，找出**总表**实际导入了哪些年份。

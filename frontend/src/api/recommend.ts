@@ -44,6 +44,30 @@ export function metaOptions(province: string) {
   return http<MetaOptionsResult>({ url: '/meta/options', params: { province } })
 }
 
+/**
+ * AI 环境状态（0.13.1）。
+ *
+ * 用于在 AI 助手页显示「政策库 / 图谱」两个指示灯：
+ * 让用户直观知道「为什么有些问题答不上来」，而不是只看到一句「未查询到」。
+ * 后端有 30 秒 TTL 缓存，可以放心在页面加载时调用。
+ */
+export interface AgentStatusResult {
+  vector_ready: boolean
+  vector_count: number
+  vector_error?: string
+  graph_ready: boolean
+  graph_error?: string
+  local_model: string
+  /** fast=确定性链路（默认，6-15s）；agent=两轮工具推理（演示用） */
+  agent_mode: 'fast' | 'agent'
+  agent_enabled: boolean
+  embedding_model?: string
+}
+
+export function agentStatus(refresh = false) {
+  return http<AgentStatusResult>({ url: '/meta/agent-status', params: { refresh } })
+}
+
 export interface ScoreCheckPayload {
   province: string
   year: number

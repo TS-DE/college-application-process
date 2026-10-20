@@ -146,9 +146,16 @@ class AgentRunner:
                 num_predict=self.plan_tokens if is_planning else self.answer_tokens,
                 timeout=self.plan_timeout if is_planning else self.answer_timeout,
             )
+            _elapsed = time.time() - _t
             logger.info(
                 "[AGENT] 第 %d 轮 LLM 完成 %.1fs（tool_calls=%d）",
-                step, time.time() - _t, len(reply.tool_calls),
+                step, _elapsed, len(reply.tool_calls),
+            )
+            # uvicorn 默认只输出 WARNING+，关键耗时用 print 保证可见（同 0.10.0 OCR）
+            print(
+                f"[AGENT] 第 {step} 轮（{'规划' if is_planning else '生成'}）"
+                f"{_elapsed:.1f}s tool_calls={len(reply.tool_calls)}",
+                flush=True,
             )
             if reply.error:
                 logger.info("[AGENT] 第 %d 轮 LLM 失败：%s", step, reply.error)
@@ -215,33 +222,21 @@ class AgentRunner:
                     }
                 )
 
-        # 轮数耗尽：强制不带工具，让模型基于已获取的资料作答
-        logger.info("[AGENT] 达到最大轮数 %d，强制收尾生成", self.max_steps)
-        final = self.llm.chat(
-            messages,
-            tools=None,
-            force_no_tools=True,
-            num_predict=self.answer_tokens,
-            timeout=self.answer_timeout,
-        )
-        answer = clean_answer(final.content or "")
-        if not answer:
-            if collected:
-                return self._answer_from_results(
-                    collected, traces, sources, profile_context, start,
-                    source="agent_tool_only",
-                )
-            return None
-        return AgentAnswer(
-            answer=answer,
-            source="agent_fallback",
-            sources=_dedup(sources),
-            traces=traces,
-            steps=self.max_steps,
-            elapsed_ms=int((time.time() - start) * 1000),
-            profile_injected=bool(profile_context),
-            model=self.llm.model,
-        )
+        # ---- 轮数耗尽 ----
+        # 0.13.1：这里**不再**多做一次「强制收尾生成」。
+        # 0.13.0 的做法是再发一轮 LLM（本机又是 25-60 秒），
+        # 但此时工具结果已经拿到了——直接做抽取式回答，把总耗时压到
+        # 「规划 + 工具」两段，符合「宁可给事实，也不要让用户多等一分钟」。
+        if collected:
+            logger.info(
+                "[AGENT] 达到最大轮数 %d，直接用已获取的 %d 路工具结果作答",
+                self.max_steps, len(collected),
+            )
+            return self._answer_from_results(
+                collected, traces, sources, profile_context, start,
+                source="agent_tool_only",
+            )
+        return None
 
     def _answer_from_results(
         self,
@@ -262,7 +257,11 @@ class AgentRunner:
 
         这符合「宁可给事实，也不要给空气」的降级原则。
         """
-        parts: List[str] = ["以下是从本地资料中检索到的内容，供你参考：", ""]
+        # 0.13.1：明确告知用户「这是降级结果」，而不是假装是模型的完整回答
+        parts: List[str] = [
+            "（受限于本地算力，已为你直接提取检索结果）",
+            "",
+        ]
         for i, res in enumerate(collected, 1):
             text = (res.summary or "").strip()
             if not text:
@@ -470,33 +469,65 @@ def clean_answer(text: str) -> str:
     if not text:
         return ""
 
-    meta_markers = (
-        "用户问", "用户的问题是", "用户想要", "用户可能", "用户需要",
-        "我需要", "我们应该", "我应该", "让我", "根据工具", "工具使用规则",
-        "回答要求", "回答规则", "根据要求", "首先，我", "首先我",
-        "好的，用户", "好的，我", "分析一下", "判断一下",
+    raw_text = str(text)
+
+    # ① 处理「思考标签残片」：模型在 token 预算耗尽时只输出 `</think>` 而没有 `<think>`，
+    #    前面的推理块会被当成正文漏出来（实测问候语就是这样被污染的）。
+    #    有闭合标签时，取**最后一个** `</think>` 之后的内容——那才是真正的回答。
+    if "</think>" in raw_text:
+        tail = raw_text.rsplit("</think>", 1)[-1].strip()
+        if len(tail) >= 2:
+            raw_text = tail
+    raw_text = raw_text.replace("<think>", "").replace("</think>", "")
+
+    # 旁白句的两种特征（OR 关系）：
+    #   ① 以思考连接词开头（所以 / 不过 / 首先 / 好的 / 回答要求 …）
+    #   ② 含明确的元叙述短语（用户问 / 工具使用规则 / 不调用工具 …）
+    meta_prefix = (
+        "所以", "不过", "首先", "好的", "回答要求", "回答规则", "这里", "用户",
+        "我需", "我应", "我要", "让我", "根据", "判断", "分析", "综上",
+    )
+    meta_phrases = (
+        "用户问", "用户的问题是", "工具使用规则", "不需要调用", "不调用工具",
+        "简单回应", "直接回复", "禁止输出思考", "不能输出思考", "应该调用",
+        "这里没有工具", "应该直接输出", "所以直接输出",
+        # 0.13.1 实测新增形态
+        "检查一下", "是否需要调用", "这里不需要", "不调用任何工具",
     )
 
-    paragraphs = [p.strip() for p in str(text).split("\n") if p.strip()]
+    def _is_meta(sent: str) -> bool:
+        s = sent.strip()
+        if len(s) < 2:
+            return True                      # 纯标点碎片（如切句后的 ” ）
+        if any(p in s for p in meta_phrases) and len(s) < 260:
+            return True
+        return s.startswith(meta_prefix) and len(s) < 260
+
+    paragraphs = [p.strip() for p in raw_text.split("\n") if p.strip()]
     kept: List[str] = []
-    started = False
 
     for para in paragraphs:
         # 用中文句末标点 + 换行切句，保留标点
         sentences = [s for s in para.replace("！", "！\n").replace("？", "？\n")
                      .replace("。", "。\n").split("\n") if s.strip()]
         for sent in sentences:
-            is_meta = any(m in sent for m in meta_markers) and len(sent) < 260
-            if not started and is_meta:
-                continue          # 还在旁白区，丢弃
-            started = True
+            # ★ 全程过滤（0.13.0 只过滤开头，导致「首句正文之后」的旁白又漏了回来）
+            if _is_meta(sent):
+                continue
             kept.append(sent.strip())
 
     result = "\n".join(kept).strip()
-    # 兜底：如果全被判成旁白（说明模型只输出了思考），返回原文的尾部，
-    # 至少给用户一点内容，而不是空白
+    # 兜底一：全部被判成旁白时，尝试从引号里捞出模型「打算说出口」的那句话
+    # 实测形态：所以应该简单回应“你好！有什么可以帮您的吗？”
     if not result:
-        result = str(text).strip()
+        import re as _re
+
+        quoted = _re.findall(r"[“\"「]([^”\"」]{4,120})[”\"」]", raw_text)
+        if quoted:
+            result = quoted[-1].strip()
+    # 兜底二：仍为空则返回原文（宁可有噪声，也不要空白）
+    if not result:
+        result = raw_text.strip()
     return result
 
 
