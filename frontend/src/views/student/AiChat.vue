@@ -31,6 +31,8 @@
           <!-- 0.14.0：人机协同志愿规划入口 -->
           <div class="head-right">
             <template v-if="userStore.isLogin">
+              <!-- 0.16.0：清空当前对话 -->
+              <el-button size="small" @click="onClearChat">清空对话</el-button>
               <el-button size="small" @click="$router.push('/plan')">
                 🤖 智能生成志愿方案
               </el-button>
@@ -52,13 +54,15 @@
       </template>
 
       <div ref="scrollEl" class="messages">
+        <!-- 0.16.0：欢迎语仅在空会话时显示，避免与历史记录重复 -->
         <ChatBubble
+          v-if="chatStore.isEmpty"
           role="ai"
           text="你好，我是高考志愿填报助手。可以问我填报政策、批次规则、冲稳保策略，也可以查某所学校或专业的分数、学费。"
         />
         <ChatBubble
-          v-for="(m, i) in messages"
-          :key="i"
+          v-for="m in chatStore.messages"
+          :key="m.id"
           :role="m.role"
           :text="m.text"
           :sources="m.sources"
@@ -73,7 +77,7 @@
 
       <div class="composer">
         <el-input
-          v-model="question"
+          v-model="chatStore.draftQuestion"
           type="textarea"
           :rows="2"
           placeholder="例如：河南本科批平行志愿怎么填报？（Ctrl + Enter 发送）"
@@ -86,26 +90,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatBubble from '@/components/ChatBubble.vue'
 import { chat } from '@/api/ai'
 import { agentStatus, type AgentStatusResult } from '@/api/recommend'
 import { fetchProfile } from '@/api/profile'
 import { useUserStore } from '@/stores/user'
-
-interface Msg {
-  role: 'user' | 'ai'
-  text: string
-  sources?: string[]
-}
+import { useChatStore } from '@/stores/chat'
 
 const userStore = useUserStore()
+// 0.16.0：聊天记录与草稿改由 store 持有，切页面/刷新不丢
+const chatStore = useChatStore()
 
-const question = ref('')
 const thinking = ref(false)
 const thinkingText = ref('AI 正在思考…')
-const messages = ref<Msg[]>([])
 const scrollEl = ref<HTMLDivElement>()
 const profileReady = ref(false)
 
@@ -176,14 +175,15 @@ async function scrollBottom() {
 }
 
 async function send() {
-  const q = question.value.trim()
+  const q = chatStore.draftQuestion.trim()
   if (!q) return
   if (!userStore.isLogin) {
     ElMessage.warning('请先登录')
     return
   }
-  messages.value.push({ role: 'user', text: q })
-  question.value = ''
+  // 0.16.0：用户消息先入 store（立即持久化），刷新也不会丢
+  chatStore.push({ role: 'user', text: q })
+  chatStore.setDraft('')
   startThinking()
   await scrollBottom()
 
@@ -191,14 +191,15 @@ async function send() {
     // 0.13.0：后端默认走本地 Agent（模型自主决定调用哪个工具），
     // 前端不再传 use_rag —— 用户不需要知道 RAG 是什么。
     const res = await chat({ question: q })
-    messages.value.push({
+    chatStore.push({
       role: 'ai',
       text: res.answer,
       sources: res.sources?.length ? res.sources : undefined
     })
   } catch (e: any) {
     const detail = e?.response?.data?.detail
-    messages.value.push({
+    // 失败也要落一条记录并持久化，避免「发完就没了」
+    chatStore.push({
       role: 'ai',
       text: `抱歉，回答失败：${detail || e?.message || '未知错误'}`
     })
@@ -207,6 +208,48 @@ async function send() {
     await scrollBottom()
   }
 }
+
+/** 0.16.0：清空对话（二次确认） */
+async function onClearChat() {
+  try {
+    await ElMessageBox.confirm(
+      '确定清空当前对话记录吗？清空后无法恢复。',
+      '清空对话',
+      { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' }
+    )
+  } catch {
+    return // 用户取消
+  }
+  chatStore.clear()
+  ElMessage.success('对话已清空')
+}
+
+/**
+ * 0.16.0：按用户加载会话。
+ *
+ * 用 `watch` 而不是 `onMounted` 里一次性读取：`/ai-chat` 是公开页，
+ * 0.15.1 之后路由守卫**不再等待** `/auth/me`，进页面时 `userStore.user`
+ * 可能还是 null（后台拉取中）。用 watch + immediate 可覆盖两种时序：
+ *   · 进页面时已有 user → 立即加载；
+ *   · 进页面时 user 为 null → 拉取完成后自动加载。
+ */
+watch(
+  () => userStore.user?.id,
+  (id) => {
+    if (id) chatStore.loadForUser(id)
+  },
+  { immediate: true }
+)
+
+/** 0.16.0：超过 100 条时提示「更早的记录已清理」 */
+watch(
+  () => chatStore.trimmed,
+  (v) => {
+    if (!v) return
+    ElMessage.info('更早的记录已清理（最多保留 100 条）')
+    chatStore.acknowledgeTrimmed()
+  }
+)
 
 onMounted(async () => {
   // 环境状态与登录无关，先探测（后端有 30s 缓存，开销很小）

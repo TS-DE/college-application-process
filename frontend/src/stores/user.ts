@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { clearToken, getToken, isUnauthorized, setToken } from '@/api/request'
 import { fetchMeWithTimeout, login as loginApi, register as registerApi } from '@/api/auth'
+import { useChatStore } from '@/stores/chat'
 import type { LoginPayload, RegisterPayload, UserInfo, UserRole } from '@/types/user'
 
 /**
@@ -117,6 +118,14 @@ export const useUserStore = defineStore('user', {
       this.lastMeLoadedAt = 0
       this.meError = ''
       clearToken()
+      // 0.16.0：退出登录时同步清空聊天记录，避免同一浏览器残留他人对话。
+      // 依赖方向是 user → chat（单向），`stores/chat.ts` 不 import 本文件，
+      // 因此不存在循环依赖；`api/request.ts` 也不反向 import store。
+      try {
+        useChatStore().clear()
+      } catch (e) {
+        console.warn('[AUTH] 清空聊天记录失败', e)
+      }
     }
   }
 })
