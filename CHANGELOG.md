@@ -64,8 +64,186 @@
 | **0.13.0** | 2026-10-20 | 父子块（不变） | **本地 Agent（Function Calling）**：向量/MySQL/图谱封装成工具，由 qwen3:4b 自主选择；云端心理师独立成链路 | 父块 + 图谱 + MySQL + 图像 + **用户画像（物理隔离上传）** | ✅ 已发布 |
 | **0.13.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **极速模式**（默认走确定性链路）+ **环境状态指示灯** | 同上（问答延迟 150s → 9.5s） | ✅ 已发布 |
 | **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 已发布 |
-| **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 本次修复 |
+| **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 已发布 |
+| **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 本次修复 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.15.1] - 2026-10-20 · 补齐 0.15.0 遗留三处缺陷 + AI 线程池过载保护
+
+### 一、原有缺陷
+
+0.15.0 把「超时掉登录」修好了，但核对时确认还剩三处同类隐患，外加一个缺失的过载保护：
+
+| # | 缺陷 | 现象 |
+|---|---|---|
+| 1 | 拦截器 401 只清 localStorage，**不同步 Pinia** | `userStore.token` 仍在内存 → `isLogin` 仍为 true → 导航栏显示已登录，但所有请求都 401，页面进入「假登录」僵尸状态 |
+| 2 | 守卫对**公开页**也 `await loadMe()` | 后端卡住时，从首页点「查大学」要**先空等满 30 秒**才跳转。0.15.0 只做到了「超时后不拦截公开页」，没做到「公开页不等」 |
+| 3 | `/parse-intent`、`/recommend-reason` 仍用全局线程池 | 这两个接口内部同样调 LLM，仍会占 anyio 池，把认证接口挤到排队 |
+| 4 | AI 线程池**队列无界** | 池满后任务无限排队，用户只能白等到各自超时（25–200 秒）才拿到 504，而不是立刻被告知「服务繁忙」 |
+
+### 二、改进技术
+
+#### 问题 1：401 → 同步登出（回调注入，避免循环依赖）
+
+```
+request.ts（基础设施层）                main.ts（应用装配层）
+  let onUnauthorized = null       ──→   setUnauthorizedHandler(() => {
+  export function setUnauthorizedHandler(fn)      useUserStore(pinia).logout()
+  401 分支：clearToken() + onUnauthorized?.()    })
+```
+
+**为什么用回调而不是直接 `import store`**：`stores/user.ts` → `api/auth.ts` → `api/request.ts`，
+若 `request.ts` 再 import store 就形成**循环依赖**（打包后表现为 `useUserStore is not defined`）。
+回调注入把依赖方向反过来：基础设施只声明「需要通知」，由应用入口装配。
+
+#### 问题 2：公开页不等 `/auth/me`
+
+```ts
+const needsIdentity = !!(to.meta.requiresLogin || to.meta.requiresAdmin)
+if (userStore.isLogin && !userStore.user) {
+  if (needsIdentity) {
+    await userStore.loadMe()          // 必须知道角色才能决定放行
+    if (userStore.meError === 'network') { next({ path:'/login', query:{ reason:'network' } }); return }
+  } else {
+    void userStore.loadMe()           // ★ 公开页：后台拉取，不阻塞导航
+  }
+}
+```
+
+`loadMe` 内部已吞掉所有异常（只返回 `null`），所以 `void` 不会产生 unhandled rejection；
+导航栏靠 Pinia 响应式更新，用户信息到达后自动显示。
+
+#### 问题 3：两个 AI 接口并入专用池
+
+| 接口 | 改前 | 改后 |
+|---|---|---|
+| `POST /api/ai/parse-intent` | `run_in_threadpool(_parse, ...)` | `_run_ai(_parse, ..., timeout=30, label="parse-intent")` |
+| `POST /api/ai/recommend-reason` | `run_in_threadpool(_reason, ...)` | `_run_ai(_reason, ..., timeout=30, label="recommend-reason")` |
+
+改后 `ai.py` 中 `run_in_threadpool` **只剩一处**：`/status` 里的 `ollama_health` 毫秒级探测（符合约定）。
+
+#### 问题 4：AI 过载保护
+
+```python
+_INFLIGHT_LOCK = threading.Lock()
+_inflight_count = 0
+
+def _inflight_limit() -> int:
+    return max(1, settings.AI_THREADPOOL_SIZE * settings.AI_MAX_INFLIGHT_FACTOR)  # 8 × 2 = 16
+```
+
+- **准入**在 `_run_ai` 内用原子计数裁决（并发竞态下只有 16 个能进）；
+- **入口预检** `_reject_if_overloaded()` 在路由函数第一行执行，让已过载的请求**不跑读画像等前置步骤**；
+- **释放**放在 `_run_ai` 最外层 `finally`，超时、异常、正常返回都归零（`max(0, …)` 兜底防负）；
+- 超限时抛 **503「AI 服务繁忙，请稍后重试」**；
+- `/chat` 的 Agent 分支新增 `except HTTPException: raise`，避免 503 被「回落融合链路」吞掉后继续排队。
+
+新增配置：`AI_MAX_INFLIGHT_FACTOR=2`（上限 = 池大小 × 系数）。
+
+### 三、对应代码位置
+
+| 文件 | 函数 / 区块 | 改动 |
+|---|---|---|
+| `frontend/src/api/request.ts` | 模块级 `onUnauthorized` / `setUnauthorizedHandler` / 401 分支 | 新增回调注入机制 |
+| `frontend/src/main.ts` | `const pinia = createPinia()` + `setUnauthorizedHandler(...)` | 注册登出回调（传 pinia 实例） |
+| `frontend/src/router/index.ts` | `beforeEach` | 引入 `needsIdentity`，公开页改 `void loadMe()` |
+| `backend/app/config.py` | 线程隔离配置区 | 新增 `AI_MAX_INFLIGHT_FACTOR` |
+| `backend/app/routers/ai.py` | `_INFLIGHT_LOCK` / `_try_acquire_inflight` / `_release_inflight` / `_reject_if_overloaded` | 新增过载保护 |
+| `backend/app/routers/ai.py` | `_run_ai` | 增加准入与最外层 `finally` 释放 |
+| `backend/app/routers/ai.py` | `chat` / `counselor` / `parse_intent` / `recommend_reason` | 入口预检 + 两处改用 `_run_ai` |
+| `backend/app/routers/ai.py` | `chat` 的 Agent 分支 | 新增 `except HTTPException: raise` |
+| `frontend/tests/auth/verify_401_logout.cjs` | 新增 | 401/超时/5xx 判据验证（打包真实源码） |
+| `frontend/tests/auth/verify_router_guard.cjs` | 新增 | 守卫结构断言 |
+
+### 四、验证流程
+
+#### 验收 a：token 过期 → 导航栏立刻变未登录
+
+```bash
+cd frontend && npm run verify:auth
+```
+
+用 esbuild 把**真实的** `src/api/request.ts` 打包，只把 element-plus 打桩，注入假 axios adapter：
+
+```
+=== 用例 1：业务接口返回 401 ===
+  请求后 localStorage token = ""
+  onUnauthorized 回调被调用次数 = 1
+  判定：PASS（401 必须同步登出）
+
+=== 用例 2：请求超时（无 response）===
+  请求后 localStorage token = "keep-me-token"
+  onUnauthorized 回调被调用次数 = 0
+  判定：PASS（超时必须保留 token）
+
+=== 用例 3：后端 503（过载保护）===
+  请求后 token = "keep-on-503" 回调次数 = 0
+  判定：PASS（5xx 必须保留 token）
+```
+
+#### 验收 b：公开页导航不等 `/auth/me`
+
+```bash
+cd frontend && node tests/auth/verify_router_guard.cjs
+```
+
+```
+  PASS  ① 先计算 needsIdentity
+  PASS  ② 需要身份时才 await loadMe
+  PASS  ③ 公开页用 void loadMe（不 await）
+  PASS  ④ 公开页 loadMe 之后直接 next()（无阻塞判断）
+  PASS  ⑤ 保留网络异常分流（reason=network）
+  PASS  ⑥ 公开页分支内不含 await loadMe
+结构验证全部通过
+```
+
+> **说明**：本机未安装 playwright（无 chromium，浏览器下载受限），
+> 因此「导航实际耗时」未能做浏览器实测。以上为源码结构断言，
+> 浏览器复核步骤：把后端 `/auth/me` 延迟 40 秒 → 刷新首页 → 点「查大学」，
+> 应立即跳转（<1 秒）且导航栏稍后自动显示用户名。
+
+#### 验收 c：20 并发 → 超出的请求 1 秒内 503
+
+```bash
+# 20 个独立 curl 进程并发（避免 Python 多线程的 GIL 干扰测量）
+```
+
+```
+总墙钟 19.38s
+200 成功    : 16 个，11.59–19.30s
+503 过载拒绝: 4 个，597–611 ms
+
+存在 503 拒绝      : PASS（4 个）
+503 在 1 秒内返回  : PASS
+```
+
+> **测量说明**：同一场景用 Python 多线程测得 2.3–3.0 秒，但那是 **GIL 争抢导致的客户端假象**
+> （20 个线程同时建连/写请求，实际发出时间被拉开）。改用 20 个独立 curl 进程后为 **597–611ms**；
+> 另单独测「16 个占满后再单发」的纯拒绝路径，响应仅 **22–26ms**。
+> 服务端拒绝逻辑本身是毫秒级。
+
+同时验证**计数不泄漏**：过载测试结束后单发一次 → `HTTP 200 耗时 6.5s`（名额已全部归还）。
+
+#### 回归
+
+```bash
+python -m tests.auth.test_auth_isolation     # PASS（认证隔离）
+python smoke_test.py                          # PASS
+python smoke_rag.py                           # PASS
+python test_user_profile.py                   # PASS
+cd frontend && npx tsc --noEmit && npm run build   # PASS
+```
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 过载阈值偏保守 | 上限 = 池大小 × 2 = 16。实测 16 个请求最长排队 21 秒（池压到 2 时），说明队列仍会积压；如需更激进可调小 `AI_MAX_INFLIGHT_FACTOR` |
+| 被拒绝的请求不排队 | 503 是「立即拒」，不是「优雅降级」。若希望过载时仍服务低优先级请求（如 `/status`），需另加优先级队列 |
+| 浏览器实测缺失 | 验收 b 只做了结构断言，原因见上（playwright 不可用） |
+| 超时线程不中断 | `wait_for` 只取消 future，线程仍会跑完再释放槽位，因此上限是「在途」而非「运行中」 |
 
 ---
 

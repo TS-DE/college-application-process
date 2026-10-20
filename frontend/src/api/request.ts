@@ -15,6 +15,23 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+/**
+ * 401 时的回调（0.15.1）。
+ *
+ * ## 为什么用回调而不是直接 import store
+ * `request.ts` 是基础设施层，`stores/user.ts` 又 import 了 `api/auth.ts`，
+ * 而 `api/auth.ts` 依赖 `request.ts` —— 直接 import store 会形成**循环依赖**
+ * （打包后表现为 `useUserStore is not defined` 或 undefined 的诡异报错）。
+ * 用回调注入把依赖方向反过来：基础设施只声明「需要通知」，由应用入口装配。
+ *
+ * 注册方：`main.ts`（pinia 安装之后）。
+ */
+let onUnauthorized: (() => void) | null = null
+
+export function setUnauthorizedHandler(fn: () => void) {
+  onUnauthorized = fn
+}
+
 // 0.7.2：默认超时从 60000ms 下调到 10000ms，避免后端偶发阻塞时前端长时间挂起。
 // AI / 文件上传等长耗时接口请使用 aiRequest 或在请求配置里显式覆盖 timeout。
 const DEFAULT_TIMEOUT = 10000
@@ -66,7 +83,10 @@ function addAuthInterceptor(instance: AxiosInstance) {
       const status = error?.response?.status
       const detail = error?.response?.data?.detail
       if (status === 401) {
+        // 0.15.1：只清 localStorage 会让 Pinia 里的 token 残留，
+        // 表现为「导航栏显示已登录、实际所有请求 401」。必须同步 store 状态。
         clearToken()
+        onUnauthorized?.()
         ElMessage.error(detail || '登录已过期，请重新登录')
       } else if (status === 403) {
         ElMessage.error(detail || '没有权限访问该资源')

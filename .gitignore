@@ -9,6 +9,8 @@ venv/
 # Node
 node_modules/
 dist/
+# 0.15.1：前端验证脚本的 esbuild 临时产物
+frontend/tests/**/*.tmp_request.cjs
 
 # 项目数据（上传文件与向量库不入库）
 backend/knowledge_files/

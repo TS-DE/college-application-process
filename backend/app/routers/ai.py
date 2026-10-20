@@ -17,6 +17,7 @@
 """
 import asyncio
 import functools
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict
@@ -60,45 +61,120 @@ def _timed_call(recorder: Dict[str, Any], fn, args: tuple) -> Any:
     return fn(*args)
 
 
-async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
-    """把阻塞调用提交到 **AI 专用线程池**，并施加超时。
+# ============================================================ 在途计数（0.15.1 过载保护）
+#
+# ## 为什么线程池还不够
+# `ThreadPoolExecutor` 的**队列是无界的**：池子（8 线程）占满后，
+# 后续任务会无限排队，直到各自超时才返回 504 —— 用户白等 25-200 秒，
+# 期间连接与内存都还占着。对「AI 推理」这种重任务，排队不如直接拒绝。
+#
+# 上限 = `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR`（默认 8×2=16），
+# 含义是「跑着一批 + 等一批」；再多就说明确实过载，立刻 503 更诚实。
+_INFLIGHT_LOCK = threading.Lock()
+_inflight_count = 0
 
-    与 `run_in_threadpool` 的区别只有两点，但都很关键：
+
+def _inflight_limit() -> int:
+    return max(1, settings.AI_THREADPOOL_SIZE * settings.AI_MAX_INFLIGHT_FACTOR)
+
+
+def _try_acquire_inflight() -> bool:
+    """尝试占用一个在途名额；超过上限返回 False。"""
+    global _inflight_count
+    with _INFLIGHT_LOCK:
+        if _inflight_count >= _inflight_limit():
+            return False
+        _inflight_count += 1
+        return True
+
+
+def _release_inflight() -> None:
+    """释放名额（`max(0, …)` 防御性下限，避免任何路径把计数压成负数）。"""
+    global _inflight_count
+    with _INFLIGHT_LOCK:
+        _inflight_count = max(0, _inflight_count - 1)
+
+
+def _current_inflight() -> int:
+    """当前在途数（供日志与测试读取）。"""
+    with _INFLIGHT_LOCK:
+        return _inflight_count
+
+
+def _reject_if_overloaded(label: str) -> None:
+    """请求**入口**的快速预检（0.15.1）。
+
+    与 `_run_ai` 内的检查分工：
+      · 这里只读计数、不占名额，作用是「已过载就别再跑读画像等前置步骤」；
+      · `_run_ai` 里的 acquire 才是原子的准入控制，负责并发竞态下的最终裁决。
+
+    实测：20 个请求同刻到达时，若等到第一个 `_run_ai` 才发现过载，
+    请求已经排过一轮队（约 2 秒）才被拒；入口预检能把这段省掉。
+    """
+    current = _current_inflight()
+    if current >= _inflight_limit():
+        print(
+            f"[AI] 过载拒绝(入口) {label}：在途 {current}/{_inflight_limit()}",
+            flush=True,
+        )
+        raise HTTPException(status_code=503, detail="AI 服务繁忙，请稍后重试")
+
+
+async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
+    """把阻塞调用提交到 **AI 专用线程池**，施加超时，并做过载保护。
+
+    与 `run_in_threadpool` 的区别有三点：
       1. 用 `_AI_EXECUTOR` 而非 anyio 默认池 → 不挤占认证/业务接口；
-      2. 记录**排队耗时**与执行耗时，超过 `AI_QUEUE_WAIT_WARN_SECONDS` 打告警，
-         这样「池子被占满」在生产日志里是可见的，而不是靠猜。
+      2. 记录**排队耗时**与执行耗时，超过 `AI_QUEUE_WAIT_WARN_SECONDS` 打告警；
+      3. 在途数超过 `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR` 时
+         **立刻 503**，不让请求在无界队列里空等到超时。
 
     超时后 `wait_for` 会取消 future，但**线程本身无法被强制终止**
     （Python 的已知限制）；被放弃的任务仍会跑完再释放槽位。
     因此 `timeout` 应小于前端 axios 超时，让前端先拿到明确的 504。
-    """
-    loop = asyncio.get_running_loop()
-    recorder: Dict[str, Any] = {"started_at": 0.0}
-    submitted_at = time.perf_counter()
 
-    future = loop.run_in_executor(
-        _AI_EXECUTOR, functools.partial(_timed_call, recorder, fn, args)
-    )
-    try:
-        return await asyncio.wait_for(future, timeout=timeout)
-    except asyncio.TimeoutError:
-        waited = time.perf_counter() - submitted_at
+    :raises HTTPException: 503（过载）
+    """
+    if not _try_acquire_inflight():
         print(
-            f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
-            f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
+            f"[AI] 过载拒绝 {label}：在途 {_current_inflight()}/{_inflight_limit()}"
+            f"（池大小 {settings.AI_THREADPOOL_SIZE} × 系数 {settings.AI_MAX_INFLIGHT_FACTOR}）",
             flush=True,
         )
-        raise
+        raise HTTPException(status_code=503, detail="AI 服务繁忙，请稍后重试")
+
+    try:
+        loop = asyncio.get_running_loop()
+        recorder: Dict[str, Any] = {"started_at": 0.0}
+        submitted_at = time.perf_counter()
+
+        future = loop.run_in_executor(
+            _AI_EXECUTOR, functools.partial(_timed_call, recorder, fn, args)
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            waited = time.perf_counter() - submitted_at
+            print(
+                f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
+                f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
+                flush=True,
+            )
+            raise
+        finally:
+            if recorder["started_at"]:
+                queue_wait = recorder["started_at"] - submitted_at
+                if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
+                    print(
+                        f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
+                        f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
+                        f"池大小 {settings.AI_THREADPOOL_SIZE}）",
+                        flush=True,
+                    )
     finally:
-        if recorder["started_at"]:
-            queue_wait = recorder["started_at"] - submitted_at
-            if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
-                print(
-                    f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
-                    f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
-                    f"池大小 {settings.AI_THREADPOOL_SIZE}）",
-                    flush=True,
-                )
+        # ★ 必须放在最外层 finally：超时、异常、正常返回都要归零，
+        #   否则一次失败就永久吃掉一个名额，最终整个 AI 服务被 503 锁死。
+        _release_inflight()
 
 
 @router.get("/status")
@@ -128,12 +204,20 @@ def _model_name() -> str:
 
 @router.post("/parse-intent", response_model=ParseIntentOut)
 async def parse_intent(payload: ParseIntentIn) -> ParseIntentOut:
-    """把「我想找个离家近、计算机强、学费便宜的学校」转成筛选条件。"""
+    """把「我想找个离家近、计算机强、学费便宜的学校」转成筛选条件。
+
+    0.15.1：改走 `_run_ai`，与 `/chat` 共用 AI 专用池与过载保护。
+    此前走 `run_in_threadpool`（anyio 默认池），LLM 调用同样会挤占认证线程。
+    """
     from app.services.ai_service import parse_intent as _parse
 
-    data = await asyncio.wait_for(
-        run_in_threadpool(_parse, payload.text, province=payload.province),
+    _reject_if_overloaded("parse-intent")
+    data = await _run_ai(
+        _parse,
+        payload.text,
+        payload.province,   # 位置参数，保持与 ai_service.parse_intent(text, province) 一致
         timeout=30.0,
+        label="parse-intent",
     )
     raw = data.pop("raw", None)
     return ParseIntentOut(**data, raw=raw)
@@ -141,16 +225,16 @@ async def parse_intent(payload: ParseIntentIn) -> ParseIntentOut:
 
 @router.post("/recommend-reason", response_model=RecommendReasonOut)
 async def recommend_reason(payload: RecommendReasonIn) -> RecommendReasonOut:
-    """为单条志愿生成推荐理由。"""
+    """为单条志愿生成推荐理由（0.15.1：改走 `_run_ai`）。"""
     from app.services.ai_service import recommend_reason as _reason
 
-    text, source = await asyncio.wait_for(
-        run_in_threadpool(
-            _reason,
-            payload.model_dump(),
-            {"rank": payload.student_rank, "score": payload.student_score},
-        ),
+    _reject_if_overloaded("recommend-reason")
+    text, source = await _run_ai(
+        _reason,
+        payload.model_dump(),
+        {"rank": payload.student_rank, "score": payload.student_score},
         timeout=30.0,
+        label="recommend-reason",
     )
     return RecommendReasonOut(reason=text, source=source)
 
@@ -195,6 +279,9 @@ async def chat(
     0.12.1：整体超时 `CHAT_TOTAL_TIMEOUT`，超时明确抛 504。
     """
     _t0 = time.time()
+    # 0.15.1：入口预检，过载时立刻拒绝，不跑读画像等前置步骤
+    _reject_if_overloaded("chat")
+
     question = (payload.get("question") or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="question 不能为空")
@@ -269,6 +356,10 @@ async def chat(
                     "本地模型在 CPU 上推理较慢，可稍后重试或把问题问得更具体。"
                 ),
             ) from None
+        except HTTPException:
+            # 0.15.1：过载 503 必须**直接透传**，不能被下面的「回落融合链路」吞掉。
+            # 否则池子满了还会继续排一次队，过载保护形同虚设。
+            raise
         except Exception as exc:  # noqa: BLE001 Agent 任何异常都不应让问答失败
             print(f"[AI] Agent 异常 {exc.__class__.__name__}，回落三路融合链路", flush=True)
 
@@ -345,6 +436,9 @@ async def counselor(
     from app.services.counselor import CounselorService
 
     _t0 = time.time()
+    # 0.15.1：入口预检，过载时立刻拒绝
+    _reject_if_overloaded("counselor")
+
     # 0.15.0：读画像与云端生成都走 AI 专用线程池，不挤占认证接口
     profile_summary = await _run_ai(
         _load_profile_summary,

@@ -158,6 +158,11 @@ class Settings:
     AI_THREADPOOL_SIZE: int = int(_env("AI_THREADPOOL_SIZE", "8"))
     # AI 线程池排队超过该秒数就告警，便于定位「池子被占满」的时段。
     AI_QUEUE_WAIT_WARN_SECONDS: float = float(_env("AI_QUEUE_WAIT_WARN_SECONDS", "5"))
+    # 在途任务上限系数（0.15.1）：上限 = AI_THREADPOOL_SIZE × 本系数。
+    # 线程池队列本身无界，池满后任务会无限排队、最终只能等超时；
+    # 超过该上限直接返回 503「AI 服务繁忙」，让用户立刻得到反馈而不是白等。
+    # 取 2 的含义：允许「正在跑的一批 + 等一批」，再多就说明确实过载了。
+    AI_MAX_INFLIGHT_FACTOR: int = int(_env("AI_MAX_INFLIGHT_FACTOR", "2"))
 
     # ---------------- 0.13.0 本地 Agent（Function Calling） ----------------
     # 是否启用 Agent 模式（默认开启）。关闭后 /api/ai/chat 回落到 0.12.x 的三路融合，
