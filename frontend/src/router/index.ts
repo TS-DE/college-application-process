@@ -77,26 +77,36 @@ const router = createRouter({
  * | 401（真失效） | store 内部已 logout，落到下面的 requiresLogin 判断跳登录页 |
  * | 网络异常 + 目标页**不需要登录** | **直接放行**，页面自己降级展示 |
  * | 网络异常 + 目标页**需要登录** | 跳登录页并带 `reason=network`，提示「网络波动」而非「已过期」 |
+ *
+ * ## 0.15.1：公开页不再等 `/auth/me`
+ * 上一版虽然做到「网络异常不拦公开页」，但仍是 `await loadMe()` 之后才判断——
+ * 后端卡住时，用户从首页点「查大学」也要**先空等 30 秒**才跳过去。
+ * 现在按目标路由分流：
+ *   · 需要身份 → `await`（必须知道角色才能决定放不放行）；
+ *   · 公开页   → `void loadMe()` **后台拉取**，立即 `next()`。
+ * 导航栏靠 Pinia 响应式，用户信息拿到后自动更新，用户无感。
  */
 router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore()
+  const needsIdentity = !!(to.meta.requiresLogin || to.meta.requiresAdmin)
 
   // 只在「有 token 但没有用户信息」时拉取（刷新后的首次导航），且 store 内有 60s 缓存
   if (userStore.isLogin && !userStore.user) {
-    await userStore.loadMe()
+    if (needsIdentity) {
+      // 需要身份：必须等结果（否则无法判断 role / 是否登录）
+      await userStore.loadMe()
 
-    // 网络层失败：绝不能因此阻断公开页面
-    if (userStore.meError === 'network') {
-      const needsIdentity = !!(to.meta.requiresLogin || to.meta.requiresAdmin)
-      if (!needsIdentity) {
-        next()
+      if (userStore.meError === 'network') {
+        next({
+          path: '/login',
+          query: { redirect: to.fullPath, reason: 'network' }
+        })
         return
       }
-      next({
-        path: '/login',
-        query: { redirect: to.fullPath, reason: 'network' }
-      })
-      return
+    } else {
+      // 公开页：后台补拉用户信息，不阻塞本次导航。
+      // loadMe 内部已吞掉所有异常（只返回 null），因此不会有 unhandled rejection。
+      void userStore.loadMe()
     }
   }
 
