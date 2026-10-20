@@ -174,21 +174,21 @@ class PlanDraftBuilder:
 
     def _rank(self, score, province, category, year):
         if self._rank_fn is None:
-            from app.services.rank_service import score_to_rank
+            from app.services.recommend.rank_service import score_to_rank
 
             self._rank_fn = score_to_rank
         return self._rank_fn(score, province, category, year)
 
     def _tiers(self, rank, province, category, year):
         if self._tiers_fn is None:
-            from app.services.recommend_service import calculate_tiers
+            from app.services.recommend.recommend_service import calculate_tiers
 
             self._tiers_fn = calculate_tiers
         return self._tiers_fn(rank, province, category, year)
 
     def _enrich(self, tiers, province, category, year):
         if self._enrich_fn is None:
-            from app.services.recommend_service import enrich_with_plan
+            from app.services.recommend.recommend_service import enrich_with_plan
 
             self._enrich_fn = enrich_with_plan
         try:
@@ -480,7 +480,7 @@ class FeedbackInterpreter:
 
     def _llm_based(self, text: str) -> Optional[PlanFeedback]:
         try:
-            from app.services.ai_service import ask
+            from app.services.llm.ai_service import ask
 
             raw = ask(
                 self._LLM_PROMPT.format(text=text[:500]),

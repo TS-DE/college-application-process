@@ -63,7 +63,7 @@ class EmbeddingReranker(BaseReranker):
     def _embed(self, text: str) -> Optional[List[float]]:
         if self.embed_fn:
             return self.embed_fn(text)
-        from app.services import rag_service  # 延迟导入，避免循环依赖
+        from app.services.rag import rag_service  # 延迟导入，避免循环依赖
 
         return rag_service.get_embedding(text)
 

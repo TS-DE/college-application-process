@@ -57,7 +57,7 @@ def _load_score_range(
     0.11.1：查全国总表 `score_range_{year}_all`，**必须**按省份隔离——
     否则会把三十多个省的一分一段混在一起，位次换算结果完全错误。
     """
-    from app.services.dataset_access import province_conditions
+    from app.services.recommend.dataset_access import province_conditions
 
     tbl = get_table(table_name(KIND_SCORE, year, province))
     stmt = select(tbl)

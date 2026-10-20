@@ -63,8 +63,8 @@ async def recommend(payload: RecommendIn) -> RecommendOut:
     响应字段与 0.10.0 及以前保持一致（student / chong / wen / bao / meta），
     另新增 `rank` 与 `tiers`（全国引擎原始结果），向前兼容。
     """
-    from app.services.rank_service import score_to_rank
-    from app.services.recommend_service import calculate_tiers, enrich_with_plan
+    from app.services.recommend.rank_service import score_to_rank
+    from app.services.recommend.recommend_service import calculate_tiers, enrich_with_plan
 
     # ---- 第一道闸门：省份 + 科类合法性 ----
     prov = _validate_province_category(payload.province, payload.category)
@@ -133,8 +133,8 @@ async def recommend_national(payload: RecommendIn) -> Dict:
 
     适合只要结构化结果的场景；不做富化、不调 AI。
     """
-    from app.services.rank_service import score_to_rank
-    from app.services.recommend_service import calculate_tiers
+    from app.services.recommend.rank_service import score_to_rank
+    from app.services.recommend.recommend_service import calculate_tiers
 
     prov = _validate_province_category(payload.province, payload.category)
     cat = (payload.category or "").strip()
@@ -173,7 +173,7 @@ async def batch_ai_reasons(payload: Dict) -> Dict:
     入参：{ "student": {...}, "items": [ { ...推荐条目 } ], "limit": 10 }
     0.7.2：改为 async + 线程池，避免阻塞非 AI 接口。
     """
-    from app.services.ai_service import ai_enabled, recommend_reason
+    from app.services.llm.ai_service import ai_enabled, recommend_reason
 
     if not ai_enabled():
         raise HTTPException(status_code=503, detail="AI 未启用或 Ollama 不可用")

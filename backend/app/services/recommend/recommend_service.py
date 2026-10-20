@@ -62,7 +62,7 @@ def _plan_index(province: str, year: int, category: str, batch: str) -> Dict[str
     信息混在 `major_note` 文本里，这里用 `data_cleaner` 提纯后再入索引，
     使 `/api/recommend` 与 `/api/majors` 两个消费方同时受益。
     """
-    from app.services.dataset_access import scope_conditions
+    from app.services.recommend.dataset_access import scope_conditions
     from app.utils.data_cleaner import clean_item
 
     tbl = get_table(table_name(KIND_PLAN, year, province))
@@ -182,7 +182,7 @@ def _fetch_candidates(
     buffer: int,
     span: int,
 ) -> List[Dict]:
-    from app.services.dataset_access import scope_conditions
+    from app.services.recommend.dataset_access import scope_conditions
 
     tbl = get_table(table_name(KIND_MAJOR, year, province))
     conds = _build_filters(tbl, filters)
@@ -280,7 +280,7 @@ def _to_item(row: Dict, rank: int, tier: str, buffer: int, span: int, plan: Dict
 
 
 def _reason_of(item: Dict, rank: Optional[int]) -> str:
-    from app.services.ai_service import _rule_reason  # 局部导入避免循环依赖
+    from app.services.llm.ai_service import _rule_reason  # 局部导入避免循环依赖
 
     return _rule_reason(
         {
@@ -353,9 +353,9 @@ def recommend(
     with_ai: bool = False,
     ai_limit: int = 0,
 ) -> Dict:
-    from app.services.ai_service import ai_enabled, batch_reasons
+    from app.services.llm.ai_service import ai_enabled, batch_reasons
     # 0.11.0：河南单省富信息版改名为 score_to_rank_detail（全国版占用了 score_to_rank）
-    from app.services.rank_service import score_to_rank_detail
+    from app.services.recommend.rank_service import score_to_rank_detail
 
     t0 = time.time()
     buffer = buffer or settings.RANK_BUFFER

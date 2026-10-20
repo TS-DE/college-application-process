@@ -23,7 +23,7 @@ _ID_SEQ = itertools.count(1)
 
 def _ensure_rank(p: StudentProfileIn) -> Dict:
     # 0.11.0：河南单省富信息版改名为 score_to_rank_detail（全国版占用了 score_to_rank 这个名字）
-    from app.services.rank_service import score_to_rank_detail
+    from app.services.recommend.rank_service import score_to_rank_detail
 
     info = None
     rank = p.rank
@@ -84,7 +84,7 @@ def score_to_rank(
     `(score, province, category, year) -> int`；需要 control_score / rank_range
     这类富信息时用 `score_to_rank_detail`。
     """
-    from app.services.rank_service import score_to_rank_detail
+    from app.services.recommend.rank_service import score_to_rank_detail
 
     try:
         info = score_to_rank_detail(province, year, category, batch, score)
@@ -102,7 +102,7 @@ def rank_to_score(
     rank: int = Query(..., ge=1),
 ) -> RankToScoreOut:
     """位次 -> 分数（同分去向 / 位次反查）。"""
-    from app.services.rank_service import rank_to_score_detail
+    from app.services.recommend.rank_service import rank_to_score_detail
 
     try:
         info = rank_to_score_detail(province, year, category, batch, rank)

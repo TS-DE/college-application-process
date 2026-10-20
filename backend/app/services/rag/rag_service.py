@@ -21,20 +21,29 @@ from typing import Dict, List, Optional
 import requests
 
 from app.config import settings
-from app.services import llm_client
+# 0.17.0：分块与父块存储拆到 services/knowledge/，此处保留同名引用，
+# 历史调用方（含 test_*.py 里的 rag_service.split_text 等）无需改动。
+from app.services.knowledge.parent_store import (  # noqa: F401
+    drop_parents_by_file,
+    get_parent,
+    put_parents,
+)
+from app.services.knowledge.splitter import (  # noqa: F401
+    CHILD_CHUNK_OVERLAP,
+    CHILD_CHUNK_SIZE,
+    SEPARATORS,
+    _split_text_fixed,
+    split_child_text,
+    split_text,
+)
+from app.services.llm import llm_client
 
 logger = logging.getLogger(__name__)
 
 # RRF 融合常数：k=60（消除前几名排名的剧烈波动，见 HybridRetrieval.rrf 注释）
 RRF_K = 60
 
-# ---------------- 父子块（Parent-Child Chunking）参数 ----------------
-# 父块：递归分块得到的 500 字块（语义完整、适合喂给 LLM 当上下文）
-# 子块：父块内部再切一次的 120 字小块（语义聚焦、适合做向量检索）
-CHILD_CHUNK_SIZE = 120      # 子块大小
-CHILD_CHUNK_OVERLAP = 20    # 子块重叠
-# docstore 文件：父块原文按 parent_id 存这里，向量库只存子块（见 put_parents 注释）
-PARENT_STORE_FILE = "parent_store.json"
+# 父子块参数与 docstore 常量已迁移到 services/knowledge/（0.17.0）
 
 # ---------------- 0.5.0 多路召回（Multi-Query Recall） ----------------
 # 把复杂问题拆成 3-4 条聚焦的子查询，分别走混合检索，再按 RRF 累加融合
@@ -181,148 +190,10 @@ def _ollama_embedding(text: str) -> Optional[List[float]]:
 #   4. "，"   逗号：最后兜底才在逗号处断开（尽量不破坏句子）
 # 注意：RecursiveCharacterTextSplitter 会"递归"地用下一个分隔符继续切超长的块，
 #       直到每块 <= chunk_size，因此不会像定长切分那样把句子从中间切断。
-SEPARATORS = ["\n\n", "\n", "。", "，"]
+# 分块函数已迁移到 services/knowledge/splitter.py（0.17.0）
 
 
-def split_text(text: str, size: int | None = None, overlap: int | None = None) -> List[str]:
-    """递归分块：优先按段落 / 换行 / 句号切，保证语义完整。
-
-    参数含义：
-      - size（chunk_size=500）：每块最多 500 字，太小会丢失上下文，太大则检索粒度变粗、噪声变多
-      - overlap（chunk_overlap=50）：相邻块重叠 50 字，避免一条规则被切断后两边都检索不到
-
-    langchain_text_splitters 未安装时自动退化为定长切分（行为同改造前），链路不中断。
-    """
-    size = size or settings.CHUNK_SIZE          # 默认 500
-    overlap = overlap or settings.CHUNK_OVERLAP  # 默认 50
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= size:
-        return [text]
-
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-    except ImportError:  # 未安装依赖时的兜底
-        return _split_text_fixed(text, size, overlap)
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=size,          # 单块最大字符数
-        chunk_overlap=overlap,    # 相邻块重叠字符数
-        length_function=len,      # 中文按字符计数（不用 token 计数）
-        is_separator_regex=False, # 分隔符是普通字符串
-        separators=SEPARATORS,    # 分隔符优先级：段落 → 换行 → 句号 → 逗号
-    )
-    return [c for c in splitter.split_text(text) if c.strip()]
-
-
-def _split_text_fixed(text: str, size: int, overlap: int) -> List[str]:
-    """兜底：定长滑动窗口切分（递归分块不可用时使用）。"""
-    step = max(1, size - overlap)
-    chunks = []
-    start = 0
-    while start < len(text):
-        chunks.append(text[start : start + size])
-        start += step
-    return chunks
-
-
-def split_child_text(text: str, size: int | None = None, overlap: int | None = None) -> List[str]:
-    """把「父块」再切成「子块」（默认 120 字、重叠 20 字）。
-
-    子块只用于向量检索：块越小语义越聚焦，"婚假几天"这类短查询越容易命中；
-    但子块太短不适合直接喂给 LLM（上下文不完整），所以命中的子块会再回填父块。
-    切分逻辑与父块一致（递归分块），依赖缺失时退化为定长切分。
-    """
-    size = size or CHILD_CHUNK_SIZE
-    overlap = overlap or CHILD_CHUNK_OVERLAP
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= size:
-        return [text]
-
-    try:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-    except ImportError:
-        return _split_text_fixed(text, size, overlap)
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=size,
-        chunk_overlap=overlap,
-        length_function=len,
-        is_separator_regex=False,
-        separators=SEPARATORS,
-    )
-    return [c for c in splitter.split_text(text) if c.strip()]
-
-
-# ---------------- docstore：父块原文存储 ----------------
-
-_parent_store: Dict[str, Dict] = {}      # {parent_id: {"text":..., "file_id":...}}
-_parent_store_loaded = False
-
-
-def _parent_store_path() -> str:
-    """docstore 落盘位置（与 Chroma 同目录，已在 .gitignore 中）。"""
-    os.makedirs(settings.CHROMA_DB_PATH, exist_ok=True)
-    return os.path.join(settings.CHROMA_DB_PATH, PARENT_STORE_FILE)
-
-
-def _load_parent_store() -> Dict[str, Dict]:
-    """首次访问时把父块原文从磁盘载入内存（幂等）。"""
-    global _parent_store, _parent_store_loaded
-    if _parent_store_loaded:
-        return _parent_store
-    try:
-        path = _parent_store_path()
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                _parent_store = json.load(f)
-    except Exception:  # noqa: BLE001  docstore 损坏不阻塞检索，按空库继续
-        _parent_store = {}
-    _parent_store_loaded = True
-    return _parent_store
-
-
-def _save_parent_store() -> None:
-    """把父块原文持久化（每次写入/删除后调用）。"""
-    try:
-        with open(_parent_store_path(), "w", encoding="utf-8") as f:
-            json.dump(_parent_store, f, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def put_parents(parents: List[Dict]) -> None:
-    """批量写入父块到 docstore。
-
-    docstore 的作用：向量库只索引 120 字的子块（检索精度高），
-    父块的 500 字原文存在这里（不进向量库），检索命中子块后按 parent_id 取回，
-    把完整上下文交给 LLM —— 即「小块命中、大块生成」。
-    """
-    store = _load_parent_store()
-    for p in parents:
-        store[p["parent_id"]] = p
-    _save_parent_store()
-
-
-def get_parent(parent_id: Optional[str]) -> Optional[Dict]:
-    """按 parent_id 取回父块原文；不存在返回 None（调用方需降级返回子块）。"""
-    if not parent_id:
-        return None
-    return _load_parent_store().get(parent_id)
-
-
-def drop_parents_by_file(file_id: int) -> int:
-    """删除某个文件的全部父块（与向量库删除子块配套）。"""
-    store = _load_parent_store()
-    keys = [k for k, v in store.items() if str(v.get("file_id")) == str(file_id)]
-    for k in keys:
-        store.pop(k, None)
-    if keys:
-        _save_parent_store()
-    return len(keys)
+# 父块存储已迁移到 services/knowledge/parent_store.py（0.17.0）
 
 
 # ---------------- 写入 / 删除 / 检索 ----------------
@@ -682,7 +553,7 @@ def decompose_query(query: str, max_queries: int = 0) -> List[str]:
     **降级**：AI 关闭 / LLM 超时 / JSON 解析失败 → 返回 [原始 Query]，
     由调用方按单路检索处理，链路不中断。
     """
-    from app.services.ai_service import ai_enabled, ask
+    from app.services.llm.ai_service import ai_enabled, ask
 
     limit = max_queries or settings.MULTI_QUERY_MAX
     original = (query or "").strip()
@@ -815,7 +686,7 @@ def build_multi_recall(docs: Optional[List[Dict]] = None, embeddings: Optional[L
       - hybrid：把「混合检索」当作一个复合通道（weight=1.0）
     docs 为空时自动从 Chroma 载入子块语料。
     """
-    from app.services.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
+    from app.services.rag.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
 
     if docs is None:
         docs, embeddings = _load_corpus_docs()
@@ -871,7 +742,7 @@ def rerank(query: str, hits: List[Dict]) -> List[Dict]:
     if not hits:
         return hits
     try:
-        from app.services.reranker import Reranker
+        from app.services.rag.reranker import Reranker
 
         return Reranker().rerank(query, hits)
     except Exception:  # noqa: BLE001
@@ -921,7 +792,7 @@ def answer_with_strategy(query: str, top_k: int = 3, strategy: str = "auto") -> 
 
     if mode == "self_rag":
         try:
-            from app.services.self_rag import SelfRAG
+            from app.services.rag.self_rag import SelfRAG
 
             res = SelfRAG(_retrieve, _generate, top_k=top_k).run(query)
             return {
@@ -936,7 +807,7 @@ def answer_with_strategy(query: str, top_k: int = 3, strategy: str = "auto") -> 
 
     if mode == "corrective":
         try:
-            from app.services.corrective_rag import CorrectiveRAG
+            from app.services.rag.corrective_rag import CorrectiveRAG
 
             res = CorrectiveRAG(_retrieve, _generate, top_k=top_k).run(query)
             return {
@@ -987,7 +858,7 @@ def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dic
     preprocess_info: Dict = {"enabled": False, "source": "raw", "queries": [query]}
     if settings.MULTI_QUERY_ENABLED:
         try:
-            from app.services.query_rewrite import QueryPreprocessor
+            from app.services.rag.query_rewrite import QueryPreprocessor
 
             preprocessor = QueryPreprocessor(
                 use_rewrite=settings.QUERY_REWRITE_ENABLED,
@@ -1253,7 +1124,7 @@ def route_query(query: str) -> bool:
     直接放行，不再调 LLM。既修复了「你能猜到我想去哪所学校吗」被误拦截的问题，
     又把一次 20-45 秒的 LLM 往返从关键路径上拿掉。
     """
-    from app.services.ai_service import ai_enabled, ask
+    from app.services.llm.ai_service import ai_enabled, ask
 
     # ① 确定性预检：规划类问题一律放行（顺带省一次 LLM 调用）
     if _has_subjective_intent(query):
@@ -1295,7 +1166,7 @@ def generate_answer(
     - 0.12.0：`profile_context` 非空时在规则前插入【考生画像】段落，
       要求模型结合画像给个性化建议，但**不得据此编造数字**。
     """
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     prompt = ANTI_HALLUCINATION_PROMPT.format(context=context, question=query)
     section = build_profile_section(profile_context)
@@ -1318,7 +1189,7 @@ def extract_sql_filters(query: str) -> Optional[Dict]:
     - 命中「学费/分数线/位次」等强结构化关键词时优先走 MySQL 精确查询，
       避免 RAG 召回不到导致编造；当前仅返回解析结果，实际 SQL 查询留给后续版本接入。
     """
-    from app.services.ai_service import ai_enabled, ask
+    from app.services.llm.ai_service import ai_enabled, ask
 
     if not ai_enabled():
         return None
@@ -1557,7 +1428,7 @@ def answer_with_graph(query: str, top_k: int = 5) -> Dict:
         vector_context=hybrid.vector_context or "（无）",
         question=query,
     )
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=400, timeout=60)
     if not answer:
@@ -1760,7 +1631,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
     def _mysql_channel():
         if not intents or not settings.MYSQL_QUERY_ENABLED:
             return None
-        from app.services.sql_query_engine import MySQLQueryEngine
+        from app.services.sql.sql_query_engine import MySQLQueryEngine
 
         filters = rag_service_extract_sql_filters(question) or {}
         filters["intents"] = intents
@@ -1844,7 +1715,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
     # 所以只要命中主观咨询意图，**无论有没有检索到内容**都走规划师 Prompt：
     # 有资料就把资料作为【参考资料】让其优先引用，没资料就基于画像 + 通识给建议。
     if _has_subjective_intent(question):
-        from app.services.ai_service import ask
+        from app.services.llm.ai_service import ask
 
         context_text = "\n\n".join(contexts) if contexts else ""
         advisory = ask(
@@ -1903,7 +1774,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
         profile_context=profile_context,
     )
 
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=500, timeout=60)
     if not answer:

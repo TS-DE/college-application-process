@@ -12,7 +12,7 @@ from app.models.dataset import (
     normalize_int,
     normalize_score,
 )
-from app.services.recommend_service import _probability
+from app.services.recommend.recommend_service import _probability
 
 router = APIRouter(prefix="/api", tags=["university"])
 
@@ -179,7 +179,7 @@ def majors(
     )
     rows = fetch_all(stmt)
 
-    from app.services.recommend_service import _plan_index, _lookup_plan
+    from app.services.recommend.recommend_service import _plan_index, _lookup_plan
     from app.utils.data_cleaner import clean_item
 
     plan_idx = _plan_index(province, year, category, batch)
@@ -225,7 +225,7 @@ def get_school_table(province: str, year: int):
 
     `province` 仅用于日志，省份隔离由查询条件完成——见 `_scope_conds()`。
     """
-    from app.services.dataset_access import DatasetUnavailable, resolve_table
+    from app.services.recommend.dataset_access import DatasetUnavailable, resolve_table
 
     try:
         return resolve_table(KIND_SCHOOL, year, province)
@@ -235,7 +235,7 @@ def get_school_table(province: str, year: int):
 
 def get_major_table(province: str, year: int):
     """专业维度表（0.11.1：全国总表 `major_admission_{year}_all`）。"""
-    from app.services.dataset_access import DatasetUnavailable, resolve_table
+    from app.services.recommend.dataset_access import DatasetUnavailable, resolve_table
 
     try:
         return resolve_table(KIND_MAJOR, year, province)
@@ -248,6 +248,6 @@ def _scope_conds(kind: str, tbl, province: str, year: int, category: str, batch:
 
     总表里存着 30+ 省的数据，漏掉 province 条件就会把外省院校混进来。
     """
-    from app.services.dataset_access import scope_conditions
+    from app.services.recommend.dataset_access import scope_conditions
 
     return scope_conditions(kind, tbl, province, year, category, batch)

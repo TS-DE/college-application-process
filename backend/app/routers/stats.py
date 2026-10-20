@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import and_, func, select
 
 from app.models.dataset import KIND_MAJOR, normalize_code, normalize_int
-from app.services.dataset_access import DatasetUnavailable, resolve_table, scope_conditions
+from app.services.recommend.dataset_access import DatasetUnavailable, resolve_table, scope_conditions
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 

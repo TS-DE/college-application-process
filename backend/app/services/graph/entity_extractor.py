@@ -56,7 +56,7 @@ def default_llm_chat(prompt: str, temperature: float = 0.0, max_tokens: int = 40
     不注入也能开箱即用；测试时仍然可以传桩函数覆盖（依赖倒置不被破坏）。
     局部导入 `ai_service` 避免循环依赖。
     """
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     return ask(prompt, temperature=temperature, top_p=1.0,
                num_predict=max_tokens, timeout=30) or ""

@@ -180,7 +180,7 @@ async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
 @router.get("/status")
 async def status() -> dict:
     """AI 状态探测：限时完成，避免阻塞前端。"""
-    from app.services.ai_service import ai_enabled, ollama_health
+    from app.services.llm.ai_service import ai_enabled, ollama_health
 
     try:
         ok, msg = await asyncio.wait_for(
@@ -209,7 +209,7 @@ async def parse_intent(payload: ParseIntentIn) -> ParseIntentOut:
     0.15.1：改走 `_run_ai`，与 `/chat` 共用 AI 专用池与过载保护。
     此前走 `run_in_threadpool`（anyio 默认池），LLM 调用同样会挤占认证线程。
     """
-    from app.services.ai_service import parse_intent as _parse
+    from app.services.llm.ai_service import parse_intent as _parse
 
     _reject_if_overloaded("parse-intent")
     data = await _run_ai(
@@ -226,7 +226,7 @@ async def parse_intent(payload: ParseIntentIn) -> ParseIntentOut:
 @router.post("/recommend-reason", response_model=RecommendReasonOut)
 async def recommend_reason(payload: RecommendReasonIn) -> RecommendReasonOut:
     """为单条志愿生成推荐理由（0.15.1：改走 `_run_ai`）。"""
-    from app.services.ai_service import recommend_reason as _reason
+    from app.services.llm.ai_service import recommend_reason as _reason
 
     _reject_if_overloaded("recommend-reason")
     text, source = await _run_ai(
@@ -491,8 +491,8 @@ def _chat_sync(payload: dict, profile_context: str = "") -> dict:
     0.12.0：`profile_context` 由调用方（已登录态）传入，逐层注入 Prompt；
     为空串时所有链路行为与 0.11.x 完全一致。
     """
-    from app.services import rag_service
-    from app.services.ai_service import ai_enabled, ask
+    from app.services.rag import rag_service
+    from app.services.llm.ai_service import ai_enabled, ask
 
     question = (payload.get("question") or "").strip()
     if not question:

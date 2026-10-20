@@ -43,7 +43,7 @@ DEFAULT_CHAT_MODEL = "qwen3.7-flash"
 
 def get_api_key() -> str:
     """读取 Ali_API_KEY（委托 llm_client，环境变量读不到时补读 Windows 注册表）。"""
-    from app.services.llm_client import get_api_key as _get_key
+    from app.services.llm.llm_client import get_api_key as _get_key
 
     return _get_key()
 
@@ -58,7 +58,7 @@ def llm_chat(system_prompt: str, user_prompt: str, temperature: float = 0.0,
     :param model:      保留形参仅为兼容旧签名；实际模型名由通道自己的配置决定
     :param max_tokens: 本模块只产出检索用的短语，128 足够
     """
-    from app.services.llm_client import get_llm_client
+    from app.services.llm.llm_client import get_llm_client
 
     return get_llm_client().chat(system_prompt or "", user_prompt, temperature=temperature, max_tokens=max_tokens)
 

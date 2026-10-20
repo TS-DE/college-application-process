@@ -59,7 +59,7 @@ class SelfRAG:
         if self._llm:
             return (self._llm(prompt) or "").strip()
         try:
-            from app.services.llm_client import get_llm_client
+            from app.services.llm.llm_client import get_llm_client
 
             return get_llm_client().chat("", prompt, temperature=temperature, max_tokens=max_tokens).strip()
         except Exception:  # noqa: BLE001 两层都失败 → 返回空串，由各判断做保守处理

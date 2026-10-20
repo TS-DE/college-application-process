@@ -95,7 +95,7 @@ async def _background_indexes() -> None:
 async def _background_rag_info() -> None:
     """后台采集 RAG 状态，不阻塞主线程。"""
     try:
-        from app.services import rag_service
+        from app.services.rag import rag_service
 
         info = await run_in_threadpool(rag_service.backend_info)
         print(
@@ -212,8 +212,8 @@ async def on_startup() -> None:
 async def _refresh_health() -> None:
     """后台刷新健康缓存：Ollama 与 RAG 各限时 1 秒，失败不会抛给调用方。"""
     try:
-        from app.services.ai_service import ollama_health
-        from app.services.rag_service import backend_info
+        from app.services.llm.ai_service import ollama_health
+        from app.services.rag.rag_service import backend_info
 
         ok, msg = await asyncio.wait_for(
             run_in_threadpool(ollama_health), timeout=1.0

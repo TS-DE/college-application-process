@@ -53,7 +53,7 @@ def graph_llm(prompt: str, temperature: float = 0.0, num_predict: int = 800) -> 
     图谱只是增强项，快速失败回落到 MySQL/向量通道比拖死链路更合理。
     """
     from app.config import settings
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     return ask(
         prompt,

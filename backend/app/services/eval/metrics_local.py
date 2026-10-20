@@ -28,7 +28,7 @@ class LocalMetrics:
 
     def _embed(self, texts: Sequence[str]) -> List[Optional[List[float]]]:
         """批量向量化（带进程内缓存，避免同一段文本重复请求）。"""
-        from app.services import rag_service
+        from app.services.rag import rag_service
 
         todo = [t for t in texts if t and t not in self._embed_cache]
         if todo:

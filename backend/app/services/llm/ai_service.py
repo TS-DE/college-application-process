@@ -16,7 +16,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from app.services import llm_client  # 模块导入很轻：llm_client 内部再懒加载 openai SDK
+from app.services.llm import llm_client  # 模块导入很轻：llm_client 内部再懒加载 openai SDK
 from app.config import settings
 
 # ---------------------------------------------------------------- 基础调用

@@ -23,7 +23,7 @@ from app.schemas.knowledge import (
 )
 
 logger = logging.getLogger(__name__)
-from app.services import rag_service
+from app.services.rag import rag_service
 from app.utils.file_utils import (
     ALLOWED_EXTS,
     MAX_FILE_SIZE,
@@ -33,7 +33,7 @@ from app.utils.file_utils import (
     save_upload_file,
 )
 # 切片改用 rag_service 的「递归分块」（RecursiveCharacterTextSplitter）
-from app.services.rag_service import split_text
+from app.services.rag.rag_service import split_text
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 

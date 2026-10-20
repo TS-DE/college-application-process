@@ -20,7 +20,7 @@ from app.models.dataset import (
     normalize_int,
     normalize_score,
 )
-from app.services.dataset_access import (
+from app.services.recommend.dataset_access import (
     DatasetUnavailable,
     province_conditions,
     resolve_table,
@@ -45,7 +45,7 @@ _env_status_cache: Dict[str, object] = {"at": 0.0, "data": None}
 def _probe_vector() -> Dict:
     """探测向量库：集合存在且文档数 > 0 才算「政策库就绪」。"""
     try:
-        from app.services.rag_service import backend_info
+        from app.services.rag.rag_service import backend_info
 
         info = backend_info()
         count = int(info.get("count") or 0)
@@ -320,7 +320,7 @@ def score_table(
     batch: str = Query(default="本科批"),
 ) -> Dict:
     """一分一段表（快捷工具）。"""
-    from app.services.rank_service import score_table as _tbl
+    from app.services.recommend.rank_service import score_table as _tbl
 
     rows = _tbl(province, year, category, batch)
     return {"items": rows}
@@ -337,7 +337,7 @@ def control_lines(
     前端用 bounds 控制「成绩类型 = 本科/专科」时预估分数的合法区间，
     用 lines 渲染「分数未过线」的温馨提示弹窗。
     """
-    from app.services.rank_service import control_lines as _lines
+    from app.services.recommend.rank_service import control_lines as _lines
 
     try:
         return _lines(province, year, category)
@@ -356,7 +356,7 @@ def score_check(
 
     below_all=True 时 rank / recommend_batch 为空，前端应弹出温馨提示。
     """
-    from app.services.rank_service import score_check as _check
+    from app.services.recommend.rank_service import score_check as _check
 
     try:
         return _check(province, year, category, score)
