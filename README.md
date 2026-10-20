@@ -1111,7 +1111,8 @@ graph TD
 | Node.js | 18+ | 前端 |
 | MySQL | 5.7+ / 8.0 | 数据库 `gaokao` |
 | Ollama | 最新版 | 本地 LLM（0.13.0 起主力是 `qwen3:4b`）+ Embedding |
-| **Neo4j** | 5.x / 2025+ | 0.13.0 起必需（知识图谱工具）。未启动时系统仍可用，但 `tool_search_graph` 会被自动剔除 |
+| **Java** | JDK 17+ | Neo4j 的硬性前置，未装则 Neo4j 无法启动（本机 21.0.2 LTS） |
+| **Neo4j** | 5.x / 2025+ | 知识图谱数据库。启动 + 建库的完整步骤见 **6.3**。未启动时系统仍可用，但 `tool_search_graph` 会被自动剔除 |
 | **langgraph** | ≥1.0 | 0.14.0 人机协同规划（HITL）。缺失时 `/api/plan/*` 返回 503，其余功能不受影响 |
 
 ### 6.2 后端
@@ -1180,21 +1181,22 @@ PLAN_FINAL_PER_TIER=8   # 终稿每档条数
 ollama pull qwen3:4b            # 0.13.0 主力：Agent 执行模型
 ollama pull nomic-embed-text    # 本地 embedding
 
-# 3) 启动 Neo4j（0.13.0 新增，知识图谱工具依赖它）
-#    Windows 用 .bat；路径按本机安装位置调整
-"E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" console
-#    首次启动后浏览器打开 http://localhost:7474 ，默认账号 neo4j / neo4j
-#    若修改过密码，需同步到 backend/.env 的 NEO4J_PASSWORD
-#
-#    ⚠ 未启动 Neo4j 时后端仍能运行，启动日志会打印红色警告：
-#      [WARN] Neo4j 未启动！知识图谱功能将不可用。请执行 "...neo4j.bat" console
-
-# 3) 建表 + 导入数据
+# 3) 建表 + 导入 MySQL 数据（图谱的数据源）
 mysql -u root -p gaokao < backend/sql/04_rag_tables.sql
-cd gaokao_data && python import_to_mysql.py
+cd gaokao_data
+python import_to_mysql.py
+cd ..
 
-# 4) 启动
+# 4) 启动 Neo4j（会占用当前终端，建议另开一个窗口执行）
+"E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" console
+
+# 4.1) 构建图谱数据（★ 只起 Neo4j 不建库，图谱查询会是空的）
 cd backend
+python -m app.services.graph.graph_builder --year 2025
+#     换省份必须显式传 --province（默认只建河南）
+#     完整说明与排查见 6.3 节
+
+# 5) 启动后端（此时已在 backend 目录内）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -1205,7 +1207,149 @@ curl http://127.0.0.1:8000/api/health
 # rag.embedding_provider = "ali"、llm_provider = "ali(openai-compatible)" 表示线上通道已生效
 ```
 
-### 6.3 前端
+### 6.3 知识图谱（Neo4j）启动与建库
+
+> ⚠ **「启动了 Neo4j」≠「图谱能用」**。Neo4j 只是一个空数据库，还需要从 MySQL
+> 构建节点和关系（第 3 步）。只启动服务不建库，`tool_search_graph` 依然查不到任何东西。
+
+#### 1) 前置条件
+
+| 项 | 要求 | 本机实测 |
+|---|---|---|
+| Java | **JDK 17 或更高**（Neo4j 5.x/2025+ 强制要求） | ✅ 21.0.2 LTS |
+| Neo4j | 5.x 或 2025.x 社区版 | ✅ `neo4j-community-2026.02.2` |
+| Python 驱动 | `py2neo>=2021.2.4` | ✅ 已在 `requirements.txt` |
+
+验证 Java：`java -version`（看到 `version "17"` 以上即可）。没有 Java 时 Neo4j 启动会直接报
+`Could not find java` 并退出。
+
+#### 2) 启动 Neo4j 服务
+
+```powershell
+# ① 前台启动（推荐日常开发：日志直接可见，Ctrl+C 或关窗口即停止）
+& "E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" console
+
+# ② 后台启动（静默运行，适合演示前先起好）
+& "E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" start
+& "E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" status   # 查状态
+& "E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" stop     # 停止
+
+# ③ 安装为 Windows 服务（开机自启，长期使用）
+#    注意子命令是 windows-service，不是 install-service
+& "E:\Neo4j_NOSQL\neo4j-community-2026.02.2\bin\neo4j.bat" windows-service install
+#   卸载：... neo4j.bat windows-service uninstall
+```
+
+> 路径按本机实际安装位置调整。项目里 `main.py` 启动时会自动探测 `E:\Neo4j_NOSQL`
+> 等常见目录，找不到 `neo4j.bat` 时给出通用示例。
+>
+> 可用子命令：`console` / `start` / `stop` / `restart` / `status` / `windows-service` / `version`。
+
+#### 3) 验证服务已起来
+
+```powershell
+# ① BOLT 端口（后端连这个，默认 7687）
+Test-NetConnection 127.0.0.1 -Port 7687
+
+# ② HTTP 控制台（浏览器打开，默认 7474）
+Start-Process http://localhost:7474
+# 首次登录：用户名 neo4j / 密码 neo4j，随后会强制改密码
+```
+
+两个端口都在，才说明服务正常。只开 7474 而 7687 不通，通常是端口冲突或配置里禁用了 BOLT。
+
+#### 4) 构建图谱数据（关键步骤，最容易被漏掉）
+
+图谱数据从 MySQL 离线构建，全部使用 `MERGE`，**可重复执行不会产生重复节点**。
+
+```bash
+cd backend
+
+# 默认：2025 年 / 河南 / 本科批
+python -m app.services.graph.graph_builder --year 2025
+
+# 其他省份必须显式传参！--province 默认是「河南」，
+# 不传只会构建河南的数据，换省后图谱里查不到你的省份
+python -m app.services.graph.graph_builder --year 2025 --province 山东 --batch 本科批
+```
+
+成功输出形如：
+
+```
+[GRAPH] 构建完成：{'院校': 624, '专业': 1020, '专业组': 2975, ...}
+```
+
+#### 5) 验证图谱确实有数据
+
+浏览器 `http://localhost:7474` 里执行（**标签是中文，必须用反引号包裹**）：
+
+```cypher
+MATCH (n) RETURN count(n) AS 节点总数;          -- 本机实测 4677
+MATCH ()-[r]->() RETURN count(r) AS 关系总数;   -- 本机实测 58752
+
+MATCH (u:`院校`) RETURN u.name LIMIT 5;         -- 抽查院校
+MATCH (u:`院校`)-[r:ADMITS]->(m:`专业`) RETURN u.name, m.name LIMIT 5;
+```
+
+各标签实测规模：`院校 624` / `专业 1020` / `专业组 2975` / `省份 31` / `批次 6` / `选科要求 10` / `分数段 11`。
+关系类型为英文：`ADMITS`（招录）、`BELONGS_TO`（属于）、`ENROLLS`（招生）、
+`LOCATED_IN`（位于）、`OPENS`（开设）、`RANKS`（位次）、`TUITION`（学费）。
+
+#### 6) 配置项（`backend/.env`）
+
+```ini
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=你的密码        # 首次登录改过的密码，必须同步到这里
+GRAPH_ENABLED=1               # 0 = 关闭图谱通道
+GRAPH_DICT_EXTRACT_ENABLED=1  # 1 = 优先用实体词典匹配（比 LLM 抽取快且稳）
+GRAPH_LLM_TIMEOUT=20          # 图谱的两次 LLM 调用单次超时
+```
+
+#### 7) 没启动会怎样
+
+系统**不会崩**，但图谱能力会逐级降级，三处都有明确提示：
+
+| 位置 | 表现 |
+|---|---|
+| 后端启动日志 | 红字 `[WARN] Neo4j 未启动！知识图谱功能将不可用。请执行 "…neo4j.bat" console` |
+| Agent 工具候选 | `tool_search_graph` 被**自动剔除**，模型只在向量/MySQL 两个工具里选 |
+| 前端 AI 助手 | 标题栏「图谱」指示灯变**红灯**，悬浮提示「图数据库未启动，无法查询开设专业和选科要求」 |
+
+验证降级是否生效：`curl http://127.0.0.1:8000/api/meta/agent-status`，
+返回 `"graph_ready": false` 且带 `graph_error` 原因。
+
+#### 8) 常见问题
+
+| 现象 | 原因与处理 |
+|---|---|
+| `Could not find java` | 未装 JDK 17+，或 `JAVA_HOME` 未配。装完重开终端再试 |
+| 启动报 7474/7687 端口被占用 | 已有实例在跑（`Get-NetTCPConnection -LocalPort 7687`），先 `neo4j.bat stop` 或杀掉旧进程 |
+| 登录提示 `Neo.ClientError.Security.Unauthorized` | `.env` 里 `NEO4J_PASSWORD` 与实际密码不一致。首次登录改过密码的话必须同步 |
+| 图谱启动正常但查询全空 | **漏了第 4 步建库**。执行 `graph_builder` 后再用第 5 步的 Cypher 确认节点数 |
+| 换省份后查不到数据 | `graph_builder` 的 `--province` 默认是河南，需要带 `--province 你的省` 重建 |
+| `ModuleNotFoundError: py2neo` | `pip install "py2neo>=2021.2.4"`（已在 requirements 里，通常是没装依赖） |
+| 前端图谱灯一直红 | 状态接口有 **30 秒 TTL 缓存**。启动 Neo4j 后等半分钟，或在浏览器带 `?refresh=true` 强制刷新 |
+
+#### 9) 一键检测脚本
+
+```powershell
+cd backend
+python -c "from app.services.graph.graph_store import GraphStore; s=GraphStore(); print('schema:', str(s.get_schema())[:200]); print('节点数:', s.execute_cypher('MATCH (n) RETURN count(n) AS c')[0]['c'])"
+```
+
+输出示例：
+
+```
+schema: 节点标签及属性：  (`院校` {code, is_211, is_985, name, nature, province}) …
+节点数: 4677
+```
+
+连接失败会抛 `GraphConnectionError`（服务没起 / 密码不对）；
+连接成功但**节点数为 0**，说明需要执行第 4 步建库。
+脚本写成单行是为了在 PowerShell 与 bash 下都能直接粘贴运行。
+
+### 6.4 前端
 
 ```bash
 cd frontend
@@ -1214,7 +1358,7 @@ npm run dev                       # http://127.0.0.1:5173
 npm run build                     # 产物 dist/，生产模式下由 FastAPI 托管
 ```
 
-### 6.4 验证脚本
+### 6.5 验证脚本
 
 ```bash
 cd backend
@@ -1242,7 +1386,7 @@ python test_plan_workflow.py --real  # 同上 + 真实 HTTP 三段式流程
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
 | 上传成功但检索为空 | Ollama / Ali embedding 都失败，或 `status=失败` | 看 `GET /api/knowledge/status` 与后端日志 `[LLM]` 开头的告警 |
 | 回答很慢（60 秒以上） | 启用了 Agent 模式（`AGENT_FAST_MODE=0`），本地 4b 要跑两轮推理 | 0.13.1 默认 `AGENT_FAST_MODE=1` 走确定性链路（实测 9.5 秒）。若确认是 Agent 模式，属正常范围（60-90 秒），前端会显示「约需 1 分钟」；换 GPU 或非思考模型可改善 |
-| 政策库/图谱指示灯是红的 | 知识库无文档 / Neo4j 未启动 | 悬浮指示灯看具体原因。政策库红→管理员上传政策文件；图谱红→ `"...\neo4j.bat" console` 启动 Neo4j 后重启后端（状态接口有 30 秒缓存，稍等或刷新） |
+| 政策库/图谱指示灯是红的 | 知识库无文档 / Neo4j 未启动 | 悬浮指示灯看具体原因。政策库红→管理员上传政策文件；图谱红→按 **6.3 节**启动 Neo4j **并执行 `graph_builder` 建库**，然后重启后端（状态接口有 30 秒缓存，稍等或刷新） |
 | AI 回答里出现「好的，用户问…」这类旁白 | qwen3 是思考型模型，`think:false` 对其无效，只能靠 `/no_think` 抑制，但自由作答时仍会漏出 | 已在 `runner.clean_answer()` 里剥离开头的推理旁白；若仍出现，可调小 `AGENT_ANSWER_TOKENS` 或换非思考模型 |
 | 工具一直只有 `tool_search_vector` 被调用 | `tool_search_mysql` 需要问题里出现具体院校/专业名（否则为避免全表扫描会主动 skip）；`tool_search_graph` 需要 Neo4j 启动 | 两类都属于设计行为。确认 Neo4j 已启动可看启动日志是否有红色 `[WARN] Neo4j 未启动` |
 | 知识库管理里看不到用户上传的报告 | **这是正确行为**（0.13.0 隐私隔离） | 用户报告走 `/api/profile/report-upload`，只写 `user_profiles`，不进 Chroma、不写台账 |
