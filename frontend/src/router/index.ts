@@ -61,11 +61,45 @@ const router = createRouter({
   routes
 })
 
+/**
+ * 全局守卫（0.15.0 重写）。
+ *
+ * ## 旧实现的两个问题
+ * 1. `await userStore.loadMe()` 无条件 `await`：`/auth/me` 一超时就卡住整个导航，
+ *    随后 store 又把超时当登录失效清 token —— 刷新页面必掉登录；
+ * 2. 失败后没有任何分流：无论「token 真过期」还是「后端暂时不可用」，
+ *    用户都被丢到登录页，且看到的是「登录已过期」，误导性很强。
+ *
+ * ## 新策略
+ * | 场景 | 处理 |
+ * |---|---|
+ * | `/auth/me` 成功 | 正常放行 |
+ * | 401（真失效） | store 内部已 logout，落到下面的 requiresLogin 判断跳登录页 |
+ * | 网络异常 + 目标页**不需要登录** | **直接放行**，页面自己降级展示 |
+ * | 网络异常 + 目标页**需要登录** | 跳登录页并带 `reason=network`，提示「网络波动」而非「已过期」 |
+ */
 router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore()
+
+  // 只在「有 token 但没有用户信息」时拉取（刷新后的首次导航），且 store 内有 60s 缓存
   if (userStore.isLogin && !userStore.user) {
     await userStore.loadMe()
+
+    // 网络层失败：绝不能因此阻断公开页面
+    if (userStore.meError === 'network') {
+      const needsIdentity = !!(to.meta.requiresLogin || to.meta.requiresAdmin)
+      if (!needsIdentity) {
+        next()
+        return
+      }
+      next({
+        path: '/login',
+        query: { redirect: to.fullPath, reason: 'network' }
+      })
+      return
+    }
   }
+
   if (to.meta.requiresAdmin && userStore.role !== 'admin') {
     next({ path: '/login', query: { redirect: to.fullPath } })
     return

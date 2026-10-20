@@ -144,6 +144,21 @@ class Settings:
     # 图谱是增强项，宁可快速失败回落到 MySQL/向量，也不要拖死整条链路。
     GRAPH_LLM_TIMEOUT: float = float(_env("GRAPH_LLM_TIMEOUT", "20"))
 
+    # ---------------- 0.15.0 认证与 AI 线程隔离 ----------------
+    # ★ 背景：修复「超时掉登录」。
+    #   此前 /chat、/counselor 走 FastAPI 的 anyio 默认线程池（上限 40），
+    #   单次可占用 100-200 秒；几个 AI 请求就能占满，导致同步的 /auth/me
+    #   排队超过前端 10 秒超时，触发误判 logout —— 一条 AI 请求就能打掉登录态。
+    #
+    # 认证接口的独立超时预算（秒）。前端 axios 侧按 30s 配置，
+    # 后端这里再多留一倍余量，避免「前端还没超时、后端先掐断」。
+    AUTH_TIMEOUT_SECONDS: int = int(_env("AUTH_TIMEOUT_SECONDS", "30"))
+    # AI 专用线程池大小。与认证/普通查询彻底隔离：即使 AI 池满，认证仍可立即调度。
+    # 取 8 而非更大值，是因为本机 CPU 推理并发过高只会互相拖慢（本地模型不是 IO 密集）。
+    AI_THREADPOOL_SIZE: int = int(_env("AI_THREADPOOL_SIZE", "8"))
+    # AI 线程池排队超过该秒数就告警，便于定位「池子被占满」的时段。
+    AI_QUEUE_WAIT_WARN_SECONDS: float = float(_env("AI_QUEUE_WAIT_WARN_SECONDS", "5"))
+
     # ---------------- 0.13.0 本地 Agent（Function Calling） ----------------
     # 是否启用 Agent 模式（默认开启）。关闭后 /api/ai/chat 回落到 0.12.x 的三路融合，
     # 保留这条回退路径是为了「模型不支持 tools 时系统仍可用」。

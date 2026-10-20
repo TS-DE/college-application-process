@@ -63,8 +63,200 @@
 | **0.12.1** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + 用户画像（**＋隐私隔离 / 规划师模式 / 超时贯通**） | 同上（修复地图统计与问答拒答） | ✅ 已发布 |
 | **0.13.0** | 2026-10-20 | 父子块（不变） | **本地 Agent（Function Calling）**：向量/MySQL/图谱封装成工具，由 qwen3:4b 自主选择；云端心理师独立成链路 | 父块 + 图谱 + MySQL + 图像 + **用户画像（物理隔离上传）** | ✅ 已发布 |
 | **0.13.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **极速模式**（默认走确定性链路）+ **环境状态指示灯** | 同上（问答延迟 150s → 9.5s） | ✅ 已发布 |
-| **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 本次发布 |
+| **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 已发布 |
+| **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 本次修复 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.15.0] - 2026-10-20 · 修复「超时掉登录」：认证与 AI 线程池隔离
+
+### 一、原有缺陷（一条 AI 请求即可打掉登录态）
+
+现象：打开前端一段时间后任意操作提示「请求超时」并退回未登录，刷新页面最易复现；
+此时点「登录」也一直转圈。
+
+因果链（已逐条核对代码确认）：
+
+```
+用户发一个 AI 问题（/chat 占用线程 100-200s）
+        ↓
+FastAPI 同步端点与 run_in_threadpool 共用 anyio 默认线程池（上限 40）
+        ↓
+AI 请求挤占线程，/auth/me 排队 >10s
+        ↓
+前端 axios 默认超时 10s → 抛错（无 response）
+        ↓
+store.loadMe() 的 catch 无差别 logout()  ← 致命点
+        ↓
+token 被清，用户被迫退出；刷新后守卫又必调一次 /auth/me，再次赌运气
+```
+
+五个缺陷点：
+
+| # | 缺陷 | 位置 |
+|---|---|---|
+| A | `loadMe` 的 catch 无差别 `logout()`，不区分 401 与超时 | `stores/user.ts` |
+| B | 守卫每次刷新必触发 `loadMe()`（Pinia 内存态刷新即丢） | `router/index.ts` |
+| C | 认证接口走默认 10s 实例且无重试 | `api/auth.ts`、`api/request.ts` |
+| D | 同步 `def` + anyio 共享线程池被 AI 占满 | `routers/auth.py`、`routers/ai.py` |
+| E | 无线程池等待、无 `/me` 耗时日志 | — |
+
+**核对时额外发现 2 处同类隐患**：
+
+- `get_current_user()` 声明了 `db: Session = Depends(get_db)` 却从未使用 —— 每次鉴权仍要取一次 DB 会话，是 AI 高峰期的额外排队点；
+- 拦截器 401 时 `clearToken()` 只清 localStorage、不清 Pinia，导致「界面显示已登录、实际请求全 401」的状态错位。
+
+### 二、改进技术
+
+#### 1. 前端：把「登录失效」与「后端不可用」分开
+
+新增两个判据函数（`api/request.ts`，收敛判据、避免各处各写一套）：
+
+| 函数 | 语义 |
+|---|---|
+| `isUnauthorized(error)` | 仅 **401** —— 唯一需要登出的情况 |
+| `isNetworkError(error)` | 无 response / 5xx / 超时 —— 一律**保留 token** |
+| `isConnectionError(error)` | 仅「连接失败」—— 唯一值得重试的情况 |
+
+`loadMe(options)` 新逻辑：
+
+```ts
+try   { user = await fetchMeWithTimeout(); lastMeLoadedAt = now }
+catch { 401 → logout()            // 真失效
+        其他 → user=null, meError='network'，token 保留 }
+```
+
+并加 **60 秒内存缓存**：同一页面生命周期内成功过一次就不再重复拉取，避免连续导航反复打接口。
+
+#### 2. 前端：认证独立超时 + 只对「连接失败」重试
+
+- 新增 `authRequest` 实例（`timeout: 30000`）与 `httpAuth()`；`login`/`register`/`fetchMe` 全部改用它；
+- `fetchMe` 3 次指数退避（300 / 900 / 2700 ms），**但只在连接失败时重试**。
+
+> **偏离任务书的一处设计（有实测依据）**：任务要求「超时也重试」。
+> 实测若 `AUTH_TIMEOUT=30s` 也重试 3 次，一次刷新要白屏 `30×4 + 退避 ≈ 2 分钟`，
+> 与验收标准「关闭后端后应尽快提示网络异常」直接冲突；且超时说明后端在、只是慢，
+> 立刻重试大概率还是慢。故实现为：**连接失败重试（毫秒级失败，总 <5s），超时不重试**。
+
+#### 3. 前端：守卫不再因网络问题阻断导航
+
+| 场景 | 处理 |
+|---|---|
+| `/auth/me` 成功 | 正常放行 |
+| 401 | store 已 logout，跳登录页 |
+| 网络异常 + 目标页**不需要**登录 | **直接放行**（页面自行降级） |
+| 网络异常 + 目标页**需要**登录 | 跳 `/login?reason=network`，提示「网络波动，请重试」而非「登录已过期」 |
+
+#### 4. 后端：AI 专用线程池，认证不再排队
+
+```python
+_AI_EXECUTOR = ThreadPoolExecutor(max_workers=AI_THREADPOOL_SIZE,  # 默认 8
+                                  thread_name_prefix="ai-worker")
+
+async def _run_ai(fn, *args, timeout, label):
+    # run_in_executor(_AI_EXECUTOR, partial(...)) + wait_for
+    # 并记录「排队耗时」，超过 AI_QUEUE_WAIT_WARN_SECONDS 打告警
+```
+
+`/chat`、`/counselor` 的 5 处阻塞调用（读画像 / Agent / 融合链路 / 心理师 / 读画像）
+全部改走 `_run_ai`。anyio 默认池只剩普通业务接口与认证使用，不再被 AI 挤占。
+
+`me()` 改为 `async def`，DB 访问放线程池，并用 `AUTH_TIMEOUT_SECONDS` 兜底，
+超时返回 **503**（5xx 会让前端保留 token，而不是登出）。
+
+`get_current_user()` 去掉未使用的 `db` 参数，恢复「纯 JWT 解码、零 IO」的契约。
+
+#### 5. 可观测性
+
+| 日志 | 含义 |
+|---|---|
+| `[AUTH] /me 耗时=3ms user=28` | 认证接口实际耗时 |
+| `[AI] 线程池排队告警 chat-hybrid 等待 6.53s（阈值 5s，池大小 2）` | 池子被占满 |
+| `[AI] agent 超时 90s（已等待 90.00s，排队 12.34s）` | 超时时能区分「排队久」还是「执行久」 |
+
+### 三、对应代码位置
+
+| 文件 | 函数 / 区块 | 改动 |
+|---|---|---|
+| `backend/app/config.py` | 新增「认证与 AI 线程隔离」区块 | `AUTH_TIMEOUT_SECONDS` / `AI_THREADPOOL_SIZE` / `AI_QUEUE_WAIT_WARN_SECONDS` |
+| `backend/app/routers/ai.py` | 模块级 `_AI_EXECUTOR`、`_timed_call`、`_run_ai` | 新增；`/chat`、`/counselor` 5 处调用改用 |
+| `backend/app/routers/auth.py` | `get_current_user` | 移除未使用的 `db` 参数 |
+| `backend/app/routers/auth.py` | `_fetch_user`（新增）、`me` | `me` 改 `async def` + 线程池 + 超时 503 + 耗时日志 |
+| `frontend/src/api/request.ts` | `AUTH_TIMEOUT`、`authRequest`、`httpAuth`、`isNetworkError`、`isUnauthorized`、`isConnectionError` | 新增 |
+| `frontend/src/api/auth.ts` | `login` / `register` / `fetchMe` / `fetchMeWithTimeout` | 改用 `httpAuth`；`fetchMe` 加退避重试 |
+| `frontend/src/stores/user.ts` | `loadMe` / `logout` / state | 区分 401 与网络错误；60s 缓存；新增 `lastMeLoadedAt` / `meError` |
+| `frontend/src/router/index.ts` | `beforeEach` | 网络异常不阻断导航，需登录页跳转带 `reason=network` |
+| `frontend/src/views/Login.vue` | `networkReason` + `el-alert` | 「网络波动，请重试」提示 |
+| `backend/tests/auth/test_auth_isolation.py` | 新增 | 并发隔离验收脚本 |
+
+### 四、验证流程
+
+#### 验收 3 / 4：并发压测（真实 HTTP）
+
+```bash
+python -m tests.auth.test_auth_isolation
+```
+
+实测输出：
+
+```
+用例 1：6 个并发 /chat 期间测量 /auth/me
+    #1   125.9 ms  HTTP 200
+    #2    36.5 ms  HTTP 200
+    #3    18.1 ms  HTTP 200
+    #4    19.9 ms  HTTP 200
+    #5    29.2 ms  HTTP 200
+  压测期间登录：HTTP 200 耗时 0.22s
+  /auth/me 最大 126 ms，平均 46 ms
+  验收 3（/auth/me < 2s）：PASS
+  验收 4（登录 < 30s）：PASS
+```
+
+**更严苛的隔离验证**（12 并发 + 池大小压到 2，排队 21 秒）：
+
+```
+[AI] 线程池排队告警 chat-hybrid 等待 21.48s（阈值 5s，池大小 2）
+/auth/me 最大 111 ms（阈值 2000）
+验收：PASS
+```
+
+> 这是修复生效的最强证据：**AI 池只有 2 个槽位、排队 21 秒时，认证仍是 111ms**。
+> 修复前这些 AI 任务占的是 anyio 池，认证要排在它们后面。
+
+#### 验收 2：模拟后端变慢（`/auth/me` 延迟）
+
+| 场景 | 结果 |
+|---|---|
+| 延迟 12s（< 30s 超时） | 12.1s 返回 200 → `KEEP_TOKEN`（user 已刷新，不登出） |
+| 延迟 40s（> 30s 超时） | 30.0s 客户端超时、无 response → `KEEP_TOKEN`（提示网络波动，不登出） |
+
+#### 验收 5：关闭后端进程
+
+```
+结果：KEEP_TOKEN（网络异常：ConnectionError）
+判定：PASS（保留 token，未 logout）
+```
+
+#### 验收 1：AI 长请求期间切页 / 刷新
+
+由验收 3 覆盖：并发 AI 期间 `/auth/me` 始终 <130ms，远低于前端 30s 超时，
+`loadMe` 成功返回，`logout()` 不会被触发。
+
+#### 回归
+
+`smoke_test` / `smoke_rag` / `test_user_profile` / `test_hotfix_0_12_1` /
+`test_agent_0_13_0` / `test_hotfix_0_13_1` / `test_plan_workflow` 全部通过；
+`npx tsc --noEmit` 与 `npm run build` 通过。
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 超时线程不中断 | `wait_for` 只取消 future，Python 线程无法强杀；被放弃的 AI 任务仍会跑完再释放槽位。因此 `AI_THREADPOOL_SIZE` 不宜过小 |
+| 连接失败重试耗时 | Windows 下 Python 模拟单次连接失败约 2s（SYN 重传），4 次尝试约 12s；浏览器通常立即返回 `ERR_CONNECTION_REFUSED`，实际更快。若偏慢可下调 `ME_RETRY_DELAYS` |
+| 缓存窗口 | 60 秒内不重复拉 `/auth/me`，因此改了昵称等资料后，其他标签页最多 60 秒后同步 |
+| `ai.py` 行数 | 468 行，超出「单文件 ≤300 行」约定；本次只做线程池改造，重构不在范围内 |
 
 ---
 

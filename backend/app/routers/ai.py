@@ -16,8 +16,10 @@
 0.12.1 保留：整体超时可配置、超时返回 504、分阶段耗时日志。
 """
 import asyncio
+import functools
 import time
-from typing import Dict
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -35,6 +37,68 @@ from app.schemas.student import (
 )
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
+
+# ============================================================ AI 专用线程池（0.15.0）
+#
+# ## 为什么必须拆出来
+# FastAPI 的同步 `def` 端点与 `run_in_threadpool` 共用 anyio 默认线程池（上限 40）。
+# `/chat` 单次可占用 100-200 秒，几个并发请求就能把池子占满，
+# 此时同步的 `/auth/me`、`/api/students/*` 全部排队，
+# 前端 10 秒超时后误判为「登录失效」→ 清 token → 用户被踢出登录。
+#
+# 拆出独立池后，**AI 再忙也不会挤占认证与普通查询的线程**。
+# 池大小取 `AI_THREADPOOL_SIZE`（默认 8）：本机 CPU 推理并发过高只会互相拖慢。
+_AI_EXECUTOR = ThreadPoolExecutor(
+    max_workers=settings.AI_THREADPOOL_SIZE,
+    thread_name_prefix="ai-worker",
+)
+
+
+def _timed_call(recorder: Dict[str, Any], fn, args: tuple) -> Any:
+    """在线程内记录「真正开始执行」的时刻，用于算排队时间。"""
+    recorder["started_at"] = time.perf_counter()
+    return fn(*args)
+
+
+async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
+    """把阻塞调用提交到 **AI 专用线程池**，并施加超时。
+
+    与 `run_in_threadpool` 的区别只有两点，但都很关键：
+      1. 用 `_AI_EXECUTOR` 而非 anyio 默认池 → 不挤占认证/业务接口；
+      2. 记录**排队耗时**与执行耗时，超过 `AI_QUEUE_WAIT_WARN_SECONDS` 打告警，
+         这样「池子被占满」在生产日志里是可见的，而不是靠猜。
+
+    超时后 `wait_for` 会取消 future，但**线程本身无法被强制终止**
+    （Python 的已知限制）；被放弃的任务仍会跑完再释放槽位。
+    因此 `timeout` 应小于前端 axios 超时，让前端先拿到明确的 504。
+    """
+    loop = asyncio.get_running_loop()
+    recorder: Dict[str, Any] = {"started_at": 0.0}
+    submitted_at = time.perf_counter()
+
+    future = loop.run_in_executor(
+        _AI_EXECUTOR, functools.partial(_timed_call, recorder, fn, args)
+    )
+    try:
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        waited = time.perf_counter() - submitted_at
+        print(
+            f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
+            f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
+            flush=True,
+        )
+        raise
+    finally:
+        if recorder["started_at"]:
+            queue_wait = recorder["started_at"] - submitted_at
+            if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
+                print(
+                    f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
+                    f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
+                    f"池大小 {settings.AI_THREADPOOL_SIZE}）",
+                    flush=True,
+                )
 
 
 @router.get("/status")
@@ -135,7 +199,14 @@ async def chat(
     if not question:
         raise HTTPException(status_code=400, detail="question 不能为空")
 
-    profile_context = await run_in_threadpool(_load_profile_summary, db, user["id"])
+    # 0.15.0：读画像也走 AI 专用池（它持有 db 会话，属于阻塞 IO）
+    profile_context = await _run_ai(
+        _load_profile_summary,
+        db,
+        user["id"],
+        timeout=settings.AUTH_TIMEOUT_SECONDS,
+        label="read-profile",
+    )
     if profile_context:
         snippet = profile_context[:80].replace("\n", " ")
         print(
@@ -169,16 +240,15 @@ async def chat(
             # ★ 用 AGENT_TOTAL_TIMEOUT（200s）而不是 CHAT_TOTAL_TIMEOUT（100s）：
             #   Agent 要跑「规划 + 工具 + 生成」两轮本地推理，实测 110-155 秒，
             #   沿用 100 秒会在生成轮前就被掐断（0.13.0 首次联调的真实故障）。
-            agent_out = await asyncio.wait_for(
-                run_in_threadpool(
-                    _run_agent_sync,
-                    question,
-                    profile_context,
-                    payload.get("province") or "",
-                    payload.get("category") or "",
-                    int(payload.get("top_k") or 5),
-                ),
+            agent_out = await _run_ai(
+                _run_agent_sync,
+                question,
+                profile_context,
+                payload.get("province") or "",
+                payload.get("category") or "",
+                int(payload.get("top_k") or 5),
                 timeout=settings.AGENT_TOTAL_TIMEOUT,
+                label="agent",
             )
             if agent_out.get("answer"):
                 print(
@@ -204,9 +274,12 @@ async def chat(
 
     # ---- ② 回落：0.12.1 融合链路 ----
     try:
-        result = await asyncio.wait_for(
-            run_in_threadpool(_chat_sync, payload, profile_context),
+        result = await _run_ai(
+            _chat_sync,
+            payload,
+            profile_context,
             timeout=settings.CHAT_TOTAL_TIMEOUT,
+            label="chat-hybrid",
         )
     except asyncio.TimeoutError:
         print(
@@ -272,14 +345,23 @@ async def counselor(
     from app.services.counselor import CounselorService
 
     _t0 = time.time()
-    profile_summary = await run_in_threadpool(_load_profile_summary, db, user["id"])
+    # 0.15.0：读画像与云端生成都走 AI 专用线程池，不挤占认证接口
+    profile_summary = await _run_ai(
+        _load_profile_summary,
+        db,
+        user["id"],
+        timeout=settings.AUTH_TIMEOUT_SECONDS,
+        label="read-profile",
+    )
     _t_profile = time.time()
 
     service = CounselorService()
-    result = await run_in_threadpool(
+    result = await _run_ai(
         service.chat,
         [m.model_dump() for m in body.messages],
         profile_summary,
+        timeout=settings.COUNSELOR_TIMEOUT,
+        label="counselor",
     )
     if result.get("error"):
         print(f"[COUNSELOR] 失败 user={user['id']}：{result['error']}", flush=True)

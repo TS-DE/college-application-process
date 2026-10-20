@@ -1170,6 +1170,11 @@ PLAN_LLM_ALWAYS=0       # 1=每次反馈都过模型（慢，演示用）
 PLAN_LLM_TIMEOUT=20     # 反馈解析超时 → 用规则结果
 PLAN_DRAFT_PER_TIER=8   # 初稿每档条数
 PLAN_FINAL_PER_TIER=8   # 终稿每档条数
+
+# 0.15.0 认证与 AI 线程池隔离（修复「超时掉登录」）
+AUTH_TIMEOUT_SECONDS=30        # 认证接口超时预算（前端 axios 同为 30s）
+AI_THREADPOOL_SIZE=8           # AI 专用线程池，与认证彻底隔离
+AI_QUEUE_WAIT_WARN_SECONDS=5   # 排队超时告警阈值
 ```
 
 > ★ **`.env` 必须在 `backend/` 目录**（不是 `backend/app/`）。
@@ -1371,6 +1376,10 @@ python test_hotfix_0_13_1.py         # 0.13.1：极速模式 / 答案清洗 / �
 python test_hotfix_0_13_1.py --real  # 同上 + 延迟测量（校验 Fast Mode <30s）
 python test_plan_workflow.py         # 0.14.0：HITL 反馈解析 / 初稿 / 重规划 / 图结构 / 闭环（桩版秒级）
 python test_plan_workflow.py --real  # 同上 + 真实 HTTP 三段式流程
+
+# 0.15.0：认证线程隔离验收（需先启动服务）
+python -m tests.auth.test_auth_isolation            # 6 并发 AI 期间测 /auth/me 与登录
+python -m tests.auth.test_auth_isolation --concurrency 12   # 更严苛的并发
 ```
 
 ---
@@ -1386,6 +1395,8 @@ python test_plan_workflow.py --real  # 同上 + 真实 HTTP 三段式流程
 | Chroma 报维度不匹配 | 新写入向量维度与历史集合不一致 | `get_embedding()` 会自动用 `_collection_dimension()` 对齐已有维度；若换了集合需重建 |
 | 上传成功但检索为空 | Ollama / Ali embedding 都失败，或 `status=失败` | 看 `GET /api/knowledge/status` 与后端日志 `[LLM]` 开头的告警 |
 | 回答很慢（60 秒以上） | 启用了 Agent 模式（`AGENT_FAST_MODE=0`），本地 4b 要跑两轮推理 | 0.13.1 默认 `AGENT_FAST_MODE=1` 走确定性链路（实测 9.5 秒）。若确认是 Agent 模式，属正常范围（60-90 秒），前端会显示「约需 1 分钟」；换 GPU 或非思考模型可改善 |
+| **刷新页面就掉登录 / 点登录一直转圈** | 0.15.0 前：`/auth/me` 超时被当成登录失效清 token；根因是 AI 请求占满 anyio 线程池，认证接口排不上 | 0.15.0 已修：① 只有 **401** 才登出，超时/5xx 一律保留 token；② AI 改用独立线程池（`AI_THREADPOOL_SIZE`），认证不再排队；③ 认证接口独立 30s 超时 + 连接失败重试。排查：看日志 `[AUTH] /me 耗时=` 是否 <100ms、有无 `[AI] 线程池排队告警` |
+| AI 忙碌时登录/认证变慢 | AI 与认证共用线程池 | 0.15.0 已隔离。若仍慢，调大 `AI_THREADPOOL_SIZE`（默认 8）观察 `[AI] 线程池排队告警` 是否消失 |
 | 政策库/图谱指示灯是红的 | 知识库无文档 / Neo4j 未启动 | 悬浮指示灯看具体原因。政策库红→管理员上传政策文件；图谱红→按 **6.3 节**启动 Neo4j **并执行 `graph_builder` 建库**，然后重启后端（状态接口有 30 秒缓存，稍等或刷新） |
 | AI 回答里出现「好的，用户问…」这类旁白 | qwen3 是思考型模型，`think:false` 对其无效，只能靠 `/no_think` 抑制，但自由作答时仍会漏出 | 已在 `runner.clean_answer()` 里剥离开头的推理旁白；若仍出现，可调小 `AGENT_ANSWER_TOKENS` 或换非思考模型 |
 | 工具一直只有 `tool_search_vector` 被调用 | `tool_search_mysql` 需要问题里出现具体院校/专业名（否则为避免全表扫描会主动 skip）；`tool_search_graph` 需要 Neo4j 启动 | 两类都属于设计行为。确认 Neo4j 已启动可看启动日志是否有红色 `[WARN] Neo4j 未启动` |
