@@ -38,7 +38,7 @@ def default_llm(prompt: str, temperature: float = 0.0, num_predict: int = 800) -
     单独包一层是为了满足 DIP：提取器不直接依赖 ai_service 的具体实现，
     只依赖这个函数签名；测试时替换成桩函数即可。
     """
-    from app.services.ai_service import ask
+    from app.services.llm.ai_service import ask
 
     return ask(prompt, temperature=temperature, top_p=0.85, num_predict=num_predict, timeout=60) or ""
 

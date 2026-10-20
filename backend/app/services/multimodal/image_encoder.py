@@ -229,7 +229,7 @@ def _get_api_key() -> str:
 def _text_dimension() -> int:
     """文本向量维度：优先对齐已有文本集合，保证与文本 RAG 同空间。"""
     try:
-        from app.services import rag_service
+        from app.services.rag import rag_service
 
         return rag_service._collection_dimension() or settings.ALI_EMBED_DIMENSION
     except Exception:  # noqa: BLE001

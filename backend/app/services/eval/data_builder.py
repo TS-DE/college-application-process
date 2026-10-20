@@ -35,7 +35,7 @@ class ProjectRAGRunner(BaseRAGRunner):
     """项目真实 RAG 链路适配器：复用 rag_service 的检索 + 防幻觉生成。"""
 
     def retrieve(self, question: str, top_k: int) -> List[Dict]:
-        from app.services import rag_service
+        from app.services.rag import rag_service
 
         hits = rag_service.search(question, top_k=top_k) or []
         return [
@@ -48,7 +48,7 @@ class ProjectRAGRunner(BaseRAGRunner):
         ]
 
     def generate(self, question: str, contexts: Sequence[str]) -> str:
-        from app.services import rag_service
+        from app.services.rag import rag_service
 
         if not contexts:
             return rag_service.OFF_TOPIC_ANSWER

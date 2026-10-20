@@ -80,7 +80,7 @@ class LLMMetrics:
         if not self.enabled:
             return None
         try:
-            from app.services.llm_client import get_llm_client
+            from app.services.llm.llm_client import get_llm_client
 
             raw = get_llm_client().chat(
                 system_prompt="你是一个严格的评分助手，只输出数字。",

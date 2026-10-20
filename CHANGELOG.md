@@ -66,8 +66,152 @@
 | **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 已发布 |
 | **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 已发布 |
 | **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 已发布 |
-| **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 本次发布 |
+| **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 已发布 |
+| **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.17.0] - 2026-10-20 · 目录与模块化重构（**无行为变更**）
+
+### 一、原有缺陷 / 原有设计
+
+功能是对的，但**结构上看不出层次**：
+
+| 位置 | 重构前 | 问题 |
+|---|---|---|
+| `app/routers/` | 11 个 router 平铺（`ai.py` 同时装 `/chat`、`/counselor`、`/status`、`/parse-intent`、`/recommend-reason`） | 一个文件混了「本地问答」与「云端心理师」两个域；入口层还塞着线程池、过载保护、读画像等基础设施 |
+| `app/services/` | 11 个文件 + 5 个目录平铺在根 | `rag_service.py` 2036 行里混着「分块」「父块存储」「检索」「融合」四件事；`llm_client` / `ai_service` / `rank_service` 与 `rag_service` 平级，看不出依赖层次 |
+| `backend/` 根目录 | 21 个 `test_*.py` / `smoke_*.py` / `rag_eval.py` | 测试散落在入口层目录，无法按被测域定位；也无法用 `pytest` 统一跑 |
+
+### 二、改进技术与方案
+
+**严格只做「移动 + 改 import」**，不改任何函数体、签名、SQL、Prompt、配置默认值。
+
+#### 1. 入口层：`routers/` → `api/<域>/`
+
+```
+app/api/
+├── __init__.py              # ALL_ROUTERS 汇总，main.py 一处注册
+├── account/   auth_router.py、profile_router.py
+├── chat/      chat_router.py（/status /parse-intent /recommend-reason /chat）
+│              counselor_router.py（/counselor）
+├── knowledge/ knowledge_router.py、rag_eval_router.py
+├── plan/      plan_router.py
+└── recommend/ recommend_router.py、university_router.py、student_router.py
+               meta_router.py、stats_router.py
+```
+
+`main.py` 由 12 行 `include_router` 收敛为：
+
+```python
+from app.api import ALL_ROUTERS
+for _router in ALL_ROUTERS:
+    app.include_router(_router)
+```
+
+#### 2. AI 执行基础设施下沉（任务树未指定，但必须做）
+
+`_AI_EXECUTOR`、`_run_ai`、过载计数、`_load_profile_summary` 被 `/chat` 与 `/counselor` **共用**。
+若留在任一 router 里，两个入口文件就得互相 import，违背「入口层只做参数校验」。
+因此新增 `app/services/llm/ai_executor.py` 承载它们，两个 router 从服务层引用。
+
+#### 3. 业务层：`services/` 按域分组
+
+```
+app/services/
+├── knowledge/  splitter.py（split_text / split_child_text）
+│               parent_store.py（put_parents / get_parent / drop_parents_by_file）
+├── llm/        llm_client.py、ai_service.py、ai_executor.py
+├── recommend/  rank_service.py、recommend_service.py、dataset_access.py
+├── sql/        sql_query_engine.py
+├── rag/        rag_service.py、retrieval.py、reranker.py、query_rewrite.py
+│               self_rag.py、corrective_rag.py
+├── agent/ eval/ graph/ multimodal/ profile/   （保持不动）
+└── counselor.py
+```
+
+`rag_service.py` 2036 → 1907 行：分块与父块存储拆到 `services/knowledge/`，
+**函数体逐字未改**，`rag_service` 通过 `from app.services.knowledge.splitter import ...`
+保留同名引用，因此测试里的 `rag_service.split_text(...)`、`rag_service.drop_parents_by_file(...)` 无需改动。
+
+#### 4. 测试层：`tests/<域>/`
+
+21 个脚本按被测域归位：`rag/`（9）、`agent/`（2）、`plan/`、`profile/`、`graph/`、
+`multimodal/`、`eval/`（3）、`integration/`（3）、`auth/`（0.15.0 已有）。
+新增 `tests/conftest.py`（统一 fixtures）与 `pytest.ini`（固定 rootdir / pythonpath）。
+移动后脚本的 `sys.path.insert(0, ".")` 改为按 `__file__` 计算 backend 根，保证任意 cwd 可运行。
+
+### 三、对应代码位置
+
+| 文件 | 改动 |
+|---|---|
+| `app/main.py:18` | `from app.api import ALL_ROUTERS` |
+| `app/main.py:34-37` | 循环注册替代 12 行显式 `include_router` |
+| `app/api/__init__.py`（新） | `ALL_ROUTERS` 元组，顺序与 0.16.0 一致 |
+| `app/api/chat/chat_router.py`（新，417 行） | 原 `routers/ai.py` 的 status / parse-intent / recommend-reason / chat |
+| `app/api/chat/counselor_router.py`（新，83 行） | 原 `routers/ai.py` 的 counselor |
+| `app/services/llm/ai_executor.py`（新，175 行） | 线程池 / `_run_ai` / 过载计数 / `_load_profile_summary` |
+| `app/services/knowledge/splitter.py`（新） | `SEPARATORS`、`CHILD_CHUNK_*`、`split_text`、`split_child_text` |
+| `app/services/knowledge/parent_store.py`（新） | `PARENT_STORE_FILE`、`put_parents`、`get_parent`、`drop_parents_by_file` |
+| 其余 40 个文件 | 仅 import 路径变更（共 **108 处**） |
+| `tests/conftest.py`（新） | `backend_root` / `client` / `tmp_vector_dir` 三个夹具 |
+| `tests/**/*.py` | `sys.path` 引导改为 `Path(__file__).resolve().parents[2]` |
+
+### 四、验证流程与实测结果
+
+#### 1. 接口清单逐条对比（行为一致性的硬证据）
+
+用 `git worktree` 检出重构前基线 `a7fcc73`，两侧各导出 OpenAPI 全量接口：
+
+```
+旧 57 条，新 57 条
+只在旧代码中存在（0）
+只在新代码中存在（0）
+响应模型不一致（0）
+```
+
+> 首次对比出现 `56 vs 57`，差的是 `/{full_path}` SPA 兜底：
+> 它由 `if os.path.isdir(DIST_DIR)` 条件注册，而 worktree 里没有 `frontend/dist`（构建产物不入库）。
+> 在 worktree 补一个 `dist/index.html` 后两侧均为 57，**差异归零**。
+
+#### 2. 后端测试（21 项，与基线逐项对齐）
+
+```bash
+cd backend
+python tests/rag/test_hybrid_rag.py          # ... 共 20 个脚本
+python -m tests.auth.test_auth_isolation
+```
+
+```
+全部通过（21 项）
+```
+
+基线（重构前）同样 21 项全绿，**结果完全一致**。
+
+#### 3. 前端（本次零改动）
+
+```
+npm run build        ✓ built in 9.60s
+npm run verify:auth  401 登出 / 超时保留 / 守卫结构 —— 全 PASS
+npm run verify:chat  23 项全 PASS
+```
+
+#### 4. 结构自检
+
+```
+backend 根目录裸 py 文件：0
+app/api 下：5 个域、12 个 router 文件、6 个 __init__.py
+```
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| `pytest` 未安装 | 已写好 `pytest.ini` + `conftest.py`，但当前环境（系统 Python 3.11）无 pytest，`pytest tests/` 未实测。现有 21 个脚本仍是 `python xxx.py` 方式，全部通过 |
+| 环境不一致 | 任务约束要求用 conda 环境 `py312_env`，但项目实际运行在系统 Python 3.11（历史一致）。本次未安装任何新库，未改变运行环境 |
+| `rag_service.py` 仍 1907 行 | 任务明确「模块化拆解留给 0.18.0」，本次只搬不改 |
+| `chat_router.py` 417 行 | 超出「单文件 ≤300 行」约定；拆分函数体会改变代码结构，与本任务「只搬不改」冲突，留给 0.18.0 |
 
 ---
 

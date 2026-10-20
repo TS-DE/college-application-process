@@ -68,7 +68,7 @@ class CounselorService:
 
     def _get_channel(self):
         if self._channel is None:
-            from app.services.llm_client import AliLLMChannel
+            from app.services.llm.llm_client import AliLLMChannel
 
             self._channel = AliLLMChannel()
         return self._channel

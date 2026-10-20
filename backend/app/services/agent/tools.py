@@ -60,7 +60,7 @@ class VectorSearchTool(BaseTool):
 
     def _get_searcher(self):
         if self._searcher is None:
-            from app.services.rag_service import search
+            from app.services.rag.rag_service import search
 
             self._searcher = search
         return self._searcher
@@ -137,7 +137,7 @@ class MySQLSearchTool(BaseTool):
 
     def _get_engine(self):
         if self._engine_factory is None:
-            from app.services.sql_query_engine import MySQLQueryEngine
+            from app.services.sql.sql_query_engine import MySQLQueryEngine
 
             self._engine_factory = MySQLQueryEngine
         return self._engine_factory()
@@ -145,7 +145,7 @@ class MySQLSearchTool(BaseTool):
     def _detect_intents(self, query: str) -> List[str]:
         if self._intent_detector is not None:
             return list(self._intent_detector(query) or [])
-        from app.services.rag_service import detect_structured_intent
+        from app.services.rag.rag_service import detect_structured_intent
 
         return list(detect_structured_intent(query) or [])
 
@@ -271,7 +271,7 @@ class GraphSearchTool(BaseTool):
 
     def _get_engine(self):
         if self._engine_factory is None:
-            from app.services.rag_service import _get_graph_engine
+            from app.services.rag.rag_service import _get_graph_engine
 
             self._engine_factory = _get_graph_engine
         return self._engine_factory()
