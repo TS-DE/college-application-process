@@ -105,26 +105,46 @@ backend/
 │   │   ├── plan.py               <span style="color:#888">// 0.14.0 PlanStartIn/Out、PlanResumeIn/Out、PlanStateOut（start 与 resume 分开建模，ISP）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── profile.py            <span style="color:#888">// 0.12.0 画像入出参：ProfileBasicIn / SurveyQuestionIn / SurveySubmitIn / ReportUploadIn / ProfileOut / SummaryOut（按接口拆细，ISP）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   └── user.py               <span style="color:#888">// LoginIn / RegisterIn（+昵称手机号）/ UserOut / TokenOut / ChangePasswordIn</span>
-│   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
-│   │   ├── ai.py                 <span style="color:#888">// /api/ai/chat（RAG 问答；0.9.0 use_graph、0.12.0 强制登录 + 注入用户画像，返回 profile_injected）、parse-intent、recommend-reason、status</span>
-│   │   ├── auth.py               <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
-│   │   ├── knowledge.py          <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── meta.py               <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
-│   │   ├── recommend.py          <span style="color:#888">// /api/recommend（主链路，0.11.0 全国引擎）、/api/recommend/national（纯全国引擎）、/api/recommend/ai-reasons（批量理由）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   ├── stats.py              <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
-│   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
-│   │   ├── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
-│   │   ├── eval.py               <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（均仅 admin）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
-│   │   ├── profile.py            <span style="color:#888">// 0.12.0：/api/profile（读画像）、/basic、/domains、/survey/questions|submit、/report/upload、/summary/rebuild、DELETE（均需登录）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
-│   │   └── plan.py               <span style="color:#888">// 0.14.0：/api/plan/start（生成初稿并暂停）、/resume（恢复执行）、/state/{id}、/health（均需登录）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
-│   ├── services/                 <span style="color:#888">// 业务与算法层（所有计算发生在这里）</span>
-│   │   ├── recommend_service.py  <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   ├── ai_service.py         <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
-│   │   ├── llm_client.py         <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
-│   │   ├── dataset_access.py     <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、province/category/batch 条件构造、省份感知的批次归一</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   ├── api/                      <span style="color:#888">// 0.17.0 入口层：按业务域分目录，只做参数校验与异常映射</span>
+│   │   ├── __init__.py           <span style="color:#888">// ALL_ROUTERS 汇总导出，main.py 一处注册（顺序与 0.16.0 一致）</span>
+│   │   ├── chat/                 <span style="color:#888">// 对话域（0.17.0 从 api/chat/chat_router.py 拆出）</span>
+│   │   │   ├── chat_router.py    <span style="color:#888">// /api/ai/chat、status、parse-intent、recommend-reason</span>
+│   │   │   └── counselor_router.py <span style="color:#888">// /api/ai/counselor（云端心理师，强制 Ali 不降级）</span>
+│   │   ├── account/              <span style="color:#888">// 账号域</span>
+│   │   │   ├── auth_router.py    <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
+│   │   │   └── profile_router.py <span style="color:#888">// /api/profile（读画像）、/basic、/domains、/survey/*、/report/*、/summary/rebuild</span>
+│   │   ├── knowledge/            <span style="color:#888">// 知识库域</span>
+│   │   │   ├── knowledge_router.py <span style="color:#888">// /api/knowledge/upload|list|detail|download|delete|search|status（admin 读写，search 全员）</span>
+│   │   │   └── rag_eval_router.py  <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（仅 admin）</span>
+│   │   ├── plan/                 <span style="color:#888">// 规划域</span>
+│   │   │   └── plan_router.py    <span style="color:#888">// 0.14.0：/api/plan/start（生成初稿并暂停）、/resume、/state/<built-in function id>、/health</span>
+│   │   └── recommend/            <span style="color:#888">// 推荐域</span>
+│   │       ├── recommend_router.py <span style="color:#888">// /api/recommend（主链路，0.11.0 全国引擎）、/national、/ai-reasons</span>
+│   │       ├── university_router.py <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
+│   │       ├── student_router.py <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
+│   │       ├── meta_router.py    <span style="color:#888">// /api/score-table|control-lines|score-check（一分一段 / 批次线）</span>
+│   │       └── stats_router.py   <span style="color:#888">// /api/stats/major-count-by-province（首页地图数据）</span>
+│   ├── services/                 <span style="color:#888">// 业务与算法层（0.17.0 按域分组；所有计算发生在这里）</span>
+│   │   ├── recommend/            <span style="color:#888">// 0.17.0 志愿推荐</span>
+│   │   │   ├── recommend_service.py <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   │   ├── rank_service.py   <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   │   └── dataset_access.py <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、条件构造</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
+│   │   ├── llm/                  <span style="color:#888">// 0.17.0 模型通道</span>
+│   │   │   ├── ai_service.py     <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
+│   │   │   ├── llm_client.py     <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   │   └── ai_executor.py    <span style="color:#888">// 0.17.0 AI 执行基础设施：专用线程池 / _run_ai / 在途过载保护 / 读画像（chat 与 counselor 共用，避免入口层互相 import）</span>
+│   │   ├── rag/                  <span style="color:#888">// 0.17.0（模块化拆解留给 0.18.0，本次只搬不改）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   │   ├── rag_service.py    <span style="color:#888">// RAG 主控：Chroma 读写、search()、rerank()、route_strategy()、answer_with_hybrid() 三路融合</span>
+│   │   │   ├── retrieval.py      <span style="color:#888">// DenseChannel / BM25Channel / HybridSearch / MultiRecall（三通道 × 多 Query）</span>
+│   │   │   ├── reranker.py       <span style="color:#888">// CrossEncoder / Embedding 余弦 / Noop 三种精排 + 失败降级</span>
+│   │   │   ├── query_rewrite.py  <span style="color:#888">// 检索前：重写 / 扩展(Step-Back) / 子查询分解（线程池并发）</span>
+│   │   │   ├── self_rag.py       <span style="color:#888">// Self-RAG：要不要检索 → 上下文有没有用 → 生成 → 自评不合格才反思</span>
+│   │   │   └── corrective_rag.py <span style="color:#888">// Corrective RAG：检索质量差时改写查询重试</span>
+│   │   ├── knowledge/            <span style="color:#888">// 0.17.0 知识库分块与父块存储（从 rag_service 拆出，函数体未改）</span>
+│   │   │   ├── splitter.py       <span style="color:#888">// SEPARATORS + CHILD_CHUNK_* + split_text / split_child_text（递归分块，依赖缺失退化为定长）</span>
+│   │   │   └── parent_store.py   <span style="color:#888">// put_parents / get_parent / drop_parents_by_file（小块检索、大块生成）</span>
+│   │   ├── sql/                  <span style="color:#888">// 0.17.0 结构化查询</span>
+│   │   │   └── sql_query_engine.py <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（参数化查询，异常不抛）</span>
 │   │   ├── agent/                <span style="color:#888">// 0.13.0 本地 Agent 调度（Function Calling）+ 0.14.0 HITL 工作流</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
 │   │   │   ├── workflow.py       <span style="color:#888">// 0.14.0 LangGraph 图：PlanState + 4 节点 + MemorySaver + interrupt_before（只做编排，不写业务）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
 │   │   │   ├── plan_builder.py   <span style="color:#888">// 0.14.0 规划业务：PlanDraftBuilder（初稿）/ FeedbackInterpreter（规则+模型双层解析）/ PlanRefiner（重筛）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
@@ -189,25 +209,41 @@ backend/
 ├── .env                          <span style="color:#888">// 本地真实配置（不入库）</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
 ├── .env.example                  <span style="color:#888">// 配置模板（含 Ali_* 全部说明）</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
 ├── requirements.txt              <span style="color:#888">// Python 依赖清单</span>  <span style="color:#d32f2f; background-color:#fff3cd">★★★ 配置文件 ★★★</span>
-├── smoke_test.py                 <span style="color:#888">// 14 个业务接口冒烟</span>
-├── smoke_rag.py                  <span style="color:#888">// RAG 全链路冒烟：登录 → 上传 → 检索 → 问答 → 删除</span>
-├── test_llm_channel.py           <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证</span>
-├── test_advanced_rag.py          <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比（强制本地兜底）</span>
-├── test_graph_rag.py             <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real 真实 Neo4j + --compare 双通道回答对比）</span>
-├── test_national_engine.py       <span style="color:#888">// 0.11.0：全国多省自适应引擎（区域映射 + 多省位次 + 三档计算 + 非法传参 + 接口层）</span>
-├── test_data_cleaner.py          <span style="color:#888">// 0.11.2：数据提纯（正则边界 + 列错位修复 + 各省填充率 + 接口整数校验）</span>
-├── test_user_profile.py          <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 服务编排 + 画像注入 Prompt + --real 端到端）</span>
-├── test_hotfix_0_12_1.py         <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 主观咨询放行 + 规划师模式 + 超时贯通</span>
-├── test_agent_0_13_0.py          <span style="color:#888">// 0.13.0：Agent 工具调用（4 条路径）+ 答案清洗 + 云端心理师 + 报告隐私 AST 检查 + --real</span>
-├── test_hotfix_0_13_1.py         <span style="color:#888">// 0.13.1：极速模式配置 + 全程旁白过滤 + 生成轮兜底前缀 + 状态接口契约/缓存 + 延迟断言</span>
-├── test_plan_workflow.py         <span style="color:#888">// 0.14.0：反馈解析 + 初稿生成 + 重新规划 + 图结构 + HITL 闭环 + 路由契约 + --real</span>
-├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
-├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
-├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
-├── test_multi_query.py           <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF</span>
-├── test_parent_child.py          <span style="color:#888">// 0.3.0：父子块检索</span>
-├── test_hybrid_search.py         <span style="color:#888">// 0.2.0：混合检索 + RRF 融合</span>
-└── test_anti_hallucination.py    <span style="color:#888">// v2.3.x：路由 + 防幻觉拒答</span>
+├── pytest.ini                    <span style="color:#888">// 0.17.0：pytest rootdir / pythonpath 固定，任意工作目录可收集<span style="color:#888">
+├── tests/                        <span style="color:#888">// 0.17.0 测试层：按被测域分子目录（21 个脚本）<span style="color:#888">
+│   ├── conftest.py               <span style="color:#888">// 统一 fixtures：backend 根路径 / 测试客户端 / 临时向量目录<span style="color:#888">
+│   ├── _baseline/                <span style="color:#888">// 重构前测试输出对照（已 gitignore）<span style="color:#888">
+│   ├── auth/
+│   │   └── test_auth_isolation.py     <span style="color:#888">// 0.15.0：认证线程隔离验收（并发压测 + 判据校验）<span style="color:#888">
+│   ├── rag/
+│   │   ├── test_hybrid_search.py      <span style="color:#888">// 0.2.0：混合检索 + RRF 融合<span style="color:#888">
+│   │   ├── test_parent_child.py       <span style="color:#888">// 0.3.0：父子块检索<span style="color:#888">
+│   │   ├── test_multi_query.py        <span style="color:#888">// 0.5.0：Query 分解 + 跨路 RRF<span style="color:#888">
+│   │   ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回<span style="color:#888">
+│   │   ├── test_advanced_rag.py       <span style="color:#888">// 0.7.0：精排 + 三条高级链路对比<span style="color:#888">
+│   │   ├── test_llm_channel.py        <span style="color:#888">// 0.7.1：LLM/Embedding 通道自检 + 端到端 10 秒验证<span style="color:#888">
+│   │   ├── test_anti_hallucination.py <span style="color:#888">// v2.3.x：路由 + 防幻觉拒答<span style="color:#888">
+│   │   ├── test_hybrid_rag.py         <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL + 优先级分发）<span style="color:#888">
+│   │   └── smoke_rag.py               <span style="color:#888">// RAG 全链路冒烟：登录 → 上传 → 检索 → 问答 → 删除<span style="color:#888">
+│   ├── agent/
+│   │   ├── test_agent.py              <span style="color:#888">// 0.13.0：Agent 工具调用 + 答案清洗 + 心理师 + 报告隐私 AST<span style="color:#888">
+│   │   └── test_agent_hotfix.py       <span style="color:#888">// 0.13.1：极速模式 + 旁白过滤 + 兜底前缀 + 状态接口<span style="color:#888">
+│   ├── plan/
+│   │   └── test_plan_workflow.py      <span style="color:#888">// 0.14.0：HITL 反馈解析 / 初稿 / 重规划 / 图结构 / 闭环<span style="color:#888">
+│   ├── profile/
+│   │   └── test_user_profile.py       <span style="color:#888">// 0.12.0：账号与画像（JSON 解析 + 提取器 + 问卷兜底 + 注入 Prompt）<span style="color:#888">
+│   ├── graph/
+│   │   └── test_graph_rag.py          <span style="color:#888">// 0.9.0：图谱双通道（桩版 6 用例 + --real）<span style="color:#888">
+│   ├── multimodal/
+│   │   └── test_multimodal_rag.py     <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图<span style="color:#888">
+│   ├── eval/
+│   │   ├── test_rag_eval.py           <span style="color:#888">// 0.8.0：量化评估（检索指标 + 生成质量 + 报告）<span style="color:#888">
+│   │   ├── rag_eval.py                <span style="color:#888">// 评估脚本本体（Context Precision / Recall / NDCG 等）<span style="color:#888">
+│   │   └── smoke_test.py              <span style="color:#888">// 14 个业务接口冒烟<span style="color:#888">
+│   └── integration/
+│       ├── test_national_engine.py    <span style="color:#888">// 0.11.0：全国多省自适应引擎<span style="color:#888">
+│       ├── test_data_cleaner.py       <span style="color:#888">// 0.11.2：数据提纯<span style="color:#888">
+│       └── test_hotfix_0_12_1.py      <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 规划师模式<span style="color:#888">
 ```
 
 ### 2.3 `frontend/`
@@ -270,9 +306,9 @@ frontend/
 
 ```mermaid
 graph TD
-    A["考生填写<br/>province/year/category/batch<br/>score 或 rank / 选科"] -->|"<b>onRecommend() L242</b><br/>POST /api/recommend"| B["routers/recommend.py:recommend() L12"]
+    A["考生填写<br/>province/year/category/batch<br/>score 或 rank / 选科"] -->|"<b>onRecommend() L242</b><br/>POST /api/recommend"| B["api/recommend/recommend_router.py:recommend() L12"]
 
-    B -->|"payload: <b>RecommendIn</b>"| C["services/recommend_service.py<br/><b>recommend() L318</b>"]
+    B -->|"payload: <b>RecommendIn</b>"| C["services/recommend/recommend_service.py<br/><b>recommend() L318</b>"]
 
     C -->|"rank 为空<br/>(score, province, year, category, batch)"| D["rank_service.<b>score_to_rank() L66</b>"]
     D --> D1[("score_range_2025_henan<br/>cumulative_count = 位次")]
@@ -316,17 +352,17 @@ graph TD
 <summary><b>展开： /api/recommend 完整调用树（文件 → 函数 → 关键参数）</b></summary>
 
 ```
-POST /api/recommend                                     routers/recommend.py:12  recommend()
+POST /api/recommend                                     api/recommend/recommend_router.py:12  recommend()
 │   body: RecommendIn(province="河南", year=2025, category="物理类", batch="本科批",
 │                     score?, rank?, filters?, buffer?, span_factor?,
 │                     limit=60, with_ai=False, ai_limit=8)
 │   异常映射 L34-37：ValueError → 400，其它 → 500
-└─► services/recommend_service.py:318  recommend(province, year, category, batch,
+└─► services/recommend/recommend_service.py:318  recommend(province, year, category, batch,
                                                 rank=None, score=None, filters=None,
                                                 buffer=None, span_factor=None,
                                                 limit=60, with_ai=False, ai_limit=0)
     │
-    ├─① services/rank_service.py:66  score_to_rank(province, year, category, batch, score)
+    ├─① services/recommend/rank_service.py:66  score_to_rank(province, year, category, batch, score)
     │   └─ _load_score_range(province, year, category, batch=None)  :28
     │       └─ models/dataset.py:64  table_name("score_range", year, province)   → "score_range_2025_henan"
     │           └─ database.py:48  get_table(name)           → 反射 Table（缓存）
@@ -366,7 +402,7 @@ POST /api/recommend                                     routers/recommend.py:12 
             ├─ build_reason_context(item, student)  :374   组装 17 字段（含 rank_diff、tier_label）
             ├─ _rule_reason(ctx)  :316                     规则兜底（必然可用）
             └─ ask(_REASON_PROMPT, num_predict=180, timeout=min(OLLAMA_TIMEOUT, 40))  :70
-                └─ services/llm_client.py  get_llm_client().chat(...)
+                └─ services/llm/llm_client.py  get_llm_client().chat(...)
                     ├─ AliLLMChannel   (OpenAI 兼容，base_url=ALI_BASE_URL)
                     └─ OllamaLLMChannel(settings.OLLAMA_FALLBACK_MODEL)
             ⚠️ 降级三处：AI_ENABLED=0 / ask 返回空 / 长度 <8 或 >220 → 返回 (fallback, "rule")
@@ -379,20 +415,20 @@ POST /api/recommend                                     routers/recommend.py:12 
 ### 3.3 其余业务接口的调用链（一行一个）
 
 ```
-GET  /api/meta/control-lines     routers/meta.py:198   → rank_service.control_lines(province, year, category)      :148
-GET  /api/meta/score-check       routers/meta.py:218   → rank_service.score_check(province, year, category, score) :214
+GET  /api/meta/control-lines     api/recommend/meta_router.py:198   → rank_service.control_lines(province, year, category)      :148
+GET  /api/meta/score-check       api/recommend/meta_router.py:218   → rank_service.score_check(province, year, category, score) :214
                                                           ├─ control_lines()  :148
                                                           └─ score_to_rank()  :66
-GET  /api/meta/score-table       routers/meta.py:184   → rank_service.score_table(province, year, category, batch) :140
-GET  /api/score-to-rank          routers/student.py:73 → rank_service.score_to_rank(...)                            :66
-GET  /api/rank-to-score          routers/student.py:91 → rank_service.rank_to_score(...)                            :108
-POST /api/student/profile        routers/student.py:45 → _ensure_rank(p) :24 → score_to_rank()  （档案仅存内存）
-POST /api/ai/parse-intent        routers/ai.py:34      → ai_service.parse_intent(text, province, use_llm=True)      :246
+GET  /api/meta/score-table       api/recommend/meta_router.py:184   → rank_service.score_table(province, year, category, batch) :140
+GET  /api/score-to-rank          api/recommend/student_router.py:73 → rank_service.score_to_rank(...)                            :66
+GET  /api/rank-to-score          api/recommend/student_router.py:91 → rank_service.rank_to_score(...)                            :108
+POST /api/student/profile        api/recommend/student_router.py:45 → _ensure_rank(p) :24 → score_to_rank()  （档案仅存内存）
+POST /api/ai/parse-intent        api/chat/chat_router.py:34      → ai_service.parse_intent(text, province, use_llm=True)      :246
                                                           └─ 规则 _rule_parse_intent() :149 ← AI 失败时的兜底
-POST /api/ai/recommend-reason    routers/ai.py:44      → ai_service.recommend_reason(payload, {rank, score})         :398
-GET  /api/universities           routers/university.py:36 → recommend_service._probability()（跨模块复用）           :204
-GET  /api/majors                 routers/university.py:144 → recommend_service._plan_index()/_lookup_plan()          :38/:86
-GET  /api/stats/major-count-by-province  routers/stats.py → 各省在豫招生专业数（首页地图数据源）
+POST /api/ai/recommend-reason    api/chat/chat_router.py:44      → ai_service.recommend_reason(payload, {rank, score})         :398
+GET  /api/universities           api/recommend/university_router.py:36 → recommend_service._probability()（跨模块复用）           :204
+GET  /api/majors                 api/recommend/university_router.py:144 → recommend_service._plan_index()/_lookup_plan()          :38/:86
+GET  /api/stats/major-count-by-province  api/recommend/stats_router.py → 各省在豫招生专业数（首页地图数据源）
 ```
 
 ### 3.4 前端请求表（调用已是二级：Vue → api → URL）
@@ -426,7 +462,7 @@ GET  /api/stats/major-count-by-province  routers/stats.py → 各省在豫招生
 ```mermaid
 graph TD
     A["admin/Knowledge.vue<br/>点击上传"] --> B["UploadModal.vue<br/>el-upload action=<br/>/api/knowledge/upload"]
-    B -->|"FormData{file} + Bearer"| C["routers/knowledge.py:60<br/><b>upload_knowledge()</b>"]
+    B -->|"FormData{file} + Bearer"| C["api/knowledge/knowledge_router.py:60<br/><b>upload_knowledge()</b>"]
     C --> C1{"is_allowed(file.filename)?<br/>size ≤ MAX_FILE_SIZE?"}
     C1 -->|否| C2["400 不支持的类型 / 文件过大"]
     C1 -->|是| D["utils/file_utils.py<br/><b>save_upload_file()</b> → UUID 落盘 knowledge_files/"]
@@ -451,7 +487,7 @@ graph TD
 <summary>展开：上传链参数级调用树</summary>
 
 ```
-POST /api/knowledge/upload            routers/knowledge.py:60  upload_knowledge(file: UploadFile, db, current_user)
+POST /api/knowledge/upload            api/knowledge/knowledge_router.py:60  upload_knowledge(file: UploadFile, db, current_user)
 │   权限：Depends(get_current_admin)  第 63 行
 │   校验：is_allowed(filename) L66（白名单）／ len(content) > MAX_FILE_SIZE(20MB) L73
 ├─► utils/file_utils.py  save_upload_file(content, original)   → (stored_filename, file_path)
@@ -461,9 +497,9 @@ POST /api/knowledge/upload            routers/knowledge.py:60  upload_knowledge(
 │       ORM 模型 models/knowledge.py → 表 knowledge_files
 ├─► utils/file_utils.py  extract_text(file_path, record.file_type)
 │       PDF → pypdf；DOCX → python-docx；其它 → 按 utf-8/gbk 兜底解码
-├─► services/rag_service.py  split_text(text, size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
+├─► services/rag/rag_service.py  split_text(text, size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
 │       分隔符优先级 ["\n\n", "\n", "。", "，"]；langchain 缺失时退化为定长切分
-└─► services/rag_service.py  add_documents(chunks, metadata, key_fmt="file_{id}_chunk_{idx}")
+└─► services/rag/rag_service.py  add_documents(chunks, metadata, key_fmt="file_{id}_chunk_{idx}")
         ├─ put_parents(parents)                父块 docstore（parent_store.json）
         ├─ split_child_text(parent, 120, 20)   子块
         ├─ add_document(child_id, text, meta, embedding=None)
@@ -478,7 +514,7 @@ POST /api/knowledge/upload            routers/knowledge.py:60  upload_knowledge(
 
 ### 4.2 主链二：用户 AI 问答（按提问类型分六个分支）
 
-入口：`AiChat.vue:send()` → `POST /api/ai/chat` → `routers/ai.py:52 chat()`
+入口：`AiChat.vue:send()` → `POST /api/ai/chat` → `api/chat/chat_router.py:52 chat()`
 
 ```mermaid
 graph TD
@@ -515,8 +551,8 @@ graph TD
 
 | 步骤 | 位置 | 判断 / 参数 | 结果 |
 |---|---|---|---|
-| ① 路由二分类 | `routers/ai.py:76` → `rag_service.route_query()` L1140 | `ask(ROUTER_PROMPT.format(query=question), temperature=0.0, top_p=1.0, num_predict=5, timeout=20)` | 返回 `"YES" in intent.upper()` |
-| ② 拦截 | `routers/ai.py:77-81` | `if use_rag and not route_query(...)` | 直接返回 `rag_service.OFF_TOPIC_ANSWER` L1122，`source="router_blocked"`，**不检索、不调用后续 LLM** |
+| ① 路由二分类 | `api/chat/chat_router.py:76` → `rag_service.route_query()` L1140 | `ask(ROUTER_PROMPT.format(query=question), temperature=0.0, top_p=1.0, num_predict=5, timeout=20)` | 返回 `"YES" in intent.upper()` |
+| ② 拦截 | `api/chat/chat_router.py:77-81` | `if use_rag and not route_query(...)` | 直接返回 `rag_service.OFF_TOPIC_ANSWER` L1122，`source="router_blocked"`，**不检索、不调用后续 LLM** |
 | ③ 兜底 | `route_query` L1159 | LLM 返回空 → **放行**（避免误伤） | 走主流程 |
 
 #### 分支 B：结构化查询（如「XX 学费多少」→ `SQL_EXTRACT_PROMPT` + MySQL）
@@ -605,14 +641,14 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 | `reranker.py` | `rag_service.rerank()` | `rag_service.get_embedding()` |
 | `self_rag.py` | `rag_service.answer_with_strategy()` | `llm_client` + 注入进来的 `retriever/generator`（= `rag_service.search/generate_answer`） |
 | `corrective_rag.py` | `rag_service.answer_with_strategy()` | 同上 |
-| `rag_service.py` | `routers/ai.py`、`routers/knowledge.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` + `services/graph/*` + `services/sql_query_engine.py`（0.9.1 三路） |
+| `rag_service.py` | `api/chat/chat_router.py`、`api/knowledge/knowledge_router.py`、`services/eval/data_builder.py`、`test_*.py` | 上述全部 + Chroma + `parent_store.json` + `services/graph/*` + `services/sql/sql_query_engine.py`（0.9.1 三路） |
 | `sql_query_engine.py` | `rag_service.answer_with_hybrid()`（经线程池并行调用）、`test_hybrid_rag.py` | `app.database.SessionLocal` + `app.models.dataset.table_name` |
 | `graph/graph_store.py` | `graph/graph_query_engine.py`、`graph/graph_builder.py` | `py2neo.Graph` → Neo4j |
 | `graph/entity_extractor.py` | `graph/graph_query_engine.py`、`graph_builder`（不直接） | `ai_service.ask`（经 `default_llm_chat`）+ MySQL 词典 |
 | `graph/cypher_generator.py` | `graph/graph_query_engine.py` | 同上 |
 | `graph/graph_query_engine.py` | `rag_service._get_graph_engine()`、`test_graph_rag.py` | `EntityExtractor` + `CypherGenerator` + `GraphStore`（合成复用） |
 | `graph/graph_builder.py` | 命令行 `python -m app.services.graph.graph_builder` | `GraphStore` + `app.database` + `app.models.dataset` |
-| `multimodal/image_retriever.py` | `rag_service.answer_with_multimodal()`、`routers/knowledge.py`、`test_multimodal_rag.py` | `ImageExtractor` + `BaseImageEncoder` + `ImageStore` + `VLMClient`（合成复用） |
+| `multimodal/image_retriever.py` | `rag_service.answer_with_multimodal()`、`api/knowledge/knowledge_router.py`、`test_multimodal_rag.py` | `ImageExtractor` + `BaseImageEncoder` + `ImageStore` + `VLMClient`（合成复用） |
 | `utils/ocr_utils.py` | `utils/file_utils._maybe_ocr()`、`test_multimodal_rag.py` | `openai.OpenAI`（Ali）+ `pypdfium2` + `pypdf` |
 
 ### 4.4 主链三：RAG 量化评估（0.8.0）
@@ -621,7 +657,7 @@ CorrectiveRAG.run(query, top_k)                      corrective_rag.py:94
 
 ```mermaid
 graph TD
-    A["admin/RAGEval.vue<br/>选择数据集 + 配置覆盖"] -->|"POST /api/eval/run<br/>{dataset_id, config_overrides}"| B["routers/eval.py:run_eval()<br/>get_current_admin 鉴权"]
+    A["admin/RAGEval.vue<br/>选择数据集 + 配置覆盖"] -->|"POST /api/eval/run<br/>{dataset_id, config_overrides}"| B["api/knowledge/rag_eval_router.py:run_eval()<br/>get_current_admin 鉴权"]
     B --> C["eval/<b>EvalDataBuilder.load_qa_pairs()</b><br/>读 data/eval/*.json|csv"]
     C --> D["<b>ProjectRAGRunner.retrieve()</b><br/>rag_service.search(top_k=TOP_K_FOR_EVAL)"]
     D --> E["<b>ProjectRAGRunner.generate()</b><br/>rag_service.generate_answer()"]
@@ -668,7 +704,7 @@ graph TD
 
 ```mermaid
 graph TD
-    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["routers/ai.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["api/chat/chat_router.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
     B -->|"是"| C["rag_service.<b>answer_with_hybrid()</b><br/>0.9.1 三路融合"]
     B -->|"否（向后兼容）"| Z["rag_service.answer_with_strategy()<br/>0.8.0 纯向量链路，行为不变"]
 
@@ -759,7 +795,7 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 
 ```mermaid
 graph TD
-    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat"| B["routers/ai.py:_chat_sync()"]
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat"| B["api/chat/chat_router.py:_chat_sync()"]
     B --> C{"rag_service.should_use_multimodal()<br/>命中「图/课程/培养方案/校园」等关键词？"}
     C -->|"未命中"| Z["回落 0.9.1 三路融合<br/>图谱 + MySQL + 向量"]
     C -->|"命中"| D["rag_service.answer_with_multimodal()"]
@@ -779,7 +815,7 @@ graph TD
     style J fill:#fff3cd,stroke:#d32f2f
 ```
 
-**图像入库（上传时）**：`routers/knowledge.py` 文本向量化成功后 → `ImageExtractor.extract_images()` 抽嵌图（扫描件按页渲染兜底）→ `ImageEncoder.encode_image()` 编码 → `ImageStore.add_images()` 写入 `gaokao_images` → 回写 `knowledge_files.image_count`。删除文件时同步清理。
+**图像入库（上传时）**：`api/knowledge/knowledge_router.py` 文本向量化成功后 → `ImageExtractor.extract_images()` 抽嵌图（扫描件按页渲染兜底）→ `ImageEncoder.encode_image()` 编码 → `ImageStore.add_images()` 写入 `gaokao_images` → 回写 `knowledge_files.image_count`。删除文件时同步清理。
 
 **OCR 预处理（上传时前置）**：`utils/file_utils.extract_text()` 对 PDF 先按页平均字符数判定是否扫描件 → 是则 `OCRExtractor` 用 `qwen-vl-ocr`（不可用回落 `qwen3.7-flash`）页间并发识别 → 识别结果再走原有 `split_text()` 切片流程，并回写 `knowledge_files.ocr_used`。
 
@@ -791,7 +827,7 @@ graph TD
 
 ```mermaid
 graph TD
-    A["student/Volunteer.vue<br/>选省份 / 科类 / 填分数"] -->|"POST /api/recommend<br/>{province, category, score}"| B["routers/recommend.py<br/>_validate_province_category()"]
+    A["student/Volunteer.vue<br/>选省份 / 科类 / 填分数"] -->|"POST /api/recommend<br/>{province, category, score}"| B["api/recommend/recommend_router.py<br/>_validate_province_category()"]
     B -->|"省份不存在"| E1["400 不支持的省份"]
     B -->|"科类不支持"| E2["400 该省份不支持此科类"]
     B -->|"该省无数据"| E3["400 该省暂无 2025 年数据"]
@@ -862,7 +898,7 @@ graph TD
 
 | 原则 | 落地方式 | 代码位置 |
 |---|---|---|
-| **SRP 单一职责** | 路由只收参数/返响应；Prompt 组装、LLM 调用、JSON 清洗、落库全部在 Service 层 | `routers/profile.py` vs `services/profile/` |
+| **SRP 单一职责** | 路由只收参数/返响应；Prompt 组装、LLM 调用、JSON 清洗、落库全部在 Service 层 | `api/account/profile_router.py` vs `services/profile/` |
 | **OCP 开闭** | 新增画像来源（性格测试等）只加 Prompt 模板 + Extractor 子类，不改 `service.py`、不动 `ai.py` | `prompts.py` + `EXTRACTOR_REGISTRY` |
 | **LSP 里氏替换** | `ReportExtractor` / `SurveyExtractor` 同继承 `BaseProfileExtractor`，契约一致（`extract` / `render`） | `extractors.py` |
 | **DIP 依赖倒置** | Service 依赖 `BaseProfileRepository` 抽象与 `llm` 可调用对象，不 import MySQL / HTTP | `repository.py`、`extractors.py:default_llm` |
@@ -895,11 +931,11 @@ Prompt 里明确写了「不得据此编造任何数字」，分数线 / 学费 
 
 ### 4.9 主链八：本地 Agent 调度（0.13.0 Function Calling）
 
-入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat` → `routers/ai.py:chat()`
+入口：`student/AiChat.vue` → `api/ai.ts:chat()` → `POST /api/ai/chat` → `api/chat/chat_router.py:chat()`
 
 ```mermaid
 graph TD
-    A["AiChat.vue<br/>发送问题（无 RAG 开关）"] -->|"POST /api/ai/chat<br/>{question}"| B["routers/ai.py:chat()<br/>读画像 summary_text"]
+    A["AiChat.vue<br/>发送问题（无 RAG 开关）"] -->|"POST /api/ai/chat<br/>{question}"| B["api/chat/chat_router.py:chat()<br/>读画像 summary_text"]
     B --> C["services/agent/run_agent()<br/>AgentRunner.run()"]
     C --> D["registry.specs()<br/>生成 3 个工具的说明书"]
     D --> E["OllamaToolClient.chat(messages, tools)<br/>qwen3:4b 自主判断"]
@@ -1000,7 +1036,7 @@ graph TD
 
 ```mermaid
 graph TD
-    A["PlanGenerator.vue<br/>填分数 / 科类 / 偏好"] -->|"POST /api/plan/start"| B["routers/plan.py"]
+    A["PlanGenerator.vue<br/>填分数 / 科类 / 偏好"] -->|"POST /api/plan/start"| B["api/plan/plan_router.py"]
     B --> C["PlanWorkflow.start()<br/>uuid → thread_id"]
     C --> D["Node1 analyze_intent<br/>画像+偏好 → 筛选条件"]
     D --> E["Node2 generate_draft<br/>score_to_rank → calculate_tiers → enrich"]
