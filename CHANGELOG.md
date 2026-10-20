@@ -62,8 +62,144 @@
 | **0.12.0** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + **账号体系与双轨制用户画像**（报告提取 / 业务问卷 → 画像注入 Prompt） | 同上 + **用户画像**（个性化建议） | ✅ 已发布 |
 | **0.12.1** | 2026-10-18 | 父子块（不变） | 三路融合 + 全国引擎 + 数据提纯 + 用户画像（**＋隐私隔离 / 规划师模式 / 超时贯通**） | 同上（修复地图统计与问答拒答） | ✅ 已发布 |
 | **0.13.0** | 2026-10-20 | 父子块（不变） | **本地 Agent（Function Calling）**：向量/MySQL/图谱封装成工具，由 qwen3:4b 自主选择；云端心理师独立成链路 | 父块 + 图谱 + MySQL + 图像 + **用户画像（物理隔离上传）** | ✅ 已发布 |
-| **0.13.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **极速模式**（默认走确定性链路）+ **环境状态指示灯** | 同上（问答延迟 150s → 9.5s） | ✅ 本次热修复 |
+| **0.13.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **极速模式**（默认走确定性链路）+ **环境状态指示灯** | 同上（问答延迟 150s → 9.5s） | ✅ 已发布 |
+| **0.14.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **LangGraph 人机回环（HITL）志愿规划**：初稿 → 人工干预 → 终稿 | 同上（新增独立规划模块，RAG/Agent 零改动） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.14.0] - 2026-10-20 · LangGraph 人机回环（HITL）志愿规划
+
+### 一、为什么需要人机回环
+
+志愿填报是**不可逆的重大决策**，AI 一次生成的方案不能直接当终稿。
+0.14.0 用 LangGraph 的 Checkpoint 机制把流程切成三段：
+
+```
+AI 生成初稿 → 图暂停，用户随便改 → 恢复执行，AI 按意见重排 → 终稿
+```
+
+关键在「暂停」——不是前端假装等待，而是**后端真的把图停在中断点**，
+状态存在 Checkpointer 里，用户改完再唤醒。这样即使中间隔了几分钟、
+换了浏览器，方案也不会丢。
+
+### 二、图的形状
+
+```
+START → analyze_intent → generate_draft → ⏸ human_review → refine_plan → END
+                                          ↑
+                              第一次 invoke 停在这里
+```
+
+| 节点 | 职责 | 耗时 |
+|---|---|---|
+| `analyze_intent` | 读分数 + 画像，把「想去江浙沪、不想太冷」变成筛选条件 | <10ms |
+| `generate_draft` | 位次换算 → 冲稳保 → 学费富化，产出初稿 + 全量候选池 | ~1s |
+| `human_review` | **空节点**，只作为 `interrupt_before` 的挂载点 | 0 |
+| `refine_plan` | 解析用户意见 → 从候选池重筛 → 终稿 + 调整记录 | <10ms（规则）/ 20-60s（含模型） |
+
+### 三、新增文件
+
+| 文件 | 职责 | 设计原则 |
+|---|---|---|
+| `services/agent/workflow.py` | 只做编排：State、连图、MemorySaver、start/resume | **SRP**（不写 SQL、不调 LLM） |
+| `services/agent/plan_builder.py` | 业务：初稿生成 / 反馈解析 / 重新筛选 | **DIP**（引擎函数可注入）/ **可测**（不依赖 langgraph） |
+| `schemas/plan.py` | `start` 与 `resume` 入参**分开建模** | **ISP** |
+| `routers/plan.py` | `/start`、`/resume`、`/state`、`/health` | 独立路由，出问题可单独回滚 |
+| `frontend/src/views/student/PlanGenerator.vue` | 三步 UI（填信息 → 人工干预 → 终稿） | — |
+| `frontend/src/api/plan.ts` | 三段式 API 封装 | — |
+| `backend/test_plan_workflow.py` | 6 组桩版 + `--real` | — |
+
+**零侵入**：`rag_service.py`、`agent/runner.py`、`routers/ai.py` 一行未改。
+规划模块只**复用**（`score_to_rank` / `calculate_tiers` / `enrich_with_plan` / `LLMJsonParser`），
+不修改任何既有函数。
+
+### 四、反馈解析：规则优先，模型兜底
+
+用户说的话千奇百怪，全部交给大模型会慢（本机 20-60s），全用规则又不够聪明。
+0.14.0 采用**双层 + 短路**：
+
+```
+规则层（0ms）→ 已解析出条件？ → 是 → 直接返回（不调模型）
+                              → 否 → 调模型 → 与规则结果取并集
+```
+
+规则层能力（实测）：
+
+| 用户说法 | 解析结果 |
+|---|---|
+| 不想去北京 | `exclude_provinces=['北京']` |
+| 我不想去太冷的地方 | `exclude_provinces=[黑龙江, 吉林, 辽宁, 内蒙古, 新疆, 青海, 西藏]`（语义展开） |
+| 想去江浙沪，想学计算机 | `prefer_provinces=[江苏,浙江,上海]`、`prefer_majors=['计算机']` |
+| 学费别超过 6000 | `max_tuition=6000` |
+| 太贵了（无数字） | `max_tuition=8000`（公办普通专业经验上限） |
+| 不学土木 | `exclude_keywords=['土木']` |
+| 想学计算机但别太远 | 专业为**偏好**、远地区为**排除**（同句双极性） |
+
+模型层用 `PLAN_LLM_ENABLED=1` 开启，只在规则看不懂时触发；
+`PLAN_LLM_ALWAYS=1` 可强制每次都过模型。
+
+### 五、接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/plan/start` | 生成初稿，返回 `thread_id` + `draft_plan`，图停在中断点 |
+| POST | `/api/plan/resume` | 注入 `user_feedback`，恢复执行，返回 `final_plan` + `changes` |
+| GET | `/api/plan/state/{thread_id}` | 读会话现场（刷新后可恢复，`awaiting_feedback` 表示是否还停在中断点） |
+| GET | `/api/plan/health` | langgraph 依赖自检，前端据此决定是否显示按钮 |
+
+**权限**：全部 `Depends(get_current_user)`；`thread_id` 内嵌 `user_id`，
+Service 层校验归属 —— 拿到别人的 `thread_id` 也是 403。
+
+### 六、验证结果
+
+#### 桩版（`python test_plan_workflow.py`）
+
+```
+用例 1：反馈解析      6 类说法全部正确（含「太冷」语义展开、同句双极性）
+用例 2：初稿生成      rank=40000，初稿 3/4/3，候选池各 20；非法省份/科类/位次为 0 → 明确报错
+用例 3：重新规划      排除地区/学费超限/偏好排序/全排除回退/空反馈原样
+用例 4：图结构        4 个节点齐全 + MemorySaver + interrupt_before=['human_review']
+用例 5：HITL 闭环     start 暂停 → get_state 等待 → resume 终稿 → 越权 403 → 不存在 404
+用例 6：路由契约      3 个路由注册，缺分数/位次 → 422
+0.14.0 桩版全部通过
+```
+
+#### 真实链路（`--real`）
+
+```
+plan/health  → {available: true, engine: langgraph, interrupt_before: human_review}
+① start  status=200 耗时=1.2s   thread=1bf63c19 rank=45887 初稿=24 条
+② state  → awaiting_feedback=True（图确实停在中断点）
+③ resume status=200 耗时=0.0s   解析=['北京'] 调整=23 条 终稿=24 条
+          地区=['上海','吉林','四川','安徽','广东','广西','江苏','河北','河南','海南','湖北','贵州','辽宁','黑龙江']
+④ 他人访问 status=403
+⑤ 未登录   status=401
+```
+
+#### 回归
+
+`test_agent_0_13_0`、`test_hotfix_0_13_1`、`smoke_test`、`smoke_rag`、
+`test_hybrid_rag`、`test_multimodal_rag`、`test_national_engine --api`、
+`test_user_profile`、`npm run build` 全部通过。
+
+### 七、已知限制
+
+| 项 | 说明 |
+|---|---|
+| Checkpoint 存在内存 | `MemorySaver` 进程内有效；**重启服务后旧 `thread_id` 失效**（前端会收到 404，需重新生成）。生产环境建议换 `SqliteSaver`/`RedisSaver`，只需改 `build_plan_graph(checkpointer=...)` 一处 |
+| 单进程限制 | 多 worker（`uvicorn --workers N`）时状态不共享；当前部署为单 worker，够用 |
+| 终稿不落库 | 目前只在会话内保存，刷新可恢复但过期即失；导出 CSV 是主要留存方式 |
+| 反馈词表有限 | 规则层覆盖常见说法，冷门表达依赖模型；`PLAN_LLM_ENABLED=0` 时可能漏解 |
+
+### 八、后续演进（0.15.0）
+
+| 方向 | 说明 |
+|---|---|
+| Checkpoint 持久化 | 换 `SqliteSaver`，支持跨重启恢复 + 历史版本回溯 |
+| 终稿落库 | 新增 `plan_drafts` 表，支持「我的方案」列表与版本对比 |
+| 多轮迭代 | 允许用户连续改多轮（当前 resume 后即结束） |
+| 干预粒度细化 | 支持「这条往上提一档」「这条换成同城其他学校」这类结构化微调 |
 
 ---
 

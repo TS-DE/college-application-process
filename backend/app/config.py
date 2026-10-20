@@ -183,6 +183,20 @@ class Settings:
     # 是否让 Agent 看到用户画像（本地模型上下文小，样本长时可关掉）
     AGENT_INJECT_PROFILE: bool = _env("AGENT_INJECT_PROFILE", "1") not in {"0", "false", "False"}
 
+    # ---------------- 0.14.0 人机协同志愿规划（LangGraph HITL） ----------------
+    # 是否允许用大模型解析用户的自由文本反馈。
+    # 规则层能解析的常见说法（「不想去北京」「学费别超 6000」）不会调用模型，
+    # 只有规则看不懂时才走这里，因此默认开启也不会拖慢常规操作。
+    PLAN_LLM_ENABLED: bool = _env("PLAN_LLM_ENABLED", "1") not in {"0", "false", "False"}
+    # 强制每次都调模型（默认关闭：规则优先，快）
+    PLAN_LLM_ALWAYS: bool = _env("PLAN_LLM_ALWAYS", "0") not in {"0", "false", "False"}
+    # 反馈解析的模型超时：超时就用规则层结果，不阻塞用户
+    PLAN_LLM_TIMEOUT: float = float(_env("PLAN_LLM_TIMEOUT", "20"))
+    # 初稿每个档位的条数上限
+    PLAN_DRAFT_PER_TIER: int = int(_env("PLAN_DRAFT_PER_TIER", "8"))
+    # 终稿每个档位的条数上限
+    PLAN_FINAL_PER_TIER: int = int(_env("PLAN_FINAL_PER_TIER", "8"))
+
     # ---------------- 0.13.0 云端「心理师」通道 ----------------
     # 心理疏导与画像采集**强制**走云端大模型（本地 4b 的情感推理能力不足），
     # 因此这里单独配置模型与超时，不走 LLMClient 的「Ali → Ollama」降级链。

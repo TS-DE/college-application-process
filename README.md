@@ -99,7 +99,8 @@ backend/
 │   ├── schemas/                  <span style="color:#888">// Pydantic 出入参模型（请求体与响应体的唯一契约）</span>
 │   │   ├── student.py            <span style="color:#888">// RecommendIn / RecommendFilters / RecommendItem / ScoreToRankOut …</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── knowledge.py          <span style="color:#888">// SearchOut / ChunkHit / KnowledgeFileOut</span>
-│   │   ├── ai.py                 <span style="color:#888">// 0.13.0 CounselorIn / CounselorOut / ChatMessage / AgentChatOut（接口隔离：本地问答与云端心理师各自建模）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   ├── ai.py                 <span style="color:#888">// 0.13.0 CounselorIn / CounselorOut / ChatMessage / AgentChatOut（接口隔离：本地问答与云端心理师各自建模）</span>
+│   │   ├── plan.py               <span style="color:#888">// 0.14.0 PlanStartIn/Out、PlanResumeIn/Out、PlanStateOut（start 与 resume 分开建模，ISP）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── profile.py            <span style="color:#888">// 0.12.0 画像入出参：ProfileBasicIn / SurveyQuestionIn / SurveySubmitIn / ReportUploadIn / ProfileOut / SummaryOut（按接口拆细，ISP）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
 │   │   └── user.py               <span style="color:#888">// LoginIn / RegisterIn（+昵称手机号）/ UserOut / TokenOut / ChangePasswordIn</span>
 │   ├── routers/                  <span style="color:#888">// 接口层：只做参数校验与异常映射，业务逻辑一律下沉 service</span>
@@ -112,7 +113,8 @@ backend/
 │   │   ├── student.py            <span style="color:#888">// /api/student/profile、/api/score-to-rank、/api/rank-to-score</span>
 │   │   ├── university.py         <span style="color:#888">// /api/universities、/api/majors（复用 recommend_service._probability）</span>
 │   │   ├── eval.py               <span style="color:#888">// 0.8.0：/api/eval/run|report|reports|apply-suggestion|changes|rollback|datasets（均仅 admin）</span>  <span style="color:#9c27b0; background-color:#f3e5f5">🟣 量化评估</span>
-│   │   └── profile.py            <span style="color:#888">// 0.12.0：/api/profile（读画像）、/basic、/domains、/survey/questions|submit、/report/upload、/summary/rebuild、DELETE（均需登录）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   ├── profile.py            <span style="color:#888">// 0.12.0：/api/profile（读画像）、/basic、/domains、/survey/questions|submit、/report/upload、/summary/rebuild、DELETE（均需登录）</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   └── plan.py               <span style="color:#888">// 0.14.0：/api/plan/start（生成初稿并暂停）、/resume（恢复执行）、/state/{id}、/health（均需登录）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
 │   ├── services/                 <span style="color:#888">// 业务与算法层（所有计算发生在这里）</span>
 │   │   ├── recommend_service.py  <span style="color:#888">// 冲稳保规则引擎：候选拉取 → 位次窗口 → 去重 → 分档 → 概率估算</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   ├── rank_service.py       <span style="color:#888">// 一分一段：score_to_rank / rank_to_score / control_lines / score_check</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
@@ -121,7 +123,9 @@ backend/
 │   │   ├── rag_service.py        <span style="color:#888">// RAG 主控：Chroma 读写、父子树、search()、rerank()、route_strategy()、answer_with_strategy()、0.9.0 search_with_graph()、0.9.1 answer_with_hybrid() 三路融合（图谱 > MySQL > 向量）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   ├── sql_query_engine.py   <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（0.11.0 起查 `_all` 总表 + province/category 过滤），参数化查询，异常不抛</span>  <span style="color:#0d47a1; background-color:#e3f2fd">🔵 MySQL 通道</span>
 │   │   ├── dataset_access.py     <span style="color:#888">// 0.11.1 数据访问层：resolve_table（全国总表 + school→major 回落）、province/category/batch 条件构造、省份感知的批次归一</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
-│   │   ├── agent/                <span style="color:#888">// 0.13.0 本地 Agent 调度（Function Calling：模型自主决定查向量/MySQL/图谱）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
+│   │   ├── agent/                <span style="color:#888">// 0.13.0 本地 Agent 调度（Function Calling）+ 0.14.0 HITL 工作流</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
+│   │   │   ├── workflow.py       <span style="color:#888">// 0.14.0 LangGraph 图：PlanState + 4 节点 + MemorySaver + interrupt_before（只做编排，不写业务）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
+│   │   │   ├── plan_builder.py   <span style="color:#888">// 0.14.0 规划业务：PlanDraftBuilder（初稿）/ FeedbackInterpreter（规则+模型双层解析）/ PlanRefiner（重筛）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
 │   │   │   ├── base.py           <span style="color:#888">// BaseTool 抽象 + ToolResult / ToolCall 统一契约（LSP：所有工具返回一致，绝不抛异常）</span>
 │   │   │   ├── tools.py          <span style="color:#888">// VectorSearchTool / MySQLSearchTool / GraphSearchTool（SRP：只管执行 + 转人话）</span>
 │   │   │   ├── registry.py       <span style="color:#888">// ToolRegistry：注册、按名取用、生成 tools 规格、剔除不可用工具（OCP：加工具只改一行）</span>
@@ -194,6 +198,7 @@ backend/
 ├── test_hotfix_0_12_1.py         <span style="color:#888">// 0.12.1：隐私隔离 + 地图统计口径 + 主观咨询放行 + 规划师模式 + 超时贯通</span>
 ├── test_agent_0_13_0.py          <span style="color:#888">// 0.13.0：Agent 工具调用（4 条路径）+ 答案清洗 + 云端心理师 + 报告隐私 AST 检查 + --real</span>
 ├── test_hotfix_0_13_1.py         <span style="color:#888">// 0.13.1：极速模式配置 + 全程旁白过滤 + 生成轮兜底前缀 + 状态接口契约/缓存 + 延迟断言</span>
+├── test_plan_workflow.py         <span style="color:#888">// 0.14.0：反馈解析 + 初稿生成 + 重新规划 + 图结构 + HITL 闭环 + 路由契约 + --real</span>
 ├── test_multimodal_rag.py        <span style="color:#888">// 0.10.0：OCR 预处理 + 以文搜图（桩版 8 用例 + --real 真实链路）</span>
 ├── test_hybrid_rag.py            <span style="color:#888">// 0.9.1：三路融合（意图识别 + MySQL 查询 + 优先级分发 + 全空拒答 + 异常降级）</span>
 ├── test_query_preprocess_recall.py <span style="color:#888">// 0.6.0：检索前预处理 + 多路召回</span>
@@ -230,7 +235,8 @@ frontend/
 │   │   │   ├── Volunteer.vue     <span style="color:#888">// 志愿填报主页面（分数 → 位次 → 冲稳保；学费 0 显示免学费）</span>  <span style="color:#388e3c; background-color:#e8f5e9">🟢 业务核心</span>
 │   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格；考生省份与院校所在地分开）</span>
 │   │   │   ├── AiChat.vue        <span style="color:#888">// 本地 Agent 问答（0.13.0 去掉 RAG 开关与画像按钮，只保留「想让我更了解你吗？」入口 + 思考动画）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
-│   │   │   └── Counselor.vue     <span style="color:#888">// 0.13.0 心理与画像空间：云端心理师多轮对话 + 报告上传区 + 画像展示区 + 业务问卷</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   │   ├── Counselor.vue     <span style="color:#888">// 0.13.0 心理与画像空间：云端心理师多轮对话 + 报告上传区 + 画像展示区 + 业务问卷</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
+│   │   │   └── PlanGenerator.vue <span style="color:#888">// 0.14.0 人机协同三步：填信息 → 看初稿提意见（HITL）→ 终稿（含调整记录 / 导出 CSV）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
 │   │   └── admin/
 │   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）+ RAG 量化评估入口</span>
 │   │       ├── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
@@ -985,6 +991,60 @@ graph TD
 **隐私边界**：心理师只读 `summary_text` 作为背景，不读原始报告文字；
 报告文件在解析后被 `ReportReader` 立即删除，磁盘不留副本。
 
+### 4.11 主链十：人机协同志愿规划（0.14.0 LangGraph HITL）
+
+入口：`AiChat.vue` 标题栏「🤖 智能生成志愿方案」→ `/plan` → `student/PlanGenerator.vue`
+
+```mermaid
+graph TD
+    A["PlanGenerator.vue<br/>填分数 / 科类 / 偏好"] -->|"POST /api/plan/start"| B["routers/plan.py"]
+    B --> C["PlanWorkflow.start()<br/>uuid → thread_id"]
+    C --> D["Node1 analyze_intent<br/>画像+偏好 → 筛选条件"]
+    D --> E["Node2 generate_draft<br/>score_to_rank → calculate_tiers → enrich"]
+    E --> F["⏸ human_review<br/>interrupt_before 生效，invoke 返回"]
+    F -->|"返回 thread_id + draft_plan"| G["前端展示初稿 + 反馈输入框"]
+    G -->|"POST /api/plan/resume<br/>{thread_id, user_feedback}"| H["update_state(as_node=human_review)"]
+    H --> I["invoke(None) 恢复执行"]
+    I --> J["Node4 refine_plan<br/>FeedbackInterpreter → PlanRefiner"]
+    J --> K["返回 final_plan + changes + note"]
+    K --> L["前端展示终稿 / 导出 CSV"]
+
+    style F fill:#f3e5f5,stroke:#6a1b9a
+    style C fill:#e3f2fd,stroke:#1976d2
+    style J fill:#fff3e0,stroke:#ff6f00
+```
+
+**两个文件的分工**（单一职责）：
+
+| 文件 | 只管 | 不碰 |
+|---|---|---|
+| `services/agent/workflow.py` | State、连图、MemorySaver、start/resume | 不写 SQL、不调 LLM、不解析文本 |
+| `services/agent/plan_builder.py` | 初稿生成、反馈解析、重新筛选 | 不 import langgraph（可脱离图单独测试） |
+
+**反馈解析的双层策略**：
+
+```
+规则层（0ms）→ 已解析出条件？ → 是 → 直接返回（不调模型，实测 resume 0.0s）
+                              → 否 → 调模型（PLAN_LLM_ENABLED=1）→ 与规则结果取并集
+```
+
+| 用户说法 | 规则层解析 |
+|---|---|
+| 不想去北京 | `exclude_provinces=['北京']` |
+| 我不想去太冷的地方 | 语义展开为东北+西北 7 省 |
+| 想去江浙沪，想学计算机 | `prefer_provinces=[江苏,浙江,上海]` + `prefer_majors=['计算机']` |
+| 学费别超过 6000 / 太贵了 | `max_tuition=6000` / `8000` |
+| 不学土木 | `exclude_keywords=['土木']` |
+| 想学计算机但别太远 | 专业→偏好，远地区→排除（同句双极性） |
+
+**为什么 candidate_pool 要保留全量**：用户说「北京都去掉」时，若只保留初稿的
+24 条，删完就空了。生成初稿时把每档 50 条候选一起存进 State，
+重新规划从池子里补位，用户看到的始终是完整的三档结构。
+
+**已知限制**：`MemorySaver` 是进程内存储 —— **重启服务后旧 `thread_id` 失效**
+（前端会收到 404，需重新生成）。生产环境换 `SqliteSaver` 只需改
+`build_plan_graph(checkpointer=...)` 一处。
+
 ---
 
 ## 五、接口清单
@@ -1004,6 +1064,10 @@ graph TD
 | POST | `/api/recommend/ai-reasons` | 批量生成 AI 理由 | 公开 | 预留 |
 | GET | `/api/meta/options` | 年份/科类/批次下拉 + `provinces` / `categories_map` / `province_modes`（0.11.1 起前端三处页面均用它做省份→科类级联） | 公开 | `Volunteer.vue` / `University.vue` / `Home.vue` → `metaOptions()` |
 | GET | `/api/meta/agent-status` | **AI 环境状态（0.13.1）**：`vector_ready` / `vector_count` / `graph_ready` / `graph_error` / `local_model` / `agent_mode`，30 秒 TTL 缓存 | 公开 | `AiChat.vue:loadStatus()` → `agentStatus()` |
+| POST | `/api/plan/start` | **HITL 生成初稿（0.14.0）**：查位次 → 冲稳保 → 学费富化，图停在 `human_review` 前，返回 `thread_id` + `draft_plan` | 需登录 | `PlanGenerator.vue:onStart()` → `startPlan()` |
+| POST | `/api/plan/resume` | **HITL 恢复执行**：注入 `user_feedback`，重筛候选池，返回 `final_plan` + `changes` | 需登录 | `PlanGenerator.vue:onResume()` → `resumePlan()` |
+| GET | `/api/plan/state/{thread_id}` | 读会话现场：`awaiting_feedback=true` 表示还停在中断点 | 需登录 | `PlanGenerator.vue`（刷新恢复） |
+| GET | `/api/plan/health` | langgraph 依赖自检 | 公开 | 预留（前端可据此隐藏入口） |
 | GET | `/api/score-to-rank` | 分数 → 位次 | 公开 | 预留（页面走 score-check） |
 | GET | `/api/rank-to-score` | 位次 → 分数 | 公开 | 预留 |
 | POST | `/api/student/profile` | 保存考生信息并返回换算位次 | 公开 | 预留 |
@@ -1048,6 +1112,7 @@ graph TD
 | MySQL | 5.7+ / 8.0 | 数据库 `gaokao` |
 | Ollama | 最新版 | 本地 LLM（0.13.0 起主力是 `qwen3:4b`）+ Embedding |
 | **Neo4j** | 5.x / 2025+ | 0.13.0 起必需（知识图谱工具）。未启动时系统仍可用，但 `tool_search_graph` 会被自动剔除 |
+| **langgraph** | ≥1.0 | 0.14.0 人机协同规划（HITL）。缺失时 `/api/plan/*` 返回 503，其余功能不受影响 |
 
 ### 6.2 后端
 
@@ -1097,6 +1162,13 @@ AGENT_TOTAL_TIMEOUT=90
 # 0.13.0 云端心理师
 COUNSELOR_TIMEOUT=60
 COUNSELOR_MAX_HISTORY=20
+
+# 0.14.0 人机协同志愿规划（HITL）
+PLAN_LLM_ENABLED=1      # 允许用模型解析反馈；规则能解析时不调用
+PLAN_LLM_ALWAYS=0       # 1=每次反馈都过模型（慢，演示用）
+PLAN_LLM_TIMEOUT=20     # 反馈解析超时 → 用规则结果
+PLAN_DRAFT_PER_TIER=8   # 初稿每档条数
+PLAN_FINAL_PER_TIER=8   # 终稿每档条数
 ```
 
 > ★ **`.env` 必须在 `backend/` 目录**（不是 `backend/app/`）。
@@ -1153,6 +1225,8 @@ python test_agent_0_13_0.py  # 0.13.0：Agent 工具调用 / 心理师 / 报告�
 python test_agent_0_13_0.py --real   # 同上 + 真实 HTTP（需服务与 Ollama，约 4-6 分钟）
 python test_hotfix_0_13_1.py         # 0.13.1：极速模式 / 答案清洗 / 状态接口（桩版秒级）
 python test_hotfix_0_13_1.py --real  # 同上 + 延迟测量（校验 Fast Mode <30s）
+python test_plan_workflow.py         # 0.14.0：HITL 反馈解析 / 初稿 / 重规划 / 图结构 / 闭环（桩版秒级）
+python test_plan_workflow.py --real  # 同上 + 真实 HTTP 三段式流程
 ```
 
 ---

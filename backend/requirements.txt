@@ -55,3 +55,7 @@ Pillow>=10.0.0
 # （视觉模型生成图注 → 文本向量编码，走统一的阿里云通道），功能不受影响。
 # torch>=2.0
 # chinese-clip>=1.0.0
+
+# ---------------- 0.14.0 人机协同志愿规划（HITL） ----------------
+# LangGraph 状态机 + MemorySaver Checkpoint（中断/恢复）
+langgraph>=1.0
