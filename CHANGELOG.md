@@ -70,8 +70,141 @@
 | **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 已发布 |
 | **0.17.1** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **多轮上下文透传** / chat_router 拆分 / 线程池名额修正 | 同上（接口清单 57 条零差异） | ✅ 已发布 |
 | **0.18.0** | 2026-10-21 | 父子块（不变） | **RAG 检索三段模块化（无行为变更）**：叶子组件拆为独立类，两套重复实现收敛为一套 | 同上（57 接口零差异、8 问题集合级一致） | ✅ 已发布 |
-| **0.19.0** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **人机回环重做**（节点内 interrupt 多轮循环）+ **偏好硬过滤** | 同上（4 条 plan 接口契约不变） | ✅ 本次发布 |
+| **0.19.0** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **人机回环重做**（节点内 interrupt 多轮循环）+ **偏好硬过滤** | 同上（4 条 plan 接口契约不变） | ✅ 已发布 |
+| **0.19.1** | 2026-10-21 | 父子块（不变） | 同上（纯修复：候选池 SQL 排序方向 + 偏好省份入池） | 与 0.19.0 完全一致 | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.19.1] - 2026-10-21 · 候选池查询修复（稳档偏难 + 偏好省份不入池）
+
+### 一、原有缺陷
+
+| # | 缺陷 | 实测证据 |
+|---|---|---|
+| 1 | 冲/稳/保三档统一 `ORDER BY min_rank ASC LIMIT 50` | 冲档取窗口**最前端**（最难的一批）；稳档取 `rank-buffer` 附近（全部偏冲） |
+| 2 | `_TIER_LIMIT = 50` 硬编码当 LIMIT | 对 2 万位宽的窗口太少，候选池被人为掐掉 |
+| 3 | 偏好省份**先截断后过滤** | 池里没有福建 → 只能报「没有该省院校」，而数据里福建明明有 |
+| 4 | `plan_builder.build()` 从不传 `prefer_provinces` | 即使 SQL 支持，偏好也进不去 |
+
+**实测（河南 / 物理类 / 2025 / 位次 45887，buffer=10000）**
+
+```
+修复前 稳档：50 条，rank_diff 全部 = -9431（30 条重复 33569）→ 系统性偏难，福建 0 条
+```
+
+根因链：`_tier_window` 给的稳窗口是 `[rank-10000, rank+10000]`，
+`ASC` 从**下界**开始取，正好取到「比考生难 1 万位」那一撮，越靠后越接近考生却永远轮不到。
+
+### 二、改进技术与方案
+
+#### 1. 排序按「与考生位次的距离」，不再按位次大小
+
+```python
+def _tier_order_sql(tier):
+    if tier == "chong":
+        return "ORDER BY `min_rank` DESC "                      # 从窗口上端（最够得着）往下
+    if tier == "wen":
+        return "ORDER BY ABS(`min_rank` - :rank) ASC "          # 离考生越近越稳
+    return "ORDER BY `min_rank` ASC "                           # 保：最贴近考生的窗口下端
+```
+
+#### 2. 候选池上限可配置
+
+`config.TIER_CANDIDATE_LIMIT`（默认 **120**），`_candidate_limit()` 取 `max(50, 配置值)`。
+上限只影响「池子有多大」，最终展示条数仍由 `PLAN_DRAFT_PER_TIER` / `per_tier` 截断，
+页面长度不变。
+
+#### 3. 偏好省份在 SQL 层参与过滤
+
+`calculate_tiers(..., prefer_provinces=[...])`：每个档位**额外**执行一条
+
+```sql
+SELECT ... WHERE province=:prov AND category=:cat AND year=:yr
+  AND min_rank BETWEEN :min_r AND :max_r
+  AND school_province IN (:pp0, :pp1, ...)
+ORDER BY <同上的方向> LIMIT :lim
+```
+
+两次结果按 `(university_code, major_group, major_code)` 去重合并，
+**偏好命中的排在前面**；再按上限截断（决定「取哪些」），最后才做展示排序
+（决定「怎么排」）——两者解耦，所以偏好既不会挤掉别人，也不会被排序挤掉。
+
+#### 4. 偏好透传 + 文案修正
+
+- `plan_builder.build(..., prefer_provinces)` → `_tiers()`；桩函数不接受该参数时
+  捕获 `TypeError` 退回旧签名（降级优先）；
+- `workflow.generate_draft` 从 `intent["merged"]["prefer_provinces"]` 取值传入；
+- 提示文案改为「**在你的位次区间内**暂未找到位于 XX 的院校」，
+  并新增「某一档没有、别的档有」的档位级提示。
+
+### 三、对应代码位置
+
+| 文件 | 区块 | 改动 |
+|---|---|---|
+| `services/recommend/recommend_service.py` | `_TIER_LIMIT` 注释 + `_DEDUPE_KEYS` | 说明 50 只是兜底；新增去重键常量 |
+| 同上 | `_candidate_limit()` / `_tier_order_sql()` / `_select_sql()` / `_dedupe_merge()` / `_fetch_tier_rows()`（新） | 上限、排序方向、SQL 前缀、合并去重、单档取数 |
+| 同上 | `calculate_tiers()` | 新增 `prefer_provinces` 形参；改用上面的助手；先截断再排序 |
+| `services/agent/plan_builder.py` | `_TIER_LABELS`（新）、`PlanDraftBuilder._tiers()` | 档位中文名；透传偏好并兼容旧签名桩函数 |
+| 同上 | `PlanDraftBuilder.build()` | 新增 `prefer_provinces` 形参并传给 `_tiers()` |
+| 同上 | `PlanRefiner.build_with_preference()` | 文案点明「位次区间」；新增档位级提示 |
+| `services/agent/workflow.py` | `generate_draft` | 从 intent 取偏好省份传给 `build()` |
+| `config.py` | 推荐配置区 | `TIER_CANDIDATE_LIMIT`（默认 120） |
+| `tests/plan/test_plan_preference.py` | `test_missing_preference_note` | 断言同步为新文案 |
+
+### 四、验证流程与实测结果
+
+#### E2：「稳」档不再偏难（核心）
+
+真实 MySQL 数据，河南 / 物理类 / 2025：
+
+```
+修复前 稳档：n=50，全部 rank_diff = -9431（33569 重复 30 次），|rank_diff|≤10000 占 100% 但全为负
+修复后 稳档：n=120，min=-5527 max=8684，|rank_diff|≤10000 占 100%（120/120）
+             前 5 条位次 = 42713 / 42712 / 42712 / 42712 / 42712（紧贴考生 45887）
+```
+
+> 修复前「100% 在 ±buffer 内」是因为全部挤在 `rank-10000` 那一个点上，
+> 分布本身就是错的；修复后是均匀铺开在 ±buffer 内。
+
+#### E3：偏好省份必须命中（核心）
+
+```
+[PASS] 600/物理/河南 +「我想去福建上学」
+       三档地区 = ['天津','新疆','浙江','福建','重庆']  → 福建在池
+       note = 已按你的偏好生成方案，共 24 条志愿。 冲档在你的位次区间内暂未找到位于福建的院校。
+[PASS] 对照「我想去江苏上学」→ 三档地区 = ['江苏']
+```
+
+福建命中明细（`calculate_tiers` 直调）：稳档 12 条（华侨大学 42712 / 43771 / 41663 …），保档 14 条。
+
+#### E4：偏好 + 排除共存
+
+```
+[PASS]「想去福建，但不想去厦门」→ 地区含福建，福建未被整体排除
+```
+
+#### E1：经典路径未受影响
+
+```
+/api/recommend → 200，顶层字段 ['bao','chong','meta','rank','student','tiers','wen']
+                  条数 {'chong':119,'wen':118,'bao':116}
+```
+
+该路径走 `split_tiers()`，本次未改动。
+
+#### E5：回归
+
+- `tests/` **23 个脚本全通过**（含 `test_plan_workflow.py` / `test_plan_preference.py` 19 项）；
+- `npm run build` 通过（前端零改动，仅确认未破坏）。
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 冲档本就取不到偏好省份 | 河南 600 分场景下，冲窗口 `[rank-30000, rank-10000]` 内福建院校客观为 0 条，note 已按档位点明；不是 bug |
+| 窗口宽度未动 | `_TIER_SPAN` / `_tier_buffer` 按要求保持原值，本次只修排序与上限 |
+| sqlite / MySQL 双数据源 | 本次只改 MySQL 全国总表路径；`split_tiers` 走内存，不受影响 |
 
 ---
 
