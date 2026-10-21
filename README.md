@@ -135,11 +135,16 @@ backend/
 │   │   │   ├── ai_service.py     <span style="color:#888">// 意图解析、推荐理由、统一 ask() 入口（Ali → Ollama）</span>
 │   │   │   ├── llm_client.py     <span style="color:#888">// LLM/Embedding 通道：AliLLMChannel / AliEmbeddingChannel / Ollama* + 门面降级</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
 │   │   │   └── ai_executor.py    <span style="color:#888">// 0.17.0 AI 执行基础设施：专用线程池 / _run_ai / 在途过载保护 / 读画像（chat 与 counselor 共用，避免入口层互相 import）</span>
-│   │   ├── rag/                  <span style="color:#888">// 0.17.0（模块化拆解留给 0.18.0，本次只搬不改）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
-│   │   │   ├── rag_service.py    <span style="color:#888">// RAG 主控：Chroma 读写、search()、rerank()、route_strategy()、answer_with_hybrid() 三路融合</span>
-│   │   │   ├── retrieval.py      <span style="color:#888">// DenseChannel / BM25Channel / HybridSearch / MultiRecall（三通道 × 多 Query）</span>
-│   │   │   ├── reranker.py       <span style="color:#888">// CrossEncoder / Embedding 余弦 / Noop 三种精排 + 失败降级</span>
-│   │   │   ├── query_rewrite.py  <span style="color:#888">// 检索前：重写 / 扩展(Step-Back) / 子查询分解（线程池并发）</span>
+│   │   ├── rag/                  <span style="color:#888">// 0.18.0 检索三段模块化：编排留在 rag_service，叶子各自独立</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
+│   │   │   ├── rag_service.py    <span style="color:#888">// 编排层（1600 行）：search / _recall / answer_with_hybrid / route_query / generate_answer + 同名薄封装</span>
+│   │   │   ├── constants.py      <span style="color:#888">// 0.18.0 RRF_K / MAX_SUB_QUERY_LEN / DEFAULT_TOP_K / DEFAULT_CANDIDATE_N（唯一来源）</span>
+│   │   │   ├── storage/vector_store.py   <span style="color:#888">// VectorStore：Chroma 客户端与集合生命周期（状态注入 globals，测试可直接 patch）</span>
+│   │   │   ├── retrieval/        <span style="color:#888">// 检索中：base(ABC) / dense / bm25 / fusion / hybrid / multi_recall / keyword_fallback</span>
+│   │   │   ├── postprocess/      <span style="color:#888">// 检索后：base(ABC) / 三个 Reranker / reranker_factory / parent_expander</span>
+│   │   │   ├── preprocess/       <span style="color:#888">// 检索前：base / rewriter / expander / decomposer / preprocessor</span>
+│   │   │   ├── retrieval.py      <span style="color:#888">// 已删除（与 retrieval/ 包同名冲突），兼容导出并入包 __init__</span>
+│   │   │   ├── reranker.py       <span style="color:#888">// 兼容外壳：re-export postprocess/*</span>
+│   │   │   ├── query_rewrite.py  <span style="color:#888">// 兼容外壳：re-export preprocess/*，QueryExpander = StepBackExpander</span>
 │   │   │   ├── self_rag.py       <span style="color:#888">// Self-RAG：要不要检索 → 上下文有没有用 → 生成 → 自评不合格才反思</span>
 │   │   │   └── corrective_rag.py <span style="color:#888">// Corrective RAG：检索质量差时改写查询重试</span>
 │   │   ├── knowledge/            <span style="color:#888">// 0.17.0 知识库分块与父块存储（从 rag_service 拆出，函数体未改）</span>
@@ -1121,6 +1126,43 @@ graph TD
 
 **加载时机**：用 `watch(() => userStore.user?.id)` 而非 `onMounted` —— `/ai-chat` 是公开页，
 0.15.1 之后守卫不再等待 `/auth/me`，进页面时 `user` 可能仍是 null。
+
+### 4.13 RAG 模块地图（0.18.0）
+
+> 编排（`search` / `_recall` / `answer_with_*` / `route_query` / `generate_answer`）**仍在
+> `rag_service.py`**，0.19.0 再搬；本图只标注被拆出去的叶子组件。
+
+| 层 | 模块 | 一句话职责 |
+|---|---|---|
+| — | `rag/constants.py` | `RRF_K=60`、`MAX_SUB_QUERY_LEN=30`、默认 `top_k` / `candidate_n` 的唯一来源 |
+| 存储 | `storage/vector_store.py` | `VectorStore`：Chroma 客户端、集合、维度缓存；状态注入 `globals()` 以便测试 patch |
+| 检索前 | `preprocess/base.py` | `BasePreprocessor`（ABC）+ 统一 `llm_chat()` 通道 |
+| 检索前 | `preprocess/rewriter.py` | `QueryRewriter`：口语化 Query → 更适合检索的表达（temperature=0.0） |
+| 检索前 | `preprocess/expander.py` | `StepBackExpander`：后退一步的宽泛 Query（原 `QueryExpander`） |
+| 检索前 | `preprocess/decomposer.py` | `QueryDecomposer`：复合问题 → 若干聚焦子问题 |
+| 检索前 | `preprocess/preprocessor.py` | `QueryPreprocessor`：线程池并发三步 + 短问句短路 + 去重限条 |
+| 检索中 | `retrieval/base.py` | `BaseRetriever`（ABC）：`retrieve(query, top_k) -> list[dict]` |
+| 检索中 | `retrieval/dense.py` | `DenseRetriever`：Chroma ANN 与内存余弦两种数据源；`DenseChannel` 为内存侧适配器 |
+| 检索中 | `retrieval/bm25.py` | `BM25Retriever`：jieba + BM25Okapi，小语料 IDF≤0 退化为词命中计数 |
+| 检索中 | `retrieval/fusion.py` | `RrfFusion`（唯一 RRF 实现）/ `WeightFusion` / `RoundRobinFusion` |
+| 检索中 | `retrieval/hybrid.py` | `HybridRetriever`：稠密 + 稀疏 → RRF（对外别名 `HybridRetrieval`）；`HybridSearch` 内存版 |
+| 检索中 | `retrieval/multi_recall.py` | `MultiRecallRetriever`：子查询 × 通道 → 三种融合，单通道异常只跳过该路 |
+| 检索中 | `retrieval/keyword_fallback.py` | `KeywordFallbackRetriever`：向量库不可用时的关键词打分兜底 |
+| 检索后 | `postprocess/base.py` | `BaseReranker`（ABC）：`score(query, docs)` |
+| 检索后 | `postprocess/cross_encoder_reranker.py` | `CrossEncoderReranker`：本地 CrossEncoder 精排（需模型） |
+| 检索后 | `postprocess/embedding_reranker.py` | `EmbeddingReranker`：复用项目 embedding 的余弦精排（永远可用） |
+| 检索后 | `postprocess/noop_reranker.py` | `NoopReranker`：关闭精排时直传 |
+| 检索后 | `postprocess/reranker_factory.py` | `Reranker` 门面：按配置选实现 + 失败降级 |
+| 检索后 | `postprocess/parent_expander.py` | `ParentExpander`：子块命中 → 回填父块（取不到则保留子块并标 `child`） |
+
+**兼容外壳**（历史 import 不改）：`rag/reranker.py`、`rag/query_rewrite.py` 只做 re-export；
+`rag_service.HybridRetrieval` 是 `HybridRetriever` 的别名。
+
+**为什么 `retrieval.py` 被删除**：同名文件与包 `retrieval/` 不能共存（导入器优先取包），
+文件会变成不可达死代码，所以把兼容导出并入 `retrieval/__init__.py`。
+
+**验证方法**：`python tests/rag/test_rag_refactor_patchpoints.py`
+逐个确认 4 个历史 patch 点（`_collection` / `search` / `_graph_engine` / `rag_service_extract_sql_filters`）仍生效。
 
 ---
 
