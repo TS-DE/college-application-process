@@ -40,8 +40,15 @@ from app.services.llm import llm_client
 
 logger = logging.getLogger(__name__)
 
-# RRF 融合常数：k=60（消除前几名排名的剧烈波动，见 HybridRetrieval.rrf 注释）
-RRF_K = 60
+# 0.18.0：RRF 常数与子查询长度上限收敛到 `constants.py`（唯一来源），
+# 此处 re-import 保持 `rag_service.RRF_K` / `rag_service.MAX_SUB_QUERY_LEN` 可用。
+from app.services.rag.constants import (  # noqa: F401,E402
+    DEFAULT_CANDIDATE_N,
+    DEFAULT_TOP_K,
+    MAX_SUB_QUERY_LEN,
+    RRF_K,
+)
+from app.services.rag.storage.vector_store import VectorStore  # noqa: E402
 
 # 父子块参数与 docstore 常量已迁移到 services/knowledge/（0.17.0）
 
@@ -64,96 +71,43 @@ MULTI_QUERY_PROMPT = """你是一个高考志愿填报系统的查询改写专�
 
 【JSON输出】："""
 
-# 子查询长度上限：Prompt 要求 ≤20 字，但小模型常写到 22-25 字，
-# 解析时放宽到 30 字，超过的丢弃（避免把整段问题当子查询用）
-MAX_SUB_QUERY_LEN = 30
+# 子查询长度上限见 `constants.MAX_SUB_QUERY_LEN`（0.18.0 收敛）
 
 # ---------------- Chroma 客户端（延迟初始化，避免导入即失败） ----------------
-
+#
+# 0.18.0：实现搬到 `storage/vector_store.py`，此处只保留薄封装。
+# 下面四个模块级变量仍是**唯一状态来源**：`VectorStore(globals())` 直接读写它们，
+# 因此测试里 `rag_service._collection = None` / `_collection_dim_cache = None`
+# 这类 patch 依旧立即生效（下一次 collection() 会重建集合）。
 _client = None
 _collection = None
 _chroma_error: Optional[str] = None
+_collection_dim_cache: Optional[int] = None
+
+_STORE = VectorStore(globals())
 
 
 def _get_collection():
     """获取（或创建）持久化集合。"""
-    global _client, _collection, _chroma_error
-    if _collection is not None:
-        return _collection
-    try:
-        import chromadb
-
-        os.makedirs(settings.CHROMA_DB_PATH, exist_ok=True)
-        _client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
-        _collection = _client.get_or_create_collection(name=settings.CHROMA_COLLECTION)
-        return _collection
-    except Exception as exc:  # noqa: BLE001
-        _chroma_error = str(exc)
-        return None
+    return _STORE.get_collection()
 
 
 def collection():
     """供路由层直接操作（如按 file_id 删除向量）。"""
-    return _get_collection()
+    return _STORE.collection()
 
 
 def backend_info() -> dict:
-    col = _get_collection()
-    return {
-        "vector_store": "chroma",
-        "persist_path": settings.CHROMA_DB_PATH,
-        "collection": settings.CHROMA_COLLECTION,
-        "embedding_model": settings.ALI_EMBED_MODEL if llm_client.get_api_key() else settings.OLLAMA_EMBED_MODEL,
-        "embedding_provider": llm_client.get_api_key() and "ali" or "ollama",
-        "llm_provider": llm_client.get_api_key() and "ali(openai-compatible)" or "ollama",
-        "llm_model": settings.ALI_LLM_MODEL if llm_client.get_api_key() else settings.OLLAMA_FALLBACK_MODEL,
-        "ready": col is not None,
-        "error": _chroma_error,
-        "count": (col.count() if col else 0),
-    }
+    """向量库与模型通道状态（实现见 `VectorStore.backend_info`）。"""
+    return _STORE.backend_info()
 
 
 # ---------------- Embedding ----------------
 
-_collection_dim_cache: Optional[int] = None
-
 
 def _collection_dimension() -> Optional[int]:
-    """读取集合被 pin 住的向量维度（结果缓存一次，避免每次都查库）。
-
-    用途：写入/查询前把 Ali embedding 的维度对齐到集合，
-    否则 text-embedding-v3 默认 128 维会与历史 768 维数据冲突，Chroma 直接拒绝写入。
-
-    取值顺序（★ 顺序是关键，0.9.1 修复的 bug 就出在这里）：
-      ① `col._model.dimension`：Chroma 1.x 会把集合维度 pin 在集合元数据里，
-         **即使集合被删空也依然保留 768**。
-         旧实现只读「第一条向量的长度」，文件全部删除后读不到 → 回落到
-         `ALI_EMBED_DIMENSION`(128) → 上传时报
-         "Collection expecting embedding with dimension of 768, got 128"。
-      ② 第一条向量的长度：兼容不暴露 `_model` 的旧版 chromadb；
-      ③ None：由调用方回落到 `ALI_EMBED_DIMENSION`（仅全新集合时才是对的）。
-    """
-    global _collection_dim_cache
-    if _collection_dim_cache is not None:
-        return _collection_dim_cache
-    dim: Optional[int] = None
-    try:
-        col = _get_collection()
-        if col is not None:
-            # ① 集合 pin 住的维度（删空后依然有效，优先用它）
-            pinned = getattr(getattr(col, "_model", None), "dimension", None)
-            if isinstance(pinned, int) and pinned > 0:
-                dim = pinned
-            # ② 退化方案：读第一条向量的长度
-            if dim is None:
-                data = col.get(include=["embeddings"], limit=1)
-                emb = (data or {}).get("embeddings")
-                if emb is not None and len(emb) and emb[0] is not None:
-                    dim = len(emb[0])
-    except Exception:  # noqa: BLE001 查不到就按配置走
-        dim = None
-    _collection_dim_cache = dim
-    return _collection_dim_cache
+    """集合被 pin 住的向量维度（实现与取值顺序见 `VectorStore.collection_dimension`）。"""
+    return _STORE.collection_dimension()
 
 
 def get_embedding(text: str) -> Optional[List[float]]:
