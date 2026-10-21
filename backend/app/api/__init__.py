@@ -7,6 +7,8 @@ from app.api.account.auth_router import router as auth_router
 from app.api.account.profile_router import router as profile_router
 from app.api.chat.chat_router import router as chat_router
 from app.api.chat.counselor_router import router as counselor_router
+from app.api.chat.intent_router import router as intent_router
+from app.api.chat.status_router import router as status_router
 from app.api.knowledge.knowledge_router import router as knowledge_router
 from app.api.knowledge.rag_eval_router import router as rag_eval_router
 from app.api.plan.plan_router import router as plan_router
@@ -24,6 +26,8 @@ ALL_ROUTERS = (
     meta_router,
     chat_router,
     counselor_router,
+    status_router,
+    intent_router,
     stats_router,
     auth_router,
     knowledge_router,

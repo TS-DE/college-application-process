@@ -188,9 +188,12 @@ def test_fast_mode_routing() -> None:
     print("用例 5：Fast Mode 路由决策")
     import inspect
 
-    from app.api.chat import chat_router as ai_router
+    # 0.17.1：`/chat` 端点仍在 api/chat/chat_router.py 中（模块），
+    # 但包 `__init__` 现在把 `chat_router` 这个**名字**导出成了 APIRouter 对象，
+    # 因此这里必须从模块导入，才能取到 `chat` 函数。
+    from app.api.chat.chat_router import chat as chat_endpoint
 
-    src = inspect.getsource(ai_router.chat)
+    src = inspect.getsource(chat_endpoint)
     assert "settings.AGENT_FAST_MODE" in src, "路由层必须判断极速模式"
     assert "not settings.AGENT_FAST_MODE" in src, "极速模式下应跳过 Agent"
     print("  路由层：AGENT_FAST_MODE=1 → 跳过 Agent，走 0.12.x 确定性融合链路")
