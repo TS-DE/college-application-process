@@ -69,8 +69,198 @@
 | **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 已发布 |
 | **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 已发布 |
 | **0.17.1** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **多轮上下文透传** / chat_router 拆分 / 线程池名额修正 | 同上（接口清单 57 条零差异） | ✅ 已发布 |
-| **0.18.0** | 2026-10-21 | 父子块（不变） | **RAG 检索三段模块化（无行为变更）**：叶子组件拆为独立类，两套重复实现收敛为一套 | 同上（57 接口零差异、8 问题集合级一致） | ✅ 本次发布 |
+| **0.18.0** | 2026-10-21 | 父子块（不变） | **RAG 检索三段模块化（无行为变更）**：叶子组件拆为独立类，两套重复实现收敛为一套 | 同上（57 接口零差异、8 问题集合级一致） | ✅ 已发布 |
+| **0.19.0** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **人机回环重做**（节点内 interrupt 多轮循环）+ **偏好硬过滤** | 同上（4 条 plan 接口契约不变） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.19.0] - 2026-10-21 · 人机回环重做 + 偏好失效修复
+
+### 一、原有缺陷
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| 1 | `generate_draft` 预筛时**显式清空** `prefer_provinces` / `prefer_majors` | 用户填「我想去福建上学」对初稿**零影响** |
+| 2 | `PlanRefiner._score` 偏好只 **+2 分**，随后 `kept[:limit]` 截断 | 候选池里福建院校排到第 30 位时，加 2 分也进不了前 8 → **一所福建院校都看不到** |
+| 3 | `analyze_intent` 把 `preferences` 与画像拼成一个字符串统一解析 | 冲突时（画像江浙沪 vs 用户福建）无法分优先级，两边都进偏好，互相稀释 |
+| 4 | `human_review` 是**空节点**，靠 `interrupt_before` 静态中断 | 节点内没有 `interrupt()`，人工决策没被节点消费；不可能多轮 |
+| 5 | 前端是**一次性三步向导**（填信息→确认→终稿） | 提一次意见就结束，无法反复调整 |
+| 6 | 极性判断：无明确极性时「含省份就当排除」 | 「去福建上学」不含"想"字 → 被判定**排除福建**（隐藏地雷） |
+| 7 | `MemorySaver` 进程内存储 | 重启后 `thread_id` 失效，刷新/重启即丢会话 |
+
+### 二、改进技术与方案
+
+#### 1. 偏好：从「排序加分」升级为「硬过滤优先」
+
+新增 `PlanRefiner.build_with_preference()`，三步：
+
+```
+① 硬过滤：每档先取 school_province ∈ prefer_provinces（或专业命中）的条目，保持候选池原序
+② 补  足：不足 per_tier 时，用「未命中偏好且未被排除」的条目按原序补
+③ 说  明：偏好一条都没选出来时，note 必须写明原因（不允许静默返回其它省份）
+```
+
+`refine()`（多轮改写用）保持原样，只把它内部的 `_blocked` 闭包提取为
+模块级 `blocked_reason()`，两条链路共用同一套排除规则。
+
+#### 2. 用户显式偏好 vs 画像推断：分开解析、按权重合并
+
+新增 `PreferenceSource(user_explicit, from_profile)`：
+
+| 维度 | 规则 |
+|---|---|
+| 偏好地区 / 专业 | 用户有值 → **只用用户的**（画像被抑制）；用户为空 → 画像补空缺 |
+| 排除地区 / 院校 / 方向 | 并集（硬约束多一条不误伤） |
+| 学费上限 | 用户优先，用户没提才用画像的 |
+
+理由写在类 docstring 里：用户**本次**说的话是对当前需求的直接表达，时效性与确定性
+高于历史画像（可能过时、可能是闲聊被误抽）；只有用户没表态的维度才让画像兜底。
+
+#### 3. 极性修正
+
+- 新增 `_POSITIVE_VERBS = ("去","报","上","选","在")`：分句出现「动词 + 省份」且无否定词 → 偏好；
+- 无明确极性且命中省份时，默认改为**偏好**（想排除通常会说「不想/别/不要」）；
+- 否定词优先，所以「不想去北京」「北京的不想去」仍然是排除。
+
+#### 4. 真 interrupt() 多轮循环
+
+```python
+def human_review(state):
+    decision = interrupt({... "round": round, "plan": plan, "hint": ...})
+    return {"user_feedback": decision.get("feedback", ""),
+            "review_action": decision.get("action", "revise")}
+```
+
+图结构（`interrupt_before` 已删除）：
+
+```
+START → analyze_intent → generate_draft → human_review ⇄ refine_plan
+                                                 ↑            │
+                                                 └─ needs_more_review ─→ END
+```
+
+- `needs_more_review`：`accept` → END；`review_round >= PLAN_MAX_REVIEW_ROUNDS` → END；否则回 `human_review` 再中断；
+- `resume` 改用 `graph.invoke(Command(resume={"feedback":..., "action":...}), cfg)`；
+- `review_action` 在 `refine_plan` 里**不被重置**（否则 accept 会被下一轮条件边当成 revise）——
+  这是实现时踩到的坑：初版把 `"review_action": "revise"` 写进返回值，导致 accept 后仍继续循环。
+
+#### 5. Checkpointer 可持久化
+
+`PLAN_CHECKPOINTER=sqlite`（默认）→ `SqliteSaver`，落盘 `backend/data/plan_checkpoints.db`；
+依赖缺失自动回落 `MemorySaver` 并打警告，服务照常启动。连接用 `check_same_thread=False`
+（FastAPI 同步端点跑在线程池里）。
+
+#### 6. 前端改成对话式回环
+
+```
+views/plan/index.vue              主容器与状态机（表单 → 对话 → 定稿）
+views/plan/components/PlanForm.vue    首屏表单（只出现一次）
+views/plan/components/PlanCard.vue    单版方案卡片（三档 + 新增高亮 + 移除原因折叠）
+views/plan/components/PlanChat.vue    对话区 + 连续输入 + 定稿按钮 + 轮次提示
+```
+
+`thread_id` 存 `sessionStorage`（`gaokao_plan_thread`），刷新时用 `/state` 恢复轮次与方案，
+404 则清空回表单。旧的 `student/PlanGenerator.vue` 已删除，路由指向新页面。
+
+#### 7. protobuf 开关前移
+
+`app/__init__.py` 顶部 `os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")`。
+0.17.1 放在 `.env` 里依赖「config 先于 chromadb 导入」的顺序，换脚本就失效；
+`app/__init__.py` 在任何 `app.*` 之前执行，是唯一稳定位置。`.env` 里的同名配置保留（双保险）。
+
+### 三、对应代码位置
+
+| 文件 | 区块 | 改动 |
+|---|---|---|
+| `services/agent/plan_builder.py` | `_POSITIVE_VERBS`、`_rule_based()` 极性段 | 动词+省份判偏好；无极性省份改判偏好 |
+| 同上 | `PreferenceSource`（新） | 双源偏好合并 |
+| 同上 | `blocked_reason()` / `is_preferred()`（新） | 排除/偏好判据抽成模块函数 |
+| 同上 | `PlanRefiner.build_with_preference()`（新） | 硬过滤 → 补足 → 说明 |
+| `services/agent/workflow.py` | `PlanState` | 新增 `review_round` / `review_action` / `history` |
+| 同上 | `_build_checkpointer()`（新） | sqlite / memory 选择与回落 |
+| 同上 | `analyze_intent` / `generate_draft` / `human_review` / `refine_plan` / `needs_more_review` | 双源解析 / 硬过滤 / 节点内中断 / 轮次与历史 / 条件边 |
+| 同上 | `build_plan_graph` | 删 `interrupt_before`，加条件边 |
+| 同上 | `PlanWorkflow.resume` / `get_state` / `start` | `Command(resume=…)`、轮次与历史、兼容 str/dict |
+| `schemas/plan.py` | `PlanResumeIn` | 新增 `action`（默认 revise） |
+| 同上 | `PlanStartOut` / `PlanResumeOut` / `PlanStateOut` | 新增 `review_round` / `history` / `awaiting_feedback` 等（纯新增） |
+| `api/plan/plan_router.py` | `/resume`、`/health` | 传 action；health 报 checkpointer 与轮次上限 |
+| `app/__init__.py` | 顶部 | protobuf 开关前移 |
+| `app/config.py` | 规划区块 | `PLAN_MAX_REVIEW_ROUNDS` / `PLAN_CHECKPOINTER` / `PLAN_CHECKPOINT_DB` |
+| `frontend/src/api/plan.ts` | 类型 + `resumePlan` | 新增 action 与轮次/历史字段 |
+| `frontend/src/views/plan/*` | 4 个文件（新） | 对话式回环 |
+| `frontend/src/router/index.ts` | `/plan` | 指向 `views/plan/index.vue` |
+| `tests/plan/test_plan_preference.py`（新） | — | 19 项断言 |
+
+### 四、验证流程与实测结果
+
+#### E1/E2：偏好硬过滤（真实 HTTP，600 分 / 物理类 / 河南）
+
+```
+[PASS] E1「我想去福建上学」含福建=False
+       note=候选池中没有位于福建的院校，可适当放宽位次范围。已按其余条件为你生成方案。
+[PASS] E2「去福建上学」（无"想"字）同上 → 不再被判成排除
+```
+
+> 本机知识库里**确实没有福建院校**（305 个切片来自河南/江苏等地政策文件），
+> 所以走的是「必须明说」这条分支。**从 0 条到 0 条但带明确原因**，
+> 而不是像修复前那样静默返回一堆其它省份。
+> 正向分支（候选池里有福建 → 一定选中）由单测覆盖：
+> `test_hard_filter` 把福建放在每档第 7 位，断言三档第一位都是福建。
+
+#### E3/E4：多轮调整
+
+```
+[PASS] E3「学费别超 6000」→ round=2，超限 0 条，本轮调整 55 条
+[PASS] E4「不想去北方」  → round=3，黑龙江/吉林/辽宁/内蒙古/新疆/青海/西藏 残留 0
+```
+
+#### E7：刷新恢复
+
+```
+[PASS] round=3 awaiting=True history=2
+```
+
+#### E8：跨重启恢复（sqlite checkpointer）
+
+```
+重启前：thread=ccc14341 round=1
+重启后：[PASS] awaiting=True round=1 方案条数=24
+```
+
+#### E6：轮次上限（桩版）
+
+```
+[PASS] 在 5 轮上限处自动结束  ended_at=5
+```
+
+#### E10：接口契约
+
+```
+GET   /api/plan/health             resp=（无）          req=（无）
+POST  /api/plan/resume             resp=PlanResumeOut   req=PlanResumeIn
+POST  /api/plan/start              resp=PlanStartOut    req=PlanStartIn
+GET   /api/plan/state/{thread_id}  resp=PlanStateOut    req=（无）
+
+PlanResumeIn 字段: thread_id, user_feedback, action     ← action 为兼容性新增
+```
+
+4 条路径与三个响应模型名**均未变**；`PlanStartOut` / `PlanStateOut` 的字段是纯新增。
+
+#### E9：回归
+
+- `tests/` 下 **23 个脚本全通过**（新增 `test_plan_preference.py` 19 项）；
+- `npm run build` 通过（`npx tsc --noEmit` 无错误）。
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| 本机知识库无福建院校 | E1/E2 只能验证「无货时明说」分支；正向分支靠单测（已覆盖） |
+| E5 画像冲突 | 需真实画像数据，用单测 `test_merge_priority` 覆盖（用户福建 vs 画像江浙沪 → 只剩福建） |
+| 轮次上限语义 | `review_round` 从 1 开始，达到 `PLAN_MAX_REVIEW_ROUNDS`（5）即结束 → 最多 5 版、4 次修改 |
+| sqlite 并发 | `SqliteSaver` 单文件，多 worker 部署需换 Postgres/Redis saver |
+| `workflow.py` 596 行 | 超出「单文件 ≤300 行」；节点与门面耦合在 langgraph 的图定义里，拆开需把节点工厂化，留待后续 |
 
 ---
 

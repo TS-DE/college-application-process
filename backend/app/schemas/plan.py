@@ -54,13 +54,17 @@ class PlanItemOut(BaseModel):
 
 
 class PlanStartOut(BaseModel):
-    """初稿（此时图已暂停在 human_review）。"""
+    """初稿（0.19.0：图停在 human_review 节点**内部**的 interrupt()）。"""
 
     thread_id: str
     rank: int
     draft_plan: Dict[str, List[Dict[str, Any]]]
+    final_plan: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     summary: str = ""
     intent: Dict[str, Any] = Field(default_factory=dict)
+    note: str = ""
+    review_round: int = 1
+    history: List[Dict[str, Any]] = Field(default_factory=list)
     stage: str = "draft_ready"
     elapsed_ms: int = 0
     #: 提示前端：现在轮到用户干预了
@@ -68,10 +72,12 @@ class PlanStartOut(BaseModel):
 
 
 class PlanResumeIn(BaseModel):
-    """提交修改意见的入参。"""
+    """提交修改意见的入参（0.19.0 增加 action，属兼容性新增）。"""
 
     thread_id: str = Field(..., min_length=1)
     user_feedback: str = Field(default="", max_length=1000, description="自由文本修改意见")
+    #: revise = 继续改（默认）；accept = 就这版定稿
+    action: str = Field(default="revise", description="revise | accept")
 
 
 class PlanChangeOut(BaseModel):
@@ -85,7 +91,7 @@ class PlanChangeOut(BaseModel):
 
 
 class PlanResumeOut(BaseModel):
-    """终稿。"""
+    """本轮的方案（0.19.0：可能不是一个「终稿」，而是第 N 版）。"""
 
     thread_id: str
     final_plan: Dict[str, List[Dict[str, Any]]]
@@ -93,12 +99,17 @@ class PlanResumeOut(BaseModel):
     feedback_parsed: Dict[str, Any] = Field(default_factory=dict)
     note: str = ""
     rank: Optional[int] = None
+    review_round: int = 1
+    review_action: str = "revise"
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+    #: True = 还停在中断点，可以继续提意见；False = 已定稿或到达轮次上限
+    awaiting_feedback: bool = False
     stage: str = "final_ready"
     elapsed_ms: int = 0
 
 
 class PlanStateOut(BaseModel):
-    """会话现场（前端刷新后可恢复）。"""
+    """会话现场（前端刷新后可恢复，0.19.0 增加轮次与历史）。"""
 
     thread_id: str
     stage: str = ""
@@ -107,6 +118,10 @@ class PlanStateOut(BaseModel):
     final_plan: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     changes: List[Dict[str, str]] = Field(default_factory=list)
     note: str = ""
+    intent: Dict[str, Any] = Field(default_factory=dict)
+    review_round: int = 1
+    review_action: str = "revise"
+    history: List[Dict[str, Any]] = Field(default_factory=list)
     awaiting_feedback: bool = False
 
 

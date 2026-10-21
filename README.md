@@ -284,7 +284,9 @@ frontend/
 │   │   │   ├── University.vue    <span style="color:#888">// 查大学 / 查专业（分页表格；考生省份与院校所在地分开）</span>
 │   │   │   ├── AiChat.vue        <span style="color:#888">// 本地 Agent 问答（0.13.0 去掉 RAG 开关与画像按钮，只保留「想让我更了解你吗？」入口 + 思考动画）</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
 │   │   │   ├── Counselor.vue     <span style="color:#888">// 0.13.0 心理与画像空间：云端心理师多轮对话 + 报告上传区 + 画像展示区 + 业务问卷</span>  <span style="color:#ff6f00; background-color:#fff3e0">🟠 用户画像</span>
-│   │   │   └── PlanGenerator.vue <span style="color:#888">// 0.14.0 人机协同三步：填信息 → 看初稿提意见（HITL）→ 终稿（含调整记录 / 导出 CSV）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
+│   │   │   └── plan/             <span style="color:#888">// 0.19.0 对话式多轮回环（原 student/PlanGenerator.vue 已删除）</span>  <span style="color:#6a1b9a; background-color:#f3e5f5">🟣 HITL</span>
+│   │   │       ├── index.vue     <span style="color:#888">// 主容器与状态机：表单 → 对话 → 定稿；刷新从 sessionStorage 恢复 thread_id</span>
+│   │   │       └── components/   <span style="color:#888">// PlanForm（首屏表单）/ PlanCard（单版方案 + 新增高亮）/ PlanChat（对话与输入）</span>
 │   │   └── admin/
 │   │       ├── Dashboard.vue     <span style="color:#888">// 后台首页：文件数 + 向量库状态（RagBackendInfo）+ RAG 量化评估入口</span>
 │   │       ├── Knowledge.vue     <span style="color:#888">// 知识库管理：列表 / 搜索 / 上传 / 详情 / 删除</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 RAG 核心</span>
@@ -1041,7 +1043,12 @@ graph TD
 
 ### 4.11 主链十：人机协同志愿规划（0.14.0 LangGraph HITL）
 
-入口：`AiChat.vue` 标题栏「🤖 智能生成志愿方案」→ `/plan` → `student/PlanGenerator.vue`
+入口：`AiChat.vue` 标题栏「🤖 智能生成志愿方案」→ `/plan` → `views/plan/index.vue`
+
+> **0.19.0 变更**：交互从「一次性三步向导」改为**对话式多轮回环**——
+> 初稿出来后在同一个中断点反复「提意见 → 出新版」，最多 5 版，也可以随时「定稿」。
+> 中断方式从 `interrupt_before=["human_review"]`（节点前静态中断 + 空节点）
+> 改为 `human_review` **节点内部** `interrupt(...)`，恢复用 `Command(resume={feedback, action})`。
 
 ```mermaid
 graph TD
@@ -1049,7 +1056,7 @@ graph TD
     B --> C["PlanWorkflow.start()<br/>uuid → thread_id"]
     C --> D["Node1 analyze_intent<br/>画像+偏好 → 筛选条件"]
     D --> E["Node2 generate_draft<br/>score_to_rank → calculate_tiers → enrich"]
-    E --> F["⏸ human_review<br/>interrupt_before 生效，invoke 返回"]
+    E --> F["⏸ human_review<br/>节点内 interrupt() 挂起，invoke 返回"]
     F -->|"返回 thread_id + draft_plan"| G["前端展示初稿 + 反馈输入框"]
     G -->|"POST /api/plan/resume<br/>{thread_id, user_feedback}"| H["update_state(as_node=human_review)"]
     H --> I["invoke(None) 恢复执行"]
@@ -1289,6 +1296,10 @@ PLAN_LLM_ALWAYS=0       # 1=每次反馈都过模型（慢，演示用）
 PLAN_LLM_TIMEOUT=20     # 反馈解析超时 → 用规则结果
 PLAN_DRAFT_PER_TIER=8   # 初稿每档条数
 PLAN_FINAL_PER_TIER=8   # 终稿每档条数
+# 0.19.0 多轮回环
+PLAN_MAX_REVIEW_ROUNDS=5                    # 最多几版方案（达到后自动结束，仍可定稿）
+PLAN_CHECKPOINTER=sqlite                    # sqlite=跨重启恢复；memory=进程内（重启即丢）
+PLAN_CHECKPOINT_DB=data/plan_checkpoints.db # sqlite 落盘位置（相对 backend/）
 
 # 0.17.1 多轮上下文（历史只用于消解指代，不参与事实判定）
 CHAT_HISTORY_MAX_TURNS=4    # 最多带几轮历史（一轮≈1问1答）

@@ -40,6 +40,7 @@ from app.services.agent.plan_builder import (
     PlanFeedback,
     PlanInputError,
     PlanRefiner,
+    PreferenceSource,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,14 @@ logger = logging.getLogger(__name__)
 try:  # pragma: no cover - 取决于环境是否安装
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.graph import END, START, StateGraph
+    # 0.19.0：节点内中断与恢复都用这两个（interrupt / Command）
+    from langgraph.types import Command, interrupt
 
     LANGGRAPH_AVAILABLE = True
     LANGGRAPH_IMPORT_ERROR = ""
 except Exception as exc:  # noqa: BLE001 缺依赖不能拖垮整个应用
+    Command = None  # type: ignore[assignment]
+    interrupt = None  # type: ignore[assignment]
     MemorySaver = None  # type: ignore[assignment]
     StateGraph = None  # type: ignore[assignment]
     END = START = None  # type: ignore[assignment]
@@ -83,8 +88,11 @@ class PlanState(TypedDict, total=False):
     candidate_pool: Dict[str, List[Dict[str, Any]]]
     summary: str
 
-    # ---- Node 3 人工干预 ----
+    # ---- Node 3 人工干预（0.19.0：多轮） ----
     user_feedback: str
+    review_round: int               # 当前第几版方案（从 1 开始）
+    review_action: str              # revise / accept
+    history: List[Dict[str, Any]]   # 每轮 {round, feedback, changes, note}
 
     # ---- Node 4 重新规划 ----
     feedback_parsed: Dict[str, Any]
@@ -100,6 +108,40 @@ class PlanState(TypedDict, total=False):
 # ============================================================ 图构建
 
 
+def _build_checkpointer():
+    """按配置创建 Checkpointer（0.19.0）。
+
+    · `sqlite`：落盘到 `backend/data/plan_checkpoints.db`，**服务重启后仍能恢复**；
+      缺 `langgraph-checkpoint-sqlite` 时自动回落 memory 并打警告（不能让服务起不来）。
+    · `memory`：进程内，重启即丢（0.14.0 的行为）。
+
+    用 `check_same_thread=False`：FastAPI 的同步端点跑在线程池里，
+    sqlite 连接会被不同线程使用。
+    """
+    from app.config import settings
+
+    kind = (settings.PLAN_CHECKPOINTER or "sqlite").lower()
+    if kind == "sqlite":
+        try:
+            import sqlite3
+            from pathlib import Path
+
+            from langgraph.checkpoint.sqlite import SqliteSaver
+
+            backend_dir = Path(__file__).resolve().parents[3]
+            db_path = backend_dir / settings.PLAN_CHECKPOINT_DB
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            print(f"[PLAN] Checkpointer=sqlite，落盘 {db_path}", flush=True)
+            return SqliteSaver(conn)
+        except Exception as exc:  # noqa: BLE001 依赖缺失/写盘失败 → 回落内存
+            logger.warning(
+                "[PLAN] sqlite checkpointer 不可用（%s），回落 MemorySaver：重启会丢失会话",
+                exc.__class__.__name__,
+            )
+    return MemorySaver()
+
+
 def build_plan_graph(
     draft_builder: Optional[PlanDraftBuilder] = None,
     interpreter: Optional[FeedbackInterpreter] = None,
@@ -108,8 +150,14 @@ def build_plan_graph(
 ):
     """编译带 Checkpoint 的 HITL 图；langgraph 不可用时返回 None。
 
-    :param checkpointer: 默认 `MemorySaver()`（进程内）。
-                         将来换 SQLite/Redis 只需在这里注入，业务代码不动（DIP）。
+    ## 0.19.0：从「静态中断」改为「节点内 interrupt()」
+    0.14.0 用 `interrupt_before=["human_review"]` + 空节点：
+    图在节点**之前**停下，用户意见靠 `update_state` 塞进状态，节点本身什么都没消费。
+    现在 `human_review` 内部调用 `interrupt(payload)`，图在该节点**中间**挂起，
+    恢复时用 `Command(resume=...)` 把用户的决定**作为 interrupt() 的返回值**交给节点 ——
+    这才是真正的人机回环，也是多轮循环（回到同一个节点再中断）的前提。
+
+    :param checkpointer: 默认按 `settings.PLAN_CHECKPOINTER` 创建（sqlite/memory）
     """
     if not LANGGRAPH_AVAILABLE:
         logger.warning("[PLAN] langgraph 不可用，HITL 工作流停用：%s", LANGGRAPH_IMPORT_ERROR)
@@ -119,6 +167,7 @@ def build_plan_graph(
 
     draft_n = max(1, int(settings.PLAN_DRAFT_PER_TIER or 8))
     final_n = max(1, int(settings.PLAN_FINAL_PER_TIER or 8))
+    max_rounds = max(1, int(settings.PLAN_MAX_REVIEW_ROUNDS or 5))
 
     builder = draft_builder or PlanDraftBuilder(
         per_tier={"chong": draft_n, "wen": draft_n, "bao": draft_n}
@@ -130,32 +179,37 @@ def build_plan_graph(
 
     # ---------------- Node 1：分析意图 ----------------
     def analyze_intent(state: PlanState) -> Dict[str, Any]:
-        """读分数与画像，把「想去江浙沪、不想太冷」这类偏好变成筛选条件。
+        """把「用户显式偏好」与「画像推断」**分别**解析，再按权重合并。
 
-        这里复用 `FeedbackInterpreter` 的规则层（0 延迟）：
-        用户画像里的偏好文字、以及 start 请求里显式传的 preferences，
-        都按同一种方式解析成结构化的 `PlanFeedback`。
+        0.19.0 拆成两次解析的理由：拼成一个字符串后无法区分来源，
+        冲突时（画像说江浙沪、用户说福建）会两边都进 prefer_provinces，
+        硬过滤时互相稀释——用户会觉得「我说的话没被听」。
         """
         _t = time.time()
         info = state.get("user_info") or {}
+        user_pref = str(info.get("preferences") or "").strip()
         profile = state.get("profile_context") or ""
-        preference_text = " ".join(
-            x for x in [str(info.get("preferences") or ""), profile] if x
-        )
-        parsed = interp.interpret(preference_text, draft=None)
-        intent = parsed.to_dict()
+
+        user_fb = interp.interpret(user_pref, draft=None) if user_pref else PlanFeedback()
+        profile_fb = interp.interpret(profile, draft=None) if profile else PlanFeedback()
+        merged = PreferenceSource(user_explicit=user_fb, from_profile=profile_fb).merge()
+        intent = merged.to_dict()
+        intent["user"] = user_fb.to_dict()
+        intent["profile"] = profile_fb.to_dict()
+        intent["merged"] = merged.to_dict()
+
         print(
             f"[PLAN] Node1 分析意图 {time.time() - _t:.2f}s "
-            f"排除地区={intent.get('exclude_provinces')} "
-            f"偏好地区={intent.get('prefer_provinces')} "
-            f"偏好专业={intent.get('prefer_majors')}",
+            f"用户侧 偏好地区={user_fb.prefer_provinces} 排除地区={user_fb.exclude_provinces} | "
+            f"画像侧 偏好地区={profile_fb.prefer_provinces} 排除地区={profile_fb.exclude_provinces} | "
+            f"合并后 偏好={intent.get('prefer_provinces')} 排除={intent.get('exclude_provinces')}",
             flush=True,
         )
         return {"intent": intent, "stage": "intent_done"}
 
     # ---------------- Node 2：生成初稿 ----------------
     def generate_draft(state: PlanState) -> Dict[str, Any]:
-        """调用规则引擎生成冲稳保初稿，并按 Node1 的意图做一次预筛。"""
+        """生成冲稳保初稿，并对偏好做**硬过滤**（不再清空偏好）。"""
         _t = time.time()
         info = state.get("user_info") or {}
         result = builder.build(
@@ -167,56 +221,87 @@ def build_plan_graph(
             profile_context=state.get("profile_context") or "",
         )
 
-        # 意图预筛：把画像里的偏好也应用一次（候选池保留全量供后续替换）
         intent_dict = state.get("intent") or {}
         draft = result["draft_plan"]
-        if any(intent_dict.get(k) for k in (
-            "exclude_provinces", "exclude_universities", "exclude_keywords", "max_tuition"
-        )):
-            try:
-                fb = PlanFeedback.from_dict(intent_dict)
-                # 只取排除类条件做预筛，偏好留到 Node4 再排序
-                fb.prefer_provinces = []
-                fb.prefer_majors = []
-                draft = refiner_svc.refine(draft, result["candidate_pool"], fb)["final_plan"]
-            except Exception as exc:  # noqa: BLE001 预筛失败用原稿
-                logger.info("[PLAN] 意图预筛失败：%s", exc.__class__.__name__)
+        note = ""
+        try:
+            fb = PlanFeedback.from_dict(intent_dict.get("merged") or intent_dict)
+            built = refiner_svc.build_with_preference(
+                draft, result["candidate_pool"], fb,
+                per_tier={"chong": draft_n, "wen": draft_n, "bao": draft_n},
+            )
+            draft = built["final_plan"]
+            note = built["note"]
+        except Exception as exc:  # noqa: BLE001 偏好应用失败不能阻断初稿
+            logger.info("[PLAN] 偏好应用失败，使用原始初稿：%s", exc.__class__.__name__)
 
         print(
             f"[PLAN] Node2 生成初稿 {time.time() - _t:.2f}s "
             f"rank={result['rank']} 冲{len(draft.get('chong', []))} "
-            f"稳{len(draft.get('wen', []))} 保{len(draft.get('bao', []))}",
+            f"稳{len(draft.get('wen', []))} 保{len(draft.get('bao', []))}"
+            + (f" | {note}" if note else ""),
             flush=True,
         )
         return {
             "rank": result["rank"],
             "draft_plan": draft,
+            "final_plan": draft,          # 前端统一读 final_plan 展示当前版本
             "candidate_pool": result["candidate_pool"],
             "summary": result["summary"],
+            "note": note,
+            "review_round": 1,
+            "review_action": "revise",
+            "history": [],
             "stage": "draft_ready",
             "elapsed_ms": int((time.time() - _t) * 1000),
         }
 
-    # ---------------- Node 3：人工复核（中断点） ----------------
+    # ---------------- Node 3：人工复核（节点内中断） ----------------
     def human_review(state: PlanState) -> Dict[str, Any]:
-        """空节点 —— 唯一的职责是给 `interrupt_before` 一个挂载点。
+        """在这里**挂起**，等用户说话（0.19.0 改为节点内 interrupt）。
 
-        真正的「等待用户」发生在图外面：`invoke()` 到这里之前就返回，
-        前端拿到 `draft_plan` 展示，用户改完再 `update_state` + `resume`。
+        `interrupt(payload)` 会把 payload 交给调用方，并让图停在本节点中间；
+        恢复时 `Command(resume={...})` 的值就是这个函数的返回值。
         """
-        print("[PLAN] Node3 人工复核（恢复执行）", flush=True)
-        return {"stage": "reviewed"}
+        current_round = int(state.get("review_round") or 1)
+        decision = interrupt({
+            "type": "plan_review",
+            "round": current_round,
+            "max_rounds": max_rounds,
+            "plan": state.get("final_plan") or state.get("draft_plan") or {},
+            "hint": "可以直接说要改什么，例如：只保留福建的、学费别超 6000、太远的不想去",
+        })
+        decision = decision or {}
+        action = str(decision.get("action") or "revise")
+        print(
+            f"[PLAN] Node3 收到用户决定：第 {current_round} 轮 action={action} "
+            f"feedback={str(decision.get('feedback') or '')[:40]}",
+            flush=True,
+        )
+        return {
+            "user_feedback": str(decision.get("feedback") or ""),
+            "review_action": action,
+            "stage": "reviewed",
+        }
 
-    # ---------------- Node 4：重新规划 ----------------
+    # ---------------- Node 4：根据反馈重新规划 ----------------
     def refine_plan(state: PlanState) -> Dict[str, Any]:
-        """把「初稿 + 用户意见」变成终稿。"""
+        """把「当前版本 + 用户意见」变成下一版。
+
+        `action=accept` 时直接透传（定稿不改方案，也不占用轮次），
+        否则 `review_action` **不能被重置** —— 条件边要靠它判断是否结束。
+        """
         _t = time.time()
-        draft = state.get("draft_plan") or {}
+        if str(state.get("review_action") or "revise") == "accept":
+            print("[PLAN] Node4 用户定稿，跳过重新规划", flush=True)
+            return {"stage": "final_ready", "elapsed_ms": int((time.time() - _t) * 1000)}
+
+        draft = state.get("final_plan") or state.get("draft_plan") or {}
         pool = state.get("candidate_pool") or draft
         feedback_text = state.get("user_feedback") or ""
+        current_round = int(state.get("review_round") or 1)
 
         parsed = interp.interpret(feedback_text, draft=draft)
-        # 意图里的偏好（画像）也带上，不影响排除逻辑
         intent_dict = state.get("intent") or {}
         if intent_dict.get("prefer_provinces") or intent_dict.get("prefer_majors"):
             parsed.prefer_provinces = list(dict.fromkeys(
@@ -227,9 +312,18 @@ def build_plan_graph(
             ))
 
         result = refiner_svc.refine(draft, pool, parsed)
+        next_round = current_round + 1
+        history = list(state.get("history") or [])
+        history.append({
+            "round": current_round,
+            "feedback": feedback_text,
+            "changes": result["changes"],
+            "note": result["note"],
+        })
         print(
-            f"[PLAN] Node4 重新规划 {time.time() - _t:.2f}s "
-            f"排除{len(result['changes'])}条 最终冲{len(result['final_plan'].get('chong', []))} "
+            f"[PLAN] Node4 第 {current_round} 轮调整 {time.time() - _t:.2f}s "
+            f"调整{len(result['changes'])}条 → 第 {next_round} 版 冲"
+            f"{len(result['final_plan'].get('chong', []))} "
             f"稳{len(result['final_plan'].get('wen', []))} "
             f"保{len(result['final_plan'].get('bao', []))}",
             flush=True,
@@ -239,9 +333,19 @@ def build_plan_graph(
             "final_plan": result["final_plan"],
             "changes": result["changes"],
             "note": result["note"],
+            "review_round": next_round,
+            "history": history,
             "stage": "final_ready",
             "elapsed_ms": int((time.time() - _t) * 1000),
         }
+
+    def needs_more_review(state: PlanState) -> str:
+        """条件边：定稿 / 到轮次上限 → 结束；否则回到 human_review 再中断一次。"""
+        if str(state.get("review_action") or "revise") == "accept":
+            return END
+        if int(state.get("review_round") or 1) >= max_rounds:
+            return END
+        return "human_review"
 
     # ---------------- 组装 ----------------
     graph = StateGraph(PlanState)
@@ -254,13 +358,14 @@ def build_plan_graph(
     graph.add_edge("analyze_intent", "generate_draft")
     graph.add_edge("generate_draft", "human_review")
     graph.add_edge("human_review", "refine_plan")
-    graph.add_edge("refine_plan", END)
-
-    return graph.compile(
-        checkpointer=checkpointer or MemorySaver(),
-        # ★ HITL 的关键：在 human_review **之前** 停下，把控制权交回前端
-        interrupt_before=["human_review"],
+    graph.add_conditional_edges(
+        "refine_plan",
+        needs_more_review,
+        {"human_review": "human_review", END: END},
     )
+
+    # ★ 不再用 interrupt_before：中断发生在 human_review 节点内部（interrupt()）
+    return graph.compile(checkpointer=checkpointer or _build_checkpointer())
 
 
 # ============================================================ 对外门面
@@ -354,30 +459,46 @@ class PlanWorkflow:
             "thread_id": thread_id,
             "rank": values.get("rank"),
             "draft_plan": values.get("draft_plan") or {},
+            "final_plan": values.get("final_plan") or values.get("draft_plan") or {},
             "summary": values.get("summary") or "",
             "intent": values.get("intent") or {},
+            "note": values.get("note") or "",
+            "review_round": int(values.get("review_round") or 1),
+            "history": values.get("history") or [],
             "stage": values.get("stage") or "draft_ready",
             "elapsed_ms": elapsed,
         }
 
     def resume(
-        self, thread_id: str, user_id: int, user_feedback: str
+        self, thread_id: str, user_id: int, payload: Any
     ) -> Dict[str, Any]:
-        """注入用户意见并恢复执行，返回终稿。"""
+        """把用户的决定送进 `interrupt()` 并继续执行（0.19.0 改为 Command 恢复）。
+
+        :param payload: 兼容两种形态
+            · dict → `{"feedback": str, "action": "revise"|"accept"}`
+            · str  → 视为 `{"feedback": str, "action": "revise"}`（0.14.0 的旧调用）
+        """
         graph = self._require_graph()
         self._check_owner(thread_id, user_id)
         cfg = self._config(thread_id)
 
+        if isinstance(payload, dict):
+            feedback = str(payload.get("feedback") or payload.get("user_feedback") or "")
+            action = str(payload.get("action") or "revise")
+        else:
+            feedback, action = str(payload or ""), "revise"
+
         t = time.time()
-        # ① 把反馈写进 State（挂在 human_review 上，语义上就是「用户在这一步提交了意见」）
-        graph.update_state(cfg, {"user_feedback": user_feedback or ""}, as_node="human_review")
-        # ② 继续执行
-        graph.invoke(None, cfg)
+        # ★ 0.19.0：恢复值就是 human_review 里 interrupt() 的返回值
+        graph.invoke(Command(resume={"feedback": feedback, "action": action}), cfg)
 
         values = dict(graph.get_state(cfg).values or {})
+        snapshot = graph.get_state(cfg)
         elapsed = int((time.time() - t) * 1000)
         print(
-            f"[PLAN] 会话 {thread_id[:8]} 完成重新规划，耗时 {elapsed}ms",
+            f"[PLAN] 会话 {thread_id[:8]} 第 {values.get('review_round')} 版完成，"
+            f"action={action}，耗时 {elapsed}ms，"
+            f"{'等待下一轮' if snapshot.next else '已结束'}",
             flush=True,
         )
         return {
@@ -387,6 +508,10 @@ class PlanWorkflow:
             "feedback_parsed": values.get("feedback_parsed") or {},
             "note": values.get("note") or "",
             "rank": values.get("rank"),
+            "review_round": int(values.get("review_round") or 1),
+            "review_action": str(values.get("review_action") or action),
+            "history": values.get("history") or [],
+            "awaiting_feedback": bool(snapshot.next),
             "stage": values.get("stage") or "final_ready",
             "elapsed_ms": elapsed,
         }
@@ -404,6 +529,10 @@ class PlanWorkflow:
             "final_plan": values.get("final_plan") or {},
             "changes": values.get("changes") or [],
             "note": values.get("note") or "",
+            "intent": values.get("intent") or {},
+            "review_round": int(values.get("review_round") or 1),
+            "review_action": str(values.get("review_action") or "revise"),
+            "history": values.get("history") or [],
             # next 非空表示还停在中断点，等着用户反馈
             "awaiting_feedback": bool(snapshot.next),
         }

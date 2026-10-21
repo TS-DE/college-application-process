@@ -228,6 +228,13 @@ class Settings:
     PLAN_DRAFT_PER_TIER: int = int(_env("PLAN_DRAFT_PER_TIER", "8"))
     # 终稿每个档位的条数上限
     PLAN_FINAL_PER_TIER: int = int(_env("PLAN_FINAL_PER_TIER", "8"))
+    # 人机回环最多几轮（0.19.0）：节点内 interrupt() 后可以反复「改 → 再改」，
+    # 必须设上限，否则用户可以无限循环、每次都触发一次模型解析。
+    PLAN_MAX_REVIEW_ROUNDS: int = int(_env("PLAN_MAX_REVIEW_ROUNDS", "5"))
+    # Checkpointer 类型（0.19.0）：memory = 进程内（重启即丢）；sqlite = 落盘（跨重启恢复）
+    PLAN_CHECKPOINTER: str = (_env("PLAN_CHECKPOINTER", "sqlite") or "sqlite").strip().lower()
+    # sqlite checkpoint 文件路径（相对 backend/ 目录）
+    PLAN_CHECKPOINT_DB: str = _env("PLAN_CHECKPOINT_DB", "data/plan_checkpoints.db")
 
     # ---------------- 0.13.0 云端「心理师」通道 ----------------
     # 心理疏导与画像采集**强制**走云端大模型（本地 4b 的情感推理能力不足），

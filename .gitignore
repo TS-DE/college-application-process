@@ -40,3 +40,6 @@ frontend/tests/**/*.tmp_chat.cjs
 
 # 0.17.0：重构前测试基线（对照用，不入库）
 backend/tests/_baseline/
+
+# 0.19.0：LangGraph sqlite checkpoint（运行时生成）
+backend/data/

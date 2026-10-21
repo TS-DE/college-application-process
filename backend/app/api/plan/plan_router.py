@@ -125,7 +125,10 @@ async def resume_plan(
     try:
         res = await asyncio.wait_for(
             run_in_threadpool(
-                wf.resume, body.thread_id, user["id"], body.user_feedback
+                wf.resume,
+                body.thread_id,
+                user["id"],
+                {"feedback": body.user_feedback, "action": body.action},
             ),
             timeout=_RESUME_TIMEOUT,
         )
@@ -164,11 +167,15 @@ async def get_plan_state(
 @router.get("/health")
 async def plan_health() -> Dict[str, Any]:
     """依赖自检：前端可据此决定是否显示「智能生成」按钮。"""
+    from app.config import settings
     from app.services.agent.workflow import LANGGRAPH_AVAILABLE, LANGGRAPH_IMPORT_ERROR
 
     return {
         "available": LANGGRAPH_AVAILABLE,
         "engine": "langgraph",
-        "interrupt_before": "human_review",
+        # 0.19.0：中断发生在 human_review 节点**内部**（interrupt()），不再是 interrupt_before
+        "interrupt": "human_review(interrupt())",
+        "checkpointer": settings.PLAN_CHECKPOINTER,
+        "max_review_rounds": settings.PLAN_MAX_REVIEW_ROUNDS,
         "error": LANGGRAPH_IMPORT_ERROR,
     }

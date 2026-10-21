@@ -1,12 +1,12 @@
 import { http, httpAI } from './request'
 
 /**
- * 人机协同志愿规划（0.14.0）。
+ * 人机协同志愿规划（0.14.0 引入，0.19.0 改为多轮回环）。
  *
- * 三段式交互对应后端 LangGraph 的三次调用：
- *   start  → 生成初稿（图停在 human_review 之前）
- *   resume → 注入意见、恢复执行（图跑到 END）
- *   state  → 读会话现场（刷新页面后恢复）
+ * 三阶段交互对应后端 LangGraph：
+ *   start  → 生成初稿，图停在 human_review 节点**内部**的 interrupt()
+ *   resume → 用 Command(resume=…) 把用户决定交回节点；可反复调用（多轮）
+ *   state  → 读会话现场（刷新页面后恢复轮次与方案）
  */
 
 export interface PlanItem {
@@ -43,12 +43,24 @@ export interface PlanStartPayload {
   preferences?: string
 }
 
+/** 每轮的历史记录（后端原样回传） */
+export interface PlanHistoryEntry {
+  round: number
+  feedback: string
+  changes: PlanChange[]
+  note: string
+}
+
 export interface PlanStartResult {
   thread_id: string
   rank: number
   draft_plan: PlanTiers
+  final_plan?: PlanTiers
   summary: string
   intent: Record<string, any>
+  note?: string
+  review_round?: number
+  history?: PlanHistoryEntry[]
   stage: string
   elapsed_ms: number
   awaiting_feedback: boolean
@@ -69,6 +81,11 @@ export interface PlanResumeResult {
   feedback_parsed: Record<string, any>
   note: string
   rank?: number
+  review_round: number
+  review_action: string
+  history: PlanHistoryEntry[]
+  /** true = 仍停在中断点，可继续提意见；false = 已定稿或到轮次上限 */
+  awaiting_feedback: boolean
   stage: string
   elapsed_ms: number
 }
@@ -81,6 +98,10 @@ export interface PlanStateResult {
   final_plan: PlanTiers
   changes: PlanChange[]
   note: string
+  intent?: Record<string, any>
+  review_round: number
+  review_action: string
+  history: PlanHistoryEntry[]
   awaiting_feedback: boolean
 }
 
@@ -94,12 +115,20 @@ export function startPlan(payload: PlanStartPayload) {
   })
 }
 
-/** 提交修改意见并生成终稿（可能含一次大模型调用） */
-export function resumePlan(threadId: string, userFeedback: string) {
+/**
+ * 提交一轮决定并继续执行。
+ *
+ * @param action revise = 继续改（默认）；accept = 就这版定稿
+ */
+export function resumePlan(
+  threadId: string,
+  userFeedback: string,
+  action: 'revise' | 'accept' = 'revise'
+) {
   return httpAI<PlanResumeResult>({
     url: '/plan/resume',
     method: 'POST',
-    data: { thread_id: threadId, user_feedback: userFeedback },
+    data: { thread_id: threadId, user_feedback: userFeedback, action },
     timeout: 120000
   })
 }
@@ -111,7 +140,11 @@ export function planState(threadId: string) {
 
 /** 依赖自检：langgraph 是否就绪 */
 export function planHealth() {
-  return http<{ available: boolean; engine: string; error?: string }>({
-    url: '/plan/health'
-  })
+  return http<{
+    available: boolean
+    engine: string
+    checkpointer?: string
+    max_review_rounds?: number
+    error?: string
+  }>({ url: '/plan/health' })
 }

@@ -70,6 +70,10 @@ _NEGATIVE_WORDS = (
 # 肯定表达（出现即认为该分句是在「偏好」）
 _POSITIVE_WORDS = ("想去", "想学", "喜欢", "偏好", "希望", "优先", "最好", "倾向")
 
+#: 0.19.0 极性修正：用户说「去福建上学」时不含"想"字，但它显然是**想去**。
+#: 规则：分句里出现「动词 + 省份」且无否定词 → 判为偏好。
+_POSITIVE_VERBS = ("去", "报", "上", "选", "在")
+
 
 class PlanInputError(ValueError):
     """规划入参不合法（省份/科类/分数），路由层转 400。"""
@@ -143,6 +147,60 @@ class PlanFeedback:
             "max_tuition": self.max_tuition,
             "note": self.note,
         }
+
+
+@dataclass
+class PreferenceSource:
+    """两个来源的偏好，分开保存、按权重合并（0.19.0）。
+
+    ## 为什么必须分开
+    0.14.0 把「用户本次显式输入」和「画像推断」拼成一个字符串再解析：
+    `preference_text = user_preferences + " " + profile`。
+    一旦两者冲突（画像说喜欢江浙沪，用户这次说想去福建），
+    拼接后根本无法判断该听谁的，最后往往两边都进 `prefer_provinces`，
+    硬过滤时互相稀释，用户会觉得「我说的话没被听」。
+
+    ## 合并规则：用户显式表达优先，画像只补空缺
+    | 维度 | 规则 |
+    |---|---|
+    | 偏好地区 / 偏好专业 | 用户有值 → **只用用户的**（画像的被抑制，避免稀释）；用户为空 → 用画像的 |
+    | 排除地区 / 院校 / 方向 | 两者取并集（排除是硬约束，多一条不会误伤） |
+    | 学费上限 | 用户的优先，用户没提才用画像的 |
+
+    理由：用户**本次**说的话是对当前需求的直接表达，时效性与确定性都高于
+    历史画像（画像是长期推断，可能过时、可能是闲聊时被误抽的）。
+    只有用户没表态的维度，才让画像兜底——这就是「补空缺」的含义。
+    """
+
+    user_explicit: PlanFeedback = field(default_factory=PlanFeedback)
+    from_profile: PlanFeedback = field(default_factory=PlanFeedback)
+
+    def merge(self) -> PlanFeedback:
+        """按「用户优先、画像补缺」合成一份可用反馈。"""
+        u, p = self.user_explicit, self.from_profile
+
+        def _first(user_vals: List[str], profile_vals: List[str]) -> List[str]:
+            """用户有值就只用用户的，否则用画像的（保序去重）。"""
+            src = user_vals or profile_vals
+            return list(dict.fromkeys(x for x in src if x))
+
+        def _union(a: List[str], b: List[str]) -> List[str]:
+            return list(dict.fromkeys([x for x in list(a) + list(b) if x]))
+
+        merged = PlanFeedback(
+            exclude_universities=_union(u.exclude_universities, p.exclude_universities),
+            exclude_provinces=_union(u.exclude_provinces, p.exclude_provinces),
+            exclude_keywords=_union(u.exclude_keywords, p.exclude_keywords),
+            prefer_provinces=_first(u.prefer_provinces, p.prefer_provinces),
+            prefer_majors=_first(u.prefer_majors, p.prefer_majors),
+            max_tuition=u.max_tuition or p.max_tuition,
+            note=u.note or p.note,
+        )
+        # 用户明确想去的省份，不能被任何一侧的排除规则压掉
+        merged.exclude_provinces = [
+            x for x in merged.exclude_provinces if x not in u.prefer_provinces
+        ]
+        return merged
 
 
 # ============================================================ 初稿生成
@@ -383,17 +441,23 @@ class FeedbackInterpreter:
             # ① 学费约束独立解析（任何分句都可能出现，与极性无关）
             self._parse_tuition(clause, fb)
 
-            negative = any(w in clause for w in _NEGATIVE_WORDS)
-            positive = any(w in clause for w in _POSITIVE_WORDS)
-
-            # ② 省份
+            # ② 省份（先算出来：极性判断要用「省份 + 动词」这条规则）
             hit_provs = [p for p in provinces if p and p in clause]
             # ③ 语义别称（太冷 / 江浙沪 …）
             alias_provs: List[str] = []
-            for alias, provs in _SEMANTIC_ALIASES.items():
+            for alias, alias_list in _SEMANTIC_ALIASES.items():
                 if alias in clause:
-                    alias_provs.extend(provs)
+                    alias_provs.extend(alias_list)
             provs = list(dict.fromkeys(hit_provs + alias_provs))
+
+            # ④ 极性：否定优先，其次「动词 + 省份」也算肯定
+            #    0.19.0：修掉「去福建上学」被判成排除福建的地雷 —— 它不含"想"字，
+            #    但「去 + 省份」显然是想去。否定词优先，所以「不想去北京」仍然是排除。
+            negative = any(w in clause for w in _NEGATIVE_WORDS)
+            positive = (
+                any(w in clause for w in _POSITIVE_WORDS)
+                or (not negative and bool(provs) and any(v in clause for v in _POSITIVE_VERBS))
+            )
 
             # ④ 具体院校（只在初稿里找，避免瞎猜）
             hit_univs = [u for u in univ_names if u and u in clause]
@@ -418,10 +482,11 @@ class FeedbackInterpreter:
                 fb.prefer_provinces.extend(provs)
                 fb.prefer_majors.extend(hit_majors)
             else:
-                # 无明确极性：含省份就当排除（「北京的不想去」口语常见），
-                # 含专业就当偏好
+                # 无明确极性：**用户主动提一个省份，多数是想去**（0.19.0 修正）。
+                # 想排除时通常会说「不想 / 别 / 不要 / 不考虑」，已由 _NEGATIVE_WORDS 覆盖；
+                # 旧实现默认当排除，导致「北京」这种中性提法被误伤。
                 if provs:
-                    fb.exclude_provinces.extend(provs)
+                    fb.prefer_provinces.extend(provs)
                 fb.prefer_majors.extend(hit_majors)
 
         # 去重
@@ -513,6 +578,40 @@ class FeedbackInterpreter:
 # ============================================================ 重新规划
 
 
+def blocked_reason(item: Dict, feedback: PlanFeedback) -> Optional[str]:
+    """该条目被排除的原因；None 表示保留。
+
+    抽成模块级函数是为了让 `refine()`（多轮改写）与
+    `build_with_preference()`（初稿硬过滤）共用同一套排除规则，
+    避免两处判断口径不一致（0.19.0）。
+    """
+    name = str(item.get("university_name") or "")
+    major = str(item.get("major_name") or "")
+    prov = str(item.get("school_province") or "")
+    for u in feedback.exclude_universities:
+        if u and u in name:
+            return f"按院校排除（{u}）"
+    for p in feedback.exclude_provinces:
+        if p and p == prov:
+            return f"按地区排除（{p}）"
+    for kw in feedback.exclude_keywords:
+        if kw and (kw in name or kw in major):
+            return f"按方向排除（{kw}）"
+    if feedback.max_tuition:
+        tuition = item.get("tuition")
+        if isinstance(tuition, (int, float)) and tuition > feedback.max_tuition:
+            return f"学费超限（{int(tuition)} > {feedback.max_tuition}）"
+    return None
+
+
+def is_preferred(item: Dict, feedback: PlanFeedback) -> bool:
+    """该条目是否命中偏好（地区或专业）。"""
+    if str(item.get("school_province") or "") in feedback.prefer_provinces:
+        return True
+    major = str(item.get("major_name") or "")
+    return any(m and m in major for m in feedback.prefer_majors)
+
+
 class PlanRefiner:
     """根据结构化反馈重新筛选志愿表（只做筛选与排序，不新增院校）。"""
 
@@ -529,24 +628,8 @@ class PlanRefiner:
         changes: List[Dict[str, str]] = []
 
         def _blocked(item: Dict) -> Optional[str]:
-            """返回被排除的原因；None 表示保留。"""
-            name = str(item.get("university_name") or "")
-            major = str(item.get("major_name") or "")
-            prov = str(item.get("school_province") or "")
-            for u in feedback.exclude_universities:
-                if u and u in name:
-                    return f"按院校排除（{u}）"
-            for p in feedback.exclude_provinces:
-                if p and p == prov:
-                    return f"按地区排除（{p}）"
-            for kw in feedback.exclude_keywords:
-                if kw and (kw in name or kw in major):
-                    return f"按方向排除（{kw}）"
-            if feedback.max_tuition:
-                tuition = item.get("tuition")
-                if isinstance(tuition, (int, float)) and tuition > feedback.max_tuition:
-                    return f"学费超限（{int(tuition)} > {feedback.max_tuition}）"
-            return None
+            """返回被排除的原因；None 表示保留（实现见 `blocked_reason`）。"""
+            return blocked_reason(item, feedback)
 
         def _score(item: Dict) -> int:
             """偏好加权：命中偏好地区/专业越多的越靠前。"""
@@ -604,10 +687,95 @@ class PlanRefiner:
         return {"final_plan": final, "changes": changes, "note": note}
 
 
+    def build_with_preference(
+        self,
+        draft: Dict[str, List[Dict]],
+        pool: Dict[str, List[Dict]],
+        feedback: PlanFeedback,
+        per_tier: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        """初稿生成：**硬过滤优先**，不足再补位（0.19.0）。
+
+        与 `refine()` 的区别：
+          · `refine()` 是「在已有方案上按新意见重筛」，偏好只参与排序（+2 分），
+            候选池里的福建院校排到第 30 位时永远进不了前 8；
+          · 本方法用于**第一次生成**：命中偏好的条目先占满每一档，
+            不足才用其余条目补足 —— 用户说「想去福建」就**一定**能看到福建院校。
+
+        三步：
+          ① 硬过滤：每档先取 `school_province ∈ prefer_provinces`
+             （或专业命中 `prefer_majors`）的条目，保持候选池原序；
+          ② 补足：不足 per_tier 时，用「未命中偏好且未被排除」的条目按原序补；
+          ③ 说明：偏好一条都没选出来时，note 必须写明原因，不允许静默返回其它省份。
+        """
+        changes: List[Dict[str, str]] = []
+        final: Dict[str, List[Dict]] = {}
+        has_pref = bool(feedback.prefer_provinces or feedback.prefer_majors)
+        limits = per_tier or self._per_tier
+        pool_provinces: set = set()
+        kept_provinces: set = set()
+
+        for tier in ("chong", "wen", "bao"):
+            source = pool.get(tier) or draft.get(tier) or []
+            kept: List[Dict] = []
+            for item in source:
+                pool_provinces.add(str(item.get("school_province") or ""))
+                reason = blocked_reason(item, feedback)
+                if reason:
+                    changes.append({
+                        "action": "remove",
+                        "tier": tier,
+                        "university": str(item.get("university_name") or ""),
+                        "major": str(item.get("major_name") or ""),
+                        "reason": reason,
+                    })
+                    continue
+                kept.append(dict(item))
+                kept_provinces.add(str(item.get("school_province") or ""))
+
+            limit = limits.get(tier, 6)
+            if not has_pref:
+                final[tier] = kept[:limit]
+                continue
+
+            preferred = [i for i in kept if is_preferred(i, feedback)]
+            rest = [i for i in kept if not is_preferred(i, feedback)]
+            picked = preferred[:limit]
+            if len(picked) < limit:
+                picked += rest[: limit - len(picked)]
+            final[tier] = picked
+
+        note = ""
+        if has_pref:
+            missing = [p for p in feedback.prefer_provinces if p not in kept_provinces]
+            if missing:
+                absent = [p for p in missing if p not in pool_provinces]
+                blocked = [p for p in missing if p in pool_provinces]
+                parts: List[str] = []
+                if absent:
+                    parts.append(
+                        f"候选池中没有位于{'、'.join(absent)}的院校，可适当放宽位次范围"
+                    )
+                if blocked:
+                    parts.append(
+                        f"候选池中的{'、'.join(blocked)}院校均被其他条件（学费/院校/方向）排除，"
+                        f"可适当放宽条件"
+                    )
+                note = "；".join(parts) + "。已按其余条件为你生成方案。"
+
+        if not note:
+            added = sum(len(v) for v in final.values())
+            note = f"已按你的偏好生成方案，共 {added} 条志愿。"
+        return {"final_plan": final, "changes": changes, "note": note}
+
+
 __all__ = [
     "PlanInputError",
     "PlanFeedback",
+    "PreferenceSource",
     "PlanDraftBuilder",
     "FeedbackInterpreter",
     "PlanRefiner",
+    "blocked_reason",
+    "is_preferred",
 ]
