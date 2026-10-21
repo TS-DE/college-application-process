@@ -51,6 +51,7 @@ from app.services.rag.constants import (  # noqa: F401,E402
 from app.services.rag.storage.vector_store import VectorStore  # noqa: E402
 from app.services.rag.retrieval.hybrid import HybridRetriever  # noqa: E402
 from app.services.rag.retrieval.keyword_fallback import KeywordFallbackRetriever  # noqa: E402
+from app.services.rag.postprocess.parent_expander import ParentExpander  # noqa: E402
 
 # 父子块参数与 docstore 常量已迁移到 services/knowledge/（0.17.0）
 
@@ -88,6 +89,7 @@ _collection_dim_cache: Optional[int] = None
 
 _STORE = VectorStore(globals())
 _KEYWORD_FALLBACK = KeywordFallbackRetriever(_STORE)
+_PARENT_EXPANDER = ParentExpander()
 
 
 def _get_collection():
@@ -245,41 +247,8 @@ def delete_by_file(file_id: int) -> bool:
 
 
 def _expand_to_parents(hits: List[Dict]) -> List[Dict]:
-    """子块命中 → 回填父块（"小块命中、大块生成"）。
-
-    - 命中子块的 metadata 里有 parent_chunk_id，据此从 docstore 取回父块原文
-    - 取回成功：把 text 换成父块（上下文更完整），并标记 context_level="parent"
-    - **降级**：父块缺失 / 取回异常时，直接返回子块，标记 context_level="child"，链路不中断
-    - 多个子块指向同一父块时按父块去重，保留得分最高的那个
-    """
-    expanded: List[Dict] = []
-    seen_parents: set = set()
-
-    for h in hits:
-        meta = h.get("metadata") or {}
-        parent_id = meta.get("parent_chunk_id")
-        parent = get_parent(parent_id)
-
-        if parent and parent.get("text"):
-            if parent_id in seen_parents:
-                continue  # 同一父块的多个子块只保留一次
-            seen_parents.add(parent_id)
-            expanded.append({
-                **h,
-                "text": parent["text"],           # 用父块原文替换子块，交给 LLM
-                "metadata": {**meta, "chunk_index": meta.get("chunk_index")},
-                "parent_chunk_id": parent_id,
-                "context_level": "parent",
-            })
-        else:
-            # 降级：docstore 没有该父块（旧数据 / 文件被清），直接返回子块
-            expanded.append({
-                **h,
-                "parent_chunk_id": parent_id,
-                "context_level": "child",
-            })
-
-    return expanded
+    """子块命中 → 回填父块（实现与降级规则见 `ParentExpander`）。"""
+    return _PARENT_EXPANDER.expand(hits)
 
 
 # 0.18.0：混合检索实现搬到 `retrieval/hybrid.py`，此处保留旧类名做别名，
