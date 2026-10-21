@@ -47,9 +47,10 @@ const routes: RouteRecordRaw[] = [
   },
   {
     // 0.14.0：人机协同志愿规划（LangGraph HITL：生成初稿 → 人工干预 → 终稿）
+    // 0.19.0：改为对话式多轮回环，页面迁到 views/plan/index.vue
     path: '/plan',
     name: 'plan',
-    component: () => import('@/views/student/PlanGenerator.vue'),
+    component: () => import('@/views/plan/index.vue'),
     meta: { requiresLogin: true }
   },
 
