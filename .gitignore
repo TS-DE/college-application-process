@@ -32,7 +32,9 @@ rag_eval_details_*.json
 
 # 0.8.0 量化评估：评估报告与参数备份（可重现，不入库）
 data/eval_reports/
-backend/.env.bak.*
+# 0.17.1：改为递归匹配，覆盖 backend/app/.env.bak.* 等子目录备份
+**/.env.bak.*
+**/.env.bak-*
 # 注意：*.log 已被上方忽略（含 backend/app/services/eval/changes.log）
 frontend/tests/**/*.tmp_chat.cjs
 

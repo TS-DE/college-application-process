@@ -67,8 +67,170 @@
 | **0.15.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **认证与 AI 线程池隔离**：超时不再清 token、认证接口独立调度 | 同上（修复「超时掉登录」） | ✅ 已发布 |
 | **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 已发布 |
 | **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 已发布 |
-| **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 本次发布 |
+| **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 已发布 |
+| **0.17.1** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **多轮上下文透传** / chat_router 拆分 / 线程池名额修正 | 同上（接口清单 57 条零差异） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.17.1] - 2026-10-21 · 多轮上下文 + 路由拆分 + 线程池名额修正
+
+### 一、原有缺陷
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| 1 | 0.16.0 把聊天记录持久化到前端后，**后端每轮只收到当前一句 question** | 用户看到长历史会自然追问「那学费呢」「这个学校呢」，但模型不知道「那」「这个」指什么，每轮都是独立单轮问答 |
+| 2 | `api/chat/chat_router.py` **440 行**，混装 `/status`、`/parse-intent`、`/recommend-reason`、`/chat` 四类端点 + 五层回落编排 | 入口层承担了编排职责，改一处要读全文件 |
+| 3 | `_release_inflight()` 放在 `_run_ai` 最外层 `finally` | `wait_for` 超时只是**放弃等待**，线程仍在跑；名额却已归还 → **计数显示空闲、池子实际已满**，过载保护形同虚设 |
+
+### 二、改进技术与方案
+
+#### 1. 多轮上下文：只做指代消解，绝不当事实来源
+
+```
+前端 chatStore.messages ──最近 4 条──▶ POST /api/chat {history}
+        ▼
+sanitize_history()   角色白名单 + 单条 300 字 + 最近 4 轮 + 总 600 字
+        ▼
+build_history_section()  →【对话上文】段（含「与检索资料冲突时以检索资料为准」）
+        ▼
+插到【用户问题】之前，**不并入【检索上下文】**
+```
+
+**为什么必须隔离**：历史是客户端传来的不可信输入。若把它当事实写进检索上下文，
+用户上一轮编一句「这学校学费 1 元」，下一轮模型就会当真复述 —— 防幻觉机制直接失效。
+因此该段落只用于消解「它 / 那个」，并在文中显式声明冲突时以检索资料为准。
+
+**向后兼容**：`history_section` 全部带默认值 `""`，不传时 Prompt 与 0.17.0 逐字一致（有断言）。
+
+三条生成链路（三路融合 / 进阶 RAG / 基础 RAG）全部接入；
+`answer_with_strategy` 通过 `_generate` 闭包透传，Self-RAG 与 Corrective RAG **自动生效**，无需各改一遍。
+
+#### 2. chat_router 拆分
+
+| 文件 | 职责 | 行数 |
+|---|---|---|
+| `api/chat/chat_router.py` | 只留 `/chat`（解析 → 读画像 → 调编排 → 转响应） | 440 → **185** |
+| `api/chat/status_router.py` | `/status` + `_model_name` | 40 |
+| `api/chat/intent_router.py` | `/parse-intent`、`/recommend-reason` | 55 |
+| `services/chat/chat_orchestrator.py` | 五层回落编排 + `_load_profile_summary` | 238 |
+
+`_load_profile_summary` 从 `services/llm/ai_executor.py` 迁到编排层：
+`ai_executor` 回归「纯执行器」（只管线程池/超时/名额），编排层负责「准备输入 → 派发」。
+
+依赖方向：`api/chat → services/chat → services/rag / services/llm`，**service 层不反向 import api**（已 grep 验证）。
+
+#### 3. 名额归还时机
+
+```python
+def _worker(recorder, release_token, fn, args):
+    recorder["started_at"] = time.perf_counter()
+    try:
+        return fn(*args)
+    finally:
+        _release_inflight(release_token)   # ★ 线程真正结束才归还
+```
+
+**语义变化**：名额 = **线程占用**（任务已提交且线程未结束），不再是「请求是否还在等」。
+
+**边界处理**（两个容易漏的路径）：
+- `run_in_executor` 本身抛异常（执行器已关闭）→ 线程不会启动，`except` 里补还一次；
+- 线程**未启动就被取消** → 用 `recorder["started_at"]` 判断（**不能用 `future.cancelled()`**：
+  `wait_for` 超时会把 asyncio future 标记为 CANCELLED，但底层线程可能早已在跑，
+  用它判断会把「已在跑」误判成「没启动」，导致提前归还 —— 这正是 0.17.0 老问题换位置复现）。
+
+**僵尸槽位回收**：槽位列表记录 `acquired_at`，准入检查前先回收持有超过
+`AI_SLOT_MAX_HOLD_SECONDS`（默认 600s）的槽位并告警，防止线程永久挂死导致名额泄漏。
+
+#### 4. 环境修复（阻塞级，与本次改动无关但必须记录）
+
+跑到 py312_env 后暴露两个环境缺口，均已修复：
+
+| 问题 | 现象 | 修复 |
+|---|---|---|
+| `bcrypt 5.0.0` + `passlib 1.7.4` | 注册/登录 500：`password cannot be longer than 72 bytes` | 降级 `bcrypt==4.0.1`（passlib 1.7.4 兼容的最后一版），已写入 requirements |
+| `protobuf 7.x` C 扩展 + chromadb 的 pb2 | `_load_corpus` 里 `self.collection` 为 None，RAG 全部检索失败 | `.env` 加 `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python` |
+
+### 三、对应代码位置
+
+| 文件 | 函数 / 区块 | 改动 |
+|---|---|---|
+| `app/services/rag/prompt_utils.py`（新） | `sanitize_history` / `build_history_section` / `_coerce_items` | 不可信历史的清洗与渲染 |
+| `app/config.py` | 多轮对话区块 | `CHAT_HISTORY_MAX_TURNS` / `CHAT_HISTORY_MAX_CHARS` |
+| `app/services/rag/rag_service.py` | `generate_answer` | 新增 `history_section`，插到【用户问题】前 |
+| 同上 | `build_hybrid_prompt` / `answer_with_hybrid` / `answer_with_strategy` | 新增参数并透传 |
+| `app/api/chat/chat_router.py` | `_chat_sync` → `run_chat`（迁出） | 6 个 return 增加 `history_used`；调用传 `history_section` |
+| `app/api/chat/status_router.py`（新） | `/status` | 从 chat_router 迁出 |
+| `app/api/chat/intent_router.py`（新） | `/parse-intent`、`/recommend-reason` | 从 chat_router 迁出 |
+| `app/services/chat/chat_orchestrator.py`（新） | `run_chat`、`_load_profile_summary` | 五层编排下沉 |
+| `app/services/llm/ai_executor.py` | `_worker`（新）、`_inflight_slots`、`_reap_stale_slots_locked`、`_run_ai` | 名额改由线程归还 + 僵尸回收 |
+| `app/config.py` | 线程池区块 | `AI_SLOT_MAX_HOLD_SECONDS` |
+| `frontend/src/api/ai.ts` | `ChatPayload` / `ChatResult` | 新增 `history` / `history_used` |
+| `frontend/src/views/student/AiChat.vue` | `send()` | 取最近 4 条（排除当前这条）随请求发送 |
+| `.gitignore` | — | `**/.env.bak.*`、`**/.env.bak-*` |
+| `tests/chat/test_chat_history.py`（新） | — | A 组 31 项断言 |
+| `tests/llm/test_executor_slots.py`（新） | — | C 组 12 项断言 |
+
+### 四、验证流程与实测结果
+
+#### A 组（`python tests/chat/test_chat_history.py --real`）
+
+```
+A1 带 history → history_used=True                    PASS
+   问「那退档呢」的回答：「导致退档的主要原因及规避建议如下…」（未重新解释平行志愿）
+A3 不传 history → history_used=False                 PASS
+A4 role=system/tool/空 全部丢弃                       PASS
+   单条 5000 字 → 300 字；字符串 "abc" → []           PASS
+A5 未把历史里的「1 元」当作事实                        PASS
+   「对假数字做了纠正」                                PASS
+   实测回答：「福州大学至诚学院（独立学院）的学费并非1元，该数据严重失实…」
+A6 10 轮 → 只留 8 条（最近 4 轮）；总字符 500 ≤ 600    PASS
+共 31 项，通过 31 项
+```
+
+> A5 是本次最有价值的一条：模型不仅没采信假数字，还主动纠正。
+> 断言刻意不用「回答里是否出现 1 元」——模型否定它时也会提到它，那样会误判。
+
+A2（刷新后重复 A1）由「A1 已验证透传」+「0.16.0 已验证 sessionStorage 持久化」组合覆盖，
+前端 `history` 直接来自 `chatStore.messages`，刷新后该 store 会从 sessionStorage 恢复。
+
+#### B 组
+
+```
+B1 OpenAPI 全量对比（worktree 检出 v0.17.0）：
+   旧 57 条，新 57 条；只在旧 0 / 只在新 0 / 响应模型不一致 0     PASS
+B2 chat_router.py 185 行（≤200）；status 40 / intent 55 / orchestrator 238   PASS
+B3 /status 200、/parse-intent 200、/recommend-reason 200、/counselor 200、/chat 200   PASS
+B4 services/ 无 import api/；services/rag 无 import services/chat           PASS
+```
+
+#### C 组
+
+```
+C1 tests/auth/test_auth_isolation.py                 PASS
+C2 超时后名额仍为 1（未提前归还）；线程结束归零         PASS
+   连续 3 个超时任务 → 名额 3；全部结束 → 0            PASS
+   僵尸槽位（9999s 前）被回收并告警                     PASS
+C3 20 并发 /chat：16 个 200 + 4 个 503（804–847ms）   PASS
+共 12 项，通过 12 项
+```
+
+#### D 组
+
+```
+D1 23 项（22 脚本 + auth_isolation）全部通过
+D2 npm run build / verify:auth / verify:chat         全 PASS
+```
+
+### 五、已知限制
+
+| 项 | 说明 |
+|---|---|
+| Agent 链路不接 history | 任务明确排除；`services/agent/runner.py` 仍是单轮 |
+| `route_query` 不看历史 | 意图路由仍只判当前问题，指代型追问可能被误拦（实测「那退档呢」未被拦，但极端短句有风险） |
+| 历史只取 4 条 | 更早的上下文不参与指代消解，长话题切换后可能失忆 |
+| `smoke_rag.py` 有破坏性 | 它会删除知识库文档，批量跑时必须放最后，否则后续依赖知识库的测试会失败（既有问题，非本次引入） |
+| 环境依赖 | py312_env 需 `bcrypt==4.0.1` + `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`，否则注册 500 / RAG 检索全空 |
 
 ---
 
