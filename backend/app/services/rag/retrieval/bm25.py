@@ -12,9 +12,10 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from app.services.rag.constants import DEFAULT_CANDIDATE_N
+from app.services.rag.retrieval.base import BaseRetriever
 
 
-class BM25Retriever:
+class BM25Retriever(BaseRetriever):
     """BM25Okapi 稀疏召回（jieba 中文分词）。
 
     ## 小语料降级（行为与 0.17.x 完全一致）

@@ -50,6 +50,7 @@ from app.services.rag.constants import (  # noqa: F401,E402
 )
 from app.services.rag.storage.vector_store import VectorStore  # noqa: E402
 from app.services.rag.retrieval.hybrid import HybridRetriever  # noqa: E402
+from app.services.rag.retrieval.keyword_fallback import KeywordFallbackRetriever  # noqa: E402
 
 # 父子块参数与 docstore 常量已迁移到 services/knowledge/（0.17.0）
 
@@ -86,6 +87,7 @@ _chroma_error: Optional[str] = None
 _collection_dim_cache: Optional[int] = None
 
 _STORE = VectorStore(globals())
+_KEYWORD_FALLBACK = KeywordFallbackRetriever(_STORE)
 
 
 def _get_collection():
@@ -427,7 +429,13 @@ def build_multi_recall(docs: Optional[List[Dict]] = None, embeddings: Optional[L
       - hybrid：把「混合检索」当作一个复合通道（weight=1.0）
     docs 为空时自动从 Chroma 载入子块语料。
     """
-    from app.services.rag.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
+    # 0.18.0：从新模块直接导入（`retrieval.py` 已降为 re-export 兼容层）
+    from app.services.rag.retrieval.bm25 import BM25Channel
+    from app.services.rag.retrieval.dense import DenseChannel
+    from app.services.rag.retrieval.hybrid import HybridSearch
+    from app.services.rag.retrieval.multi_recall import MultiRecallRetriever
+
+    MultiRecall = MultiRecallRetriever
 
     if docs is None:
         docs, embeddings = _load_corpus_docs()
@@ -699,24 +707,8 @@ def _hit_from_channel(hit: Dict) -> Dict:
 
 
 def _keyword_fallback(query: str, top_k: int) -> List[Dict]:
-    """无向量能力时的兜底：对库内文档做关键词打分。"""
-    col = _get_collection()
-    if col is None:
-        return []
-    try:
-        data = col.get(include=["documents", "metadatas"])
-    except Exception:  # noqa: BLE001
-        return []
-    docs = data.get("documents") or []
-    metas = data.get("metadatas") or []
-    keys = [k for k in re.split(r"[\s，。？！、,.;!?]+", query) if len(k) >= 2]
-    scored = []
-    for doc, meta in zip(docs, metas):
-        score = sum(doc.count(k) for k in keys)
-        if score:
-            scored.append({"text": doc, "metadata": meta or {}, "distance": float(-score)})
-    scored.sort(key=lambda x: x["distance"])
-    return scored[:top_k]
+    """无向量能力时的兜底：对库内文档做关键词打分（实现见 `KeywordFallbackRetriever`）。"""
+    return _KEYWORD_FALLBACK.retrieve(query, top_k)
 
 
 # ---------------- 0.4.0：Query 路由 + 防幻觉 Prompt ----------------
