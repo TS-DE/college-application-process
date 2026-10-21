@@ -74,6 +74,9 @@ _POSITIVE_WORDS = ("想去", "想学", "喜欢", "偏好", "希望", "优先", "
 #: 规则：分句里出现「动词 + 省份」且无否定词 → 判为偏好。
 _POSITIVE_VERBS = ("去", "报", "上", "选", "在")
 
+#: 档位英文键 → 中文名（提示文案用，0.19.1）
+_TIER_LABELS = {"chong": "冲", "wen": "稳", "bao": "保"}
+
 
 class PlanInputError(ValueError):
     """规划入参不合法（省份/科类/分数），路由层转 400。"""
@@ -237,11 +240,25 @@ class PlanDraftBuilder:
             self._rank_fn = score_to_rank
         return self._rank_fn(score, province, category, year)
 
-    def _tiers(self, rank, province, category, year):
+    def _tiers(self, rank, province, category, year, prefer_provinces=None):
+        """调候选池查询；偏好省份透传到 SQL 层（0.19.1）。
+
+        注入的 `tiers_fn` 可能是只接受 4 个位置参数的桩函数（测试大量这么用），
+        因此带偏好时先试带参调用，`TypeError` 就退回旧签名——
+        偏好丢失比整条链路挂掉好（降级优先，里氏替换）。
+        """
         if self._tiers_fn is None:
             from app.services.recommend.recommend_service import calculate_tiers
 
             self._tiers_fn = calculate_tiers
+        prefer = [p for p in (prefer_provinces or []) if p]
+        if prefer:
+            try:
+                return self._tiers_fn(
+                    rank, province, category, year, prefer_provinces=prefer
+                )
+            except TypeError:
+                logger.info("[PLAN] 候选池查询不支持 prefer_provinces，退回旧签名")
         return self._tiers_fn(rank, province, category, year)
 
     def _enrich(self, tiers, province, category, year):
@@ -265,6 +282,7 @@ class PlanDraftBuilder:
         year: int = 2025,
         rank: Optional[int] = None,
         profile_context: str = "",
+        prefer_provinces: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """生成初稿。
 
@@ -301,8 +319,8 @@ class PlanDraftBuilder:
         if student_rank <= 0:
             raise PlanInputError(f"未在 {year} 年 {prov}{cat} 一分一段表中找到该分数")
 
-        # ② 位次 → 冲稳保（全量候选池）
-        pool = self._tiers(student_rank, prov, cat, year) or {}
+        # ② 位次 → 冲稳保（全量候选池）；偏好省份在 SQL 层就参与过滤（0.19.1）
+        pool = self._tiers(student_rank, prov, cat, year, prefer_provinces) or {}
         pool = {k: list(v) for k, v in pool.items()}
         if not any(pool.values()):
             raise PlanInputError(f"{prov}{cat} 位次 {student_rank} 附近暂无可推荐院校")
@@ -714,6 +732,8 @@ class PlanRefiner:
         limits = per_tier or self._per_tier
         pool_provinces: set = set()
         kept_provinces: set = set()
+        #: 每档实际保留的省份（用于「某一档没有偏好省份」的提示，0.19.1）
+        tier_provinces: Dict[str, set] = {"chong": set(), "wen": set(), "bao": set()}
 
         for tier in ("chong", "wen", "bao"):
             source = pool.get(tier) or draft.get(tier) or []
@@ -744,6 +764,7 @@ class PlanRefiner:
             if len(picked) < limit:
                 picked += rest[: limit - len(picked)]
             final[tier] = picked
+            tier_provinces[tier] = {str(i.get("school_province") or "") for i in picked}
 
         note = ""
         if has_pref:
@@ -753,19 +774,38 @@ class PlanRefiner:
                 blocked = [p for p in missing if p in pool_provinces]
                 parts: List[str] = []
                 if absent:
+                    # 0.19.1：必须点明「位次区间」。原文案「候选池中没有位于 XX 的院校」
+                    # 会让人误以为全国都没有该省院校，与事实不符。
                     parts.append(
-                        f"候选池中没有位于{'、'.join(absent)}的院校，可适当放宽位次范围"
+                        f"在你的位次区间内暂未找到位于{'、'.join(absent)}的院校，"
+                        f"可适当放宽位次范围或调整分数预期"
                     )
                 if blocked:
                     parts.append(
-                        f"候选池中的{'、'.join(blocked)}院校均被其他条件（学费/院校/方向）排除，"
-                        f"可适当放宽条件"
+                        f"在你的位次区间内，{'、'.join(blocked)}院校均被其他条件"
+                        f"（学费/院校/方向）排除，可适当放宽条件"
                     )
                 note = "；".join(parts) + "。已按其余条件为你生成方案。"
+
+        # 某一档没有、但别的档有 → 点明是「该档位的位次区间」缺（0.19.1）
+        tier_notes: List[str] = []
+        if has_pref:
+            for p in feedback.prefer_provinces:
+                if p not in kept_provinces:
+                    continue  # 整份方案都没有，上面已说明，不重复
+                lacking = [
+                    t for t in ("chong", "wen", "bao")
+                    if tier_provinces[t] and p not in tier_provinces[t]
+                ]
+                if lacking:
+                    names = "、".join(_TIER_LABELS[t] for t in lacking)
+                    tier_notes.append(f"{names}档在你的位次区间内暂未找到位于{p}的院校")
 
         if not note:
             added = sum(len(v) for v in final.values())
             note = f"已按你的偏好生成方案，共 {added} 条志愿。"
+        if tier_notes:
+            note = f"{note} {'；'.join(tier_notes)}。"
         return {"final_plan": final, "changes": changes, "note": note}
 
 

@@ -212,6 +212,11 @@ def build_plan_graph(
         """生成冲稳保初稿，并对偏好做**硬过滤**（不再清空偏好）。"""
         _t = time.time()
         info = state.get("user_info") or {}
+        intent_dict = state.get("intent") or {}
+        merged_intent = intent_dict.get("merged") or intent_dict
+        # 0.19.1：偏好省份透传给候选池查询，让它在 **SQL 层**就参与过滤。
+        # 否则候选池先被截断（旧上限 50），福建院校排在后面 → 方案里一条都没有。
+        prefer_provinces = list(merged_intent.get("prefer_provinces") or [])
         result = builder.build(
             province=str(info.get("province") or ""),
             category=str(info.get("category") or ""),
@@ -219,9 +224,9 @@ def build_plan_graph(
             year=int(info.get("year") or 2025),
             rank=int(info.get("rank") or 0) or None,
             profile_context=state.get("profile_context") or "",
+            prefer_provinces=prefer_provinces,
         )
 
-        intent_dict = state.get("intent") or {}
         draft = result["draft_plan"]
         note = ""
         try:
