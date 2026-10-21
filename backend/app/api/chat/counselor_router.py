@@ -12,11 +12,8 @@ from app.config import settings
 from app.database import get_db
 from app.api.account.auth_router import get_current_user
 from app.schemas.ai import CounselorIn, CounselorOut
-from app.services.llm.ai_executor import (
-    _load_profile_summary,
-    _reject_if_overloaded,
-    _run_ai,
-)
+from app.services.chat.chat_orchestrator import _load_profile_summary
+from app.services.llm.ai_executor import _reject_if_overloaded, _run_ai
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 

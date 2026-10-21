@@ -771,11 +771,20 @@ def route_strategy(query: str) -> str:
     return "standard"
 
 
-def answer_with_strategy(query: str, top_k: int = 3, strategy: str = "auto") -> Dict:
+def answer_with_strategy(
+    query: str,
+    top_k: int = 3,
+    strategy: str = "auto",
+    history_section: str = "",
+) -> Dict:
     """Modular RAG 主流程：按策略选择 Self-RAG / Corrective RAG / 标准 RAG。
 
     三条链路**共用**同一个检索入口 search()（内含检索前预处理 + 多路召回 + 精排 + 父块回填），
     差别只在"拿到上下文之后怎么生成、要不要反思/纠偏"。
+
+    0.17.1：`history_section` 由 `_generate` 闭包透传给 `generate_answer`，
+    因此 Self-RAG / Corrective RAG / 标准 RAG **三条链路自动生效**，无需各改一遍。
+    为空串时行为与 0.17.0 一致。
     """
     mode = strategy if strategy != "auto" else settings.ADVANCED_RAG_STRATEGY
     if mode == "auto":
@@ -785,7 +794,7 @@ def answer_with_strategy(query: str, top_k: int = 3, strategy: str = "auto") -> 
         return search(q, top_k=k)
 
     def _generate(q: str, context: str) -> str:
-        return generate_answer(q, context) or ""
+        return generate_answer(q, context, history_section=history_section) or ""
 
     if not settings.ADVANCED_RAG_ENABLED:
         mode = "standard"
@@ -1157,6 +1166,7 @@ def generate_answer(
     temperature: float = 0.1,
     top_p: float = 0.3,
     profile_context: str = "",
+    history_section: str = "",
 ) -> Optional[str]:
     """防幻觉生成：优先依据检索到的父块上下文回答，上下文中完全没有才拒答。
 
@@ -1165,6 +1175,10 @@ def generate_answer(
     - 返回 None 表示生成失败，由调用方降级（回退原 chat 逻辑或提示稍后重试）
     - 0.12.0：`profile_context` 非空时在规则前插入【考生画像】段落，
       要求模型结合画像给个性化建议，但**不得据此编造数字**。
+    - 0.17.1：`history_section` 非空时插到【用户问题】之前，
+      只用于消解「它 / 那个」等指代；**不并入【检索上下文】**，
+      因此不会成为事实来源（见 services/rag/prompt_utils.py 的说明）。
+      为空串时 Prompt 与 0.17.0 逐字一致。
     """
     from app.services.llm.ai_service import ask
 
@@ -1174,6 +1188,9 @@ def generate_answer(
         # 插到【回答规则】之前，让画像先于规则被模型读到
         anchor = "【回答规则】："
         prompt = prompt.replace(anchor, section + "\n" + anchor, 1)
+    if history_section:
+        # 插到【用户问题】之前：先看上文，再看问题，指代才有落点
+        prompt = prompt.replace("【用户问题】：", history_section + "【用户问题】：", 1)
     return ask(
         prompt,
         temperature=temperature,   # 低温度：减少自由发挥
@@ -1566,13 +1583,16 @@ def build_hybrid_prompt(
     vector_context: str,
     question: str,
     profile_context: str = "",
+    history_section: str = "",
 ) -> str:
     """拼接三路融合 Prompt（单一职责：只负责组装，不负责检索与生成）。
 
     priority_hint 由调用方根据三路命中情况动态生成，见 _build_hybrid_priority_hint()。
     0.12.0：新增 `profile_context`（用户画像），为空时 Prompt 与 0.11.x 完全一致。
+    0.17.1：新增 `history_section`（多轮上文），插到「用户提问」之前；
+            为空串时 Prompt 与 0.17.0 逐字一致。
     """
-    return HYBRID_FUSION_PROMPT.format(
+    prompt = HYBRID_FUSION_PROMPT.format(
         priority_hint=priority_hint,
         profile_section=build_profile_section(profile_context),
         graph_context=graph_context or "（无）",
@@ -1580,6 +1600,9 @@ def build_hybrid_prompt(
         vector_context=vector_context or "（无）",
         question=question,
     )
+    if history_section:
+        prompt = prompt.replace("用户提问：", history_section + "用户提问：", 1)
+    return prompt
 
 
 def _build_hybrid_priority_hint(graph_hit: bool, mysql_hit: bool, vector_hit: bool) -> str:
@@ -1599,7 +1622,12 @@ def _build_hybrid_priority_hint(graph_hit: bool, mysql_hit: bool, vector_hit: bo
     return "三路均未检索到相关信息，请返回预设拒答话术，禁止编造。"
 
 
-def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "") -> Dict:
+def answer_with_hybrid(
+    question: str,
+    top_k: int = 5,
+    profile_context: str = "",
+    history_section: str = "",
+) -> Dict:
     """三路融合问答主流程：图谱 + MySQL + 向量并行检索，按优先级分发。
 
     流程：
@@ -1772,6 +1800,7 @@ def answer_with_hybrid(question: str, top_k: int = 5, profile_context: str = "")
         vector_context=vector_text if vector_hit else "",
         question=question,
         profile_context=profile_context,
+        history_section=history_section,   # 0.17.1：多轮上文（仅消解指代）
     )
 
     from app.services.llm.ai_service import ask

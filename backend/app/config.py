@@ -144,6 +144,13 @@ class Settings:
     # 图谱是增强项，宁可快速失败回落到 MySQL/向量，也不要拖死整条链路。
     GRAPH_LLM_TIMEOUT: float = float(_env("GRAPH_LLM_TIMEOUT", "20"))
 
+    # ---------------- 0.17.1 多轮对话上下文 ----------------
+    # 历史只用于消解指代，不参与事实判定；两个上限同时约束 Prompt 体积。
+    # 4 轮 ≈ 4 次问答，足够覆盖「那学费呢」「这个学校呢」这类追问；
+    # 600 字是实测下来既够用、又不会把检索资料挤出上下文窗口的取值。
+    CHAT_HISTORY_MAX_TURNS: int = int(_env("CHAT_HISTORY_MAX_TURNS", "4"))
+    CHAT_HISTORY_MAX_CHARS: int = int(_env("CHAT_HISTORY_MAX_CHARS", "600"))
+
     # ---------------- 0.15.0 认证与 AI 线程隔离 ----------------
     # ★ 背景：修复「超时掉登录」。
     #   此前 /chat、/counselor 走 FastAPI 的 anyio 默认线程池（上限 40），
@@ -163,6 +170,11 @@ class Settings:
     # 超过该上限直接返回 503「AI 服务繁忙」，让用户立刻得到反馈而不是白等。
     # 取 2 的含义：允许「正在跑的一批 + 等一批」，再多就说明确实过载了。
     AI_MAX_INFLIGHT_FACTOR: int = int(_env("AI_MAX_INFLIGHT_FACTOR", "2"))
+    # 槽位最长持有时间（秒，0.17.1）。名额改由工作线程结束时归还后，
+    # 若线程因死循环/阻塞 IO 永久挂死，名额就永远收不回来。
+    # 超过该时长视为僵尸槽位，在下次准入检查时强制回收并告警。
+    # 取 600 秒：远大于最慢链路（Agent 约 200 秒），不会误杀正常任务。
+    AI_SLOT_MAX_HOLD_SECONDS: float = float(_env("AI_SLOT_MAX_HOLD_SECONDS", "600"))
 
     # ---------------- 0.13.0 本地 Agent（Function Calling） ----------------
     # 是否启用 Agent 模式（默认开启）。关闭后 /api/ai/chat 回落到 0.12.x 的三路融合，

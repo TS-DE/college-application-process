@@ -108,8 +108,10 @@ backend/
 │   ├── api/                      <span style="color:#888">// 0.17.0 入口层：按业务域分目录，只做参数校验与异常映射</span>
 │   │   ├── __init__.py           <span style="color:#888">// ALL_ROUTERS 汇总导出，main.py 一处注册（顺序与 0.16.0 一致）</span>
 │   │   ├── chat/                 <span style="color:#888">// 对话域（0.17.0 从 api/chat/chat_router.py 拆出）</span>
-│   │   │   ├── chat_router.py    <span style="color:#888">// /api/ai/chat、status、parse-intent、recommend-reason</span>
-│   │   │   └── counselor_router.py <span style="color:#888">// /api/ai/counselor（云端心理师，强制 Ali 不降级）</span>
+│   │   │   ├── chat_router.py    <span style="color:#888">// 0.17.1 精简：只留 /api/ai/chat（解析 → 读画像 → 调编排 → 转响应）</span>
+│   │   │   ├── counselor_router.py <span style="color:#888">// /api/ai/counselor（云端心理师，强制 Ali 不降级）</span>
+│   │   │   ├── status_router.py  <span style="color:#888">// 0.17.1：/api/ai/status + _model_name</span>
+│   │   │   └── intent_router.py  <span style="color:#888">// 0.17.1：/api/ai/parse-intent、/recommend-reason</span>
 │   │   ├── account/              <span style="color:#888">// 账号域</span>
 │   │   │   ├── auth_router.py    <span style="color:#888">// /api/auth/login|register|me，JWT 依赖 get_current_user / get_current_admin</span>
 │   │   │   └── profile_router.py <span style="color:#888">// /api/profile（读画像）、/basic、/domains、/survey/*、/report/*、/summary/rebuild</span>
@@ -143,6 +145,8 @@ backend/
 │   │   ├── knowledge/            <span style="color:#888">// 0.17.0 知识库分块与父块存储（从 rag_service 拆出，函数体未改）</span>
 │   │   │   ├── splitter.py       <span style="color:#888">// SEPARATORS + CHILD_CHUNK_* + split_text / split_child_text（递归分块，依赖缺失退化为定长）</span>
 │   │   │   └── parent_store.py   <span style="color:#888">// put_parents / get_parent / drop_parents_by_file（小块检索、大块生成）</span>
+│   │   ├── chat/                 <span style="color:#888">// 0.17.1 对话编排层（只编排，不写 Prompt 与 SQL）</span>
+│   │   │   └── chat_orchestrator.py <span style="color:#888">// 五层回落：意图路由 → 多模态 → 三路融合 → 进阶 RAG → 基础 RAG → 通用问答；run_chat / _load_profile_summary</span>
 │   │   ├── sql/                  <span style="color:#888">// 0.17.0 结构化查询</span>
 │   │   │   └── sql_query_engine.py <span style="color:#888">// 0.9.1 MySQLQueryEngine：按结构化条件查 MySQL（参数化查询，异常不抛）</span>
 │   │   ├── agent/                <span style="color:#888">// 0.13.0 本地 Agent 调度（Function Calling）+ 0.14.0 HITL 工作流</span>  <span style="color:#1976d2; background-color:#e3f2fd">🔷 Agent 核心</span>
@@ -423,9 +427,9 @@ GET  /api/meta/score-table       api/recommend/meta_router.py:184   → rank_ser
 GET  /api/score-to-rank          api/recommend/student_router.py:73 → rank_service.score_to_rank(...)                            :66
 GET  /api/rank-to-score          api/recommend/student_router.py:91 → rank_service.rank_to_score(...)                            :108
 POST /api/student/profile        api/recommend/student_router.py:45 → _ensure_rank(p) :24 → score_to_rank()  （档案仅存内存）
-POST /api/ai/parse-intent        api/chat/chat_router.py:34      → ai_service.parse_intent(text, province, use_llm=True)      :246
+POST /api/ai/parse-intent        api/chat/intent_router.py      → ai_service.parse_intent(text, province, use_llm=True)      :246
                                                           └─ 规则 _rule_parse_intent() :149 ← AI 失败时的兜底
-POST /api/ai/recommend-reason    api/chat/chat_router.py:44      → ai_service.recommend_reason(payload, {rank, score})         :398
+POST /api/ai/recommend-reason    api/chat/intent_router.py      → ai_service.recommend_reason(payload, {rank, score})         :398
 GET  /api/universities           api/recommend/university_router.py:36 → recommend_service._probability()（跨模块复用）           :204
 GET  /api/majors                 api/recommend/university_router.py:144 → recommend_service._plan_index()/_lookup_plan()          :38/:86
 GET  /api/stats/major-count-by-province  api/recommend/stats_router.py → 各省在豫招生专业数（首页地图数据源）
@@ -704,7 +708,7 @@ graph TD
 
 ```mermaid
 graph TD
-    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["api/chat/chat_router.py:_chat_sync()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat<br/>{question, use_rag:true, use_graph:true}"| B["services/chat/chat_orchestrator.py:run_chat()<br/>use_graph = payload.use_graph and settings.GRAPH_ENABLED"]
     B -->|"是"| C["rag_service.<b>answer_with_hybrid()</b><br/>0.9.1 三路融合"]
     B -->|"否（向后兼容）"| Z["rag_service.answer_with_strategy()<br/>0.8.0 纯向量链路，行为不变"]
 
@@ -795,7 +799,7 @@ python -m app.services.graph.graph_builder --year 2025 --batch 本科批
 
 ```mermaid
 graph TD
-    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat"| B["api/chat/chat_router.py:_chat_sync()"]
+    A["student/AiChat.vue<br/>发送问题"] -->|"POST /api/ai/chat"| B["services/chat/chat_orchestrator.py:run_chat()"]
     B --> C{"rag_service.should_use_multimodal()<br/>命中「图/课程/培养方案/校园」等关键词？"}
     C -->|"未命中"| Z["回落 0.9.1 三路融合<br/>图谱 + MySQL + 向量"]
     C -->|"命中"| D["rag_service.answer_with_multimodal()"]
@@ -1129,7 +1133,7 @@ graph TD
 | GET | `/api/health` | 服务 + DB + Ollama + RAG 状态 | 公开 | 运维自检 |
 | GET | `/api/ai/status` | AI 开关与 Ollama 健康 | 公开 | `api/ai.ts:aiStatus()`（预留） |
 | POST | `/api/ai/counselor` | **云端心理师（0.13.0）** 多轮谈心 / 疏导 / 画像采集。强制 Ali 通道、不降级本地；注入 `summary_text`；响应 `{answer, model, elapsed_ms, profile_injected}` | 需登录 | `Counselor.vue:send()` → `counselorChat()` |
-| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**；**0.15.0 起走 AI 专用线程池，与认证接口隔离**；**0.15.1 起在途超限返回 503「AI 服务繁忙」**) | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
+| POST | `/api/ai/chat` | **志愿问答**（`use_rag=true` 走完整 RAG 链路；0.9.1 起 `use_graph=true` 走三路融合，响应新增 `graph_hit/mysql_hit/vector_hit/fusion_strategy/graph_cypher`；0.10.0 起命中多模态关键词则走以文搜图，响应新增 `image_hit/images`；**0.12.0 起强制登录，并把 `user_profiles.summary_text` 注入 Prompt，响应新增 `profile_injected`**；**0.15.0 起走 AI 专用线程池，与认证接口隔离**；**0.15.1 起在途超限返回 503「AI 服务繁忙」**；**0.17.1 起请求体可带 `history`（最近 N 轮，仅用于消解「那/这个」等指代，不参与事实判定），响应新增 `history_used`**) | 需登录 | `AiChat.vue:send()` → `api/ai.ts:chat()` |
 | POST | `/api/ai/parse-intent` | 自然语言 → 筛选条件（0.15.1 起走 AI 专用线程池） | 需登录 | `api/ai.ts:parseIntent()`（预留） |
 | POST | `/api/ai/recommend-reason` | 单条志愿推荐理由 | 需登录 | 预留（批量走 `/recommend` 的 `with_ai`） |
 | POST | `/api/recommend` | **冲稳保推荐主链路**（0.11.0 起走全国总表引擎，响应新增 `rank` / `tiers`；省份+科类非法返回 400） | 公开 | `Volunteer.vue:onRecommend()` → `recommendApi()` |
@@ -1243,6 +1247,11 @@ PLAN_LLM_ALWAYS=0       # 1=每次反馈都过模型（慢，演示用）
 PLAN_LLM_TIMEOUT=20     # 反馈解析超时 → 用规则结果
 PLAN_DRAFT_PER_TIER=8   # 初稿每档条数
 PLAN_FINAL_PER_TIER=8   # 终稿每档条数
+
+# 0.17.1 多轮上下文（历史只用于消解指代，不参与事实判定）
+CHAT_HISTORY_MAX_TURNS=4    # 最多带几轮历史（一轮≈1问1答）
+CHAT_HISTORY_MAX_CHARS=600  # 历史总字符上限，超出从最早开始丢
+AI_SLOT_MAX_HOLD_SECONDS=600  # 线程池槽位最长持有时间，超时视为僵尸并回收
 
 # 0.15.0 认证与 AI 线程池隔离（修复「超时掉登录」）
 AUTH_TIMEOUT_SECONDS=30        # 认证接口超时预算（前端 axios 同为 30s）
