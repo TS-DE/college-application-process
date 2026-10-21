@@ -68,8 +68,140 @@
 | **0.15.1** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **401 同步登出 / 公开页不阻塞 / AI 过载保护** | 同上（补齐 0.15.0 遗留三处缺陷） | ✅ 已发布 |
 | **0.16.0** | 2026-10-20 | 父子块（不变） | Agent（不变）+ **聊天记录会话级持久化**（Pinia store + sessionStorage + 账号隔离） | 同上（新增会话缓存能力） | ✅ 已发布 |
 | **0.17.0** | 2026-10-20 | 父子块（不变） | **目录与模块化重构（无行为变更）**：routers→api 分域、services 按域分组、测试归 tests/ | 同上（接口清单 57 条逐条一致） | ✅ 已发布 |
-| **0.17.1** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **多轮上下文透传** / chat_router 拆分 / 线程池名额修正 | 同上（接口清单 57 条零差异） | ✅ 本次发布 |
+| **0.17.1** | 2026-10-21 | 父子块（不变） | Agent（不变）+ **多轮上下文透传** / chat_router 拆分 / 线程池名额修正 | 同上（接口清单 57 条零差异） | ✅ 已发布 |
+| **0.18.0** | 2026-10-21 | 父子块（不变） | **RAG 检索三段模块化（无行为变更）**：叶子组件拆为独立类，两套重复实现收敛为一套 | 同上（57 接口零差异、8 问题集合级一致） | ✅ 本次发布 |
 | **1.0.0** | 计划中 | 父子块 + 语义/标题感知切分 | 并行召回 + CrossEncoder 精排 + Text-to-SQL + Level 3 串行筛选 | 父块（经重排筛选） | 🔜 计划 |
+
+---
+
+## [0.18.0] - 2026-10-21 · RAG 检索三段模块化（**无行为变更**）
+
+### 一、原有缺陷
+
+| # | 问题 | 后果 |
+|---|---|---|
+| 1 | `rag_service.py` **1936 行**混装「存储 / 检索 / 精排 / 生成 / 路由 / Prompt」 | 改一个检索细节要滚过上千行；无法单测叶子逻辑 |
+| 2 | **两套重复的检索实现** | `HybridRetrieval`（Chroma 侧，用 `index` 为键）与 `retrieval.py` 的 `DenseChannel/BM25Channel/HybridSearch`（内存侧，用 `doc_id` 为键）做同一件事 |
+| 3 | **RRF 公式写了两遍** | `HybridRetrieval.rrf()` 与 `_rrf_fuse()`；改 bug 要改两处，漏一处就产生口径不一 |
+| 4 | **BM25 小语料降级写了两遍** | `_token_overlap_search()` 与 `BM25Channel.search` 内联版 |
+| 5 | `answer_with_graph` **定义了两次** | 后者覆盖前者，前 118 行永不执行（死代码） |
+
+### 二、改进技术与方案
+
+按「存储 / 检索前 / 检索中 / 检索后」四层拆为独立类，**编排函数原地不动**。
+
+#### 1. 关键约束：测试在 patch 模块级属性，不能把状态藏进对象
+
+既有测试大量这样写：
+
+```python
+rag_service._collection = None            # 强制重建集合
+rag_service._collection_dim_cache = None  # 清维度缓存
+rag_service._client.delete_collection(...)
+rag_service.search = lambda *a, **k: []   # 让向量路为空
+rag_service._graph_engine = False
+rag_service.rag_service_extract_sql_filters = lambda q: None
+```
+
+因此 `VectorStore` 的四个状态键**注入 `globals()`**（可变映射，rad_service 传自己的模块命名空间），
+测试改模块变量 == 改存储状态。其余 patch 点（`search` / `_graph_engine` /
+`rag_service_extract_sql_filters`）所在的编排函数一律不搬，只搬叶子。
+
+#### 2. 一套实现 + 两个薄适配器（消除重复）
+
+`DenseRetriever` / `BM25Retriever` / `RrfFusion` 是**唯一实现**；
+两套历史契约用 20 行适配器满足：
+
+| 适配器 | 对外契约 | 内部复用 |
+|---|---|---|
+| `DenseChannel` / `BM25Channel` / `HybridSearch` | `{doc_id, score, text, channel, full_doc}`（MultiRecall 的通道） | 上述内核 |
+| `HybridRetriever` | `{text, metadata, distance, rrf_score, dense_rank, bm25_rank}`（search 链路） | 上述内核 |
+
+`RrfFusion.accumulate()` 把「按什么键累加」做成参数（`key="index"` / `"doc_id"`），
+于是两条调用链共用同一段 `1/(k+rank)` 数学。
+
+#### 3. 目录结构
+
+```
+app/services/rag/
+├── constants.py                 RRF_K / MAX_SUB_QUERY_LEN / DEFAULT_TOP_K / DEFAULT_CANDIDATE_N
+├── storage/vector_store.py      VectorStore（集合生命周期 + 维度缓存）
+├── retrieval/                   base / dense / bm25 / fusion / hybrid / multi_recall / keyword_fallback
+├── postprocess/                 base / 三个 Reranker / reranker_factory / parent_expander
+├── preprocess/                  base / rewriter / expander / decomposer / preprocessor
+├── rag_service.py               编排层（search / _recall / answer_with_* / route_query / generate_answer）
+├── retrieval.py                 **已删除**（与 retrieval/ 包同名冲突，兼容导出并入包 __init__）
+├── reranker.py                  兼容外壳（re-export）
+└── query_rewrite.py             兼容外壳（re-export，QueryExpander = StepBackExpander）
+```
+
+### 三、对应代码位置（新旧映射表）
+
+| 原位置 | 新位置 |
+|---|---|
+| `rag_service.RRF_K` / `MAX_SUB_QUERY_LEN` | `constants.py` 同名常量（数值未改） |
+| `rag_service._get_collection` / `collection` / `backend_info` / `_collection_dimension` | `storage/vector_store.py:VectorStore` |
+| `rag_service.HybridRetrieval`（整类 219 行） | `retrieval/hybrid.py:HybridRetriever`（`rag_service` 里保留 `HybridRetrieval` 别名） |
+| `rag_service._keyword_fallback` | `retrieval/keyword_fallback.py:KeywordFallbackRetriever` |
+| `rag_service._expand_to_parents` | `postprocess/parent_expander.py:ParentExpander` |
+| `retrieval.DenseChannel` | `retrieval/dense.py:DenseRetriever` + `DenseChannel`（适配器） |
+| `retrieval.BM25Channel` | `retrieval/bm25.py:BM25Retriever` + `BM25Channel`（适配器） |
+| `retrieval.HybridSearch` | `retrieval/hybrid.py:HybridSearch` |
+| `retrieval.MultiRecall` | `retrieval/multi_recall.py:MultiRecallRetriever`（别名 `MultiRecall`） |
+| `retrieval._rrf_fuse` | `retrieval/fusion.py:RrfFusion.fuse` |
+| `retrieval.ProjectEmbedding` / `get_embedding_model` / `_cosine_matrix` | `retrieval/dense.py` 同名 |
+| `reranker.{BaseReranker,CrossEncoderReranker,EmbeddingReranker,NoopReranker,Reranker}` | `postprocess/*`（`reranker.py` re-export） |
+| `query_rewrite.{QueryRewriter,QueryExpander,QueryDecomposer,QueryPreprocessor,QueryBundle}` | `preprocess/*`（`query_rewrite.py` re-export，`QueryExpander = StepBackExpander`） |
+| `rag_service.answer_with_graph`（第一份，被覆盖） | **删除**（118 行死代码） |
+
+**行数变化**：`rag_service.py` 1936 → 1600（−336）；`retrieval.py` 325 行文件删除，
+内容以 re-export + 实现进入 `retrieval/` 包（共 7 个模块）。
+
+### 四、验证流程与实测结果
+
+#### 1. OpenAPI 全量对比（worktree 检出 v0.17.1）
+
+```
+旧 57 条，新 57 条；只在旧 0 / 只在新 0 / 响应模型差异 0
+```
+
+#### 2. 8 个问题检索一致性
+
+```
+对照组（同一版本连跑两次）：6/8 一致     ← 环境固有抖动
+实验组（v0.17.1 vs v0.18.0）：7/8 一致   ← 优于对照组
+```
+
+> **口径说明**：`chromadb` 的 HNSW 近似检索**跨进程打开存在同分/近邻抖动**，
+> 实测同一版本连续两次运行也只有 6/8 完全一致，因此「逐条顺序完全相同」不是有效不变量。
+> 改用与顺序无关的口径：`strategy` + 命中条数 + 「来源文件 + 正文前 30 字」集合。
+> 实验组一致率（7/8）高于对照组（6/8），说明重构未引入系统性差异。
+
+#### 3. 测试
+
+- `tests/` 下 **22 个脚本全部通过**（21 + 新增 patch 点用例）；
+- 新增 `tests/rag/test_rag_refactor_patchpoints.py`，**8 项全 PASS**：
+  - a) `_collection = None` → 集合真的重建（对象换新 + 可用）
+  - b) `search = lambda []` → `answer_with_hybrid` 的 `vector_hit=False`、sources 为空
+  - c) `_graph_engine = False` → `_get_graph_engine()` 返回 None、`graph_hit=False`
+  - d) `rag_service_extract_sql_filters = lambda None` → `mysql_hit=False`
+
+#### 4. 去重检查
+
+```
+grep "1.0 / (k + rank)"     → 仅 retrieval/fusion.py 一处
+grep "class HybridRetrieval" → 0（rag_service 里是别名）
+grep "class HybridSearch"    → 1（retrieval/hybrid.py）
+```
+
+### 五、已知限制 / 与任务书的偏差
+
+| 项 | 说明 |
+|---|---|
+| **未达到 <1200 行** | 任务书按「1907 行里塞着全部叶子」估算，但 `reranker.py` / `query_rewrite.py` / `retrieval.py` 自 0.17.0 起就是**独立文件**，不属于 rag_service 的行数。本次从 rag_service 搬走约 300 行 + 删 118 行死代码，落在 1600 行。再往下需搬 `answer_with_hybrid`（208 行）与 Prompt 构造，而任务明确要求「0.19.0 再搬」 |
+| `answer_with_graph` 第二份 | 保留生效的那份（文件末尾），删除被覆盖的那份 |
+| Chroma 抖动 | 见上，8 问题对比已用顺序无关口径 |
+| `retrieval.py` 被删除 | 文件与包同名时 Python 优先取包，文件会变成不可达死文件；兼容导出已并入 `retrieval/__init__.py` |
 
 ---
 

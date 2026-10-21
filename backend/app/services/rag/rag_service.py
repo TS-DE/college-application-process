@@ -40,8 +40,18 @@ from app.services.llm import llm_client
 
 logger = logging.getLogger(__name__)
 
-# RRF 融合常数：k=60（消除前几名排名的剧烈波动，见 HybridRetrieval.rrf 注释）
-RRF_K = 60
+# 0.18.0：RRF 常数与子查询长度上限收敛到 `constants.py`（唯一来源），
+# 此处 re-import 保持 `rag_service.RRF_K` / `rag_service.MAX_SUB_QUERY_LEN` 可用。
+from app.services.rag.constants import (  # noqa: F401,E402
+    DEFAULT_CANDIDATE_N,
+    DEFAULT_TOP_K,
+    MAX_SUB_QUERY_LEN,
+    RRF_K,
+)
+from app.services.rag.storage.vector_store import VectorStore  # noqa: E402
+from app.services.rag.retrieval.hybrid import HybridRetriever  # noqa: E402
+from app.services.rag.retrieval.keyword_fallback import KeywordFallbackRetriever  # noqa: E402
+from app.services.rag.postprocess.parent_expander import ParentExpander  # noqa: E402
 
 # 父子块参数与 docstore 常量已迁移到 services/knowledge/（0.17.0）
 
@@ -64,96 +74,45 @@ MULTI_QUERY_PROMPT = """你是一个高考志愿填报系统的查询改写专�
 
 【JSON输出】："""
 
-# 子查询长度上限：Prompt 要求 ≤20 字，但小模型常写到 22-25 字，
-# 解析时放宽到 30 字，超过的丢弃（避免把整段问题当子查询用）
-MAX_SUB_QUERY_LEN = 30
+# 子查询长度上限见 `constants.MAX_SUB_QUERY_LEN`（0.18.0 收敛）
 
 # ---------------- Chroma 客户端（延迟初始化，避免导入即失败） ----------------
-
+#
+# 0.18.0：实现搬到 `storage/vector_store.py`，此处只保留薄封装。
+# 下面四个模块级变量仍是**唯一状态来源**：`VectorStore(globals())` 直接读写它们，
+# 因此测试里 `rag_service._collection = None` / `_collection_dim_cache = None`
+# 这类 patch 依旧立即生效（下一次 collection() 会重建集合）。
 _client = None
 _collection = None
 _chroma_error: Optional[str] = None
+_collection_dim_cache: Optional[int] = None
+
+_STORE = VectorStore(globals())
+_KEYWORD_FALLBACK = KeywordFallbackRetriever(_STORE)
+_PARENT_EXPANDER = ParentExpander()
 
 
 def _get_collection():
     """获取（或创建）持久化集合。"""
-    global _client, _collection, _chroma_error
-    if _collection is not None:
-        return _collection
-    try:
-        import chromadb
-
-        os.makedirs(settings.CHROMA_DB_PATH, exist_ok=True)
-        _client = chromadb.PersistentClient(path=settings.CHROMA_DB_PATH)
-        _collection = _client.get_or_create_collection(name=settings.CHROMA_COLLECTION)
-        return _collection
-    except Exception as exc:  # noqa: BLE001
-        _chroma_error = str(exc)
-        return None
+    return _STORE.get_collection()
 
 
 def collection():
     """供路由层直接操作（如按 file_id 删除向量）。"""
-    return _get_collection()
+    return _STORE.collection()
 
 
 def backend_info() -> dict:
-    col = _get_collection()
-    return {
-        "vector_store": "chroma",
-        "persist_path": settings.CHROMA_DB_PATH,
-        "collection": settings.CHROMA_COLLECTION,
-        "embedding_model": settings.ALI_EMBED_MODEL if llm_client.get_api_key() else settings.OLLAMA_EMBED_MODEL,
-        "embedding_provider": llm_client.get_api_key() and "ali" or "ollama",
-        "llm_provider": llm_client.get_api_key() and "ali(openai-compatible)" or "ollama",
-        "llm_model": settings.ALI_LLM_MODEL if llm_client.get_api_key() else settings.OLLAMA_FALLBACK_MODEL,
-        "ready": col is not None,
-        "error": _chroma_error,
-        "count": (col.count() if col else 0),
-    }
+    """向量库与模型通道状态（实现见 `VectorStore.backend_info`）。"""
+    return _STORE.backend_info()
 
 
 # ---------------- Embedding ----------------
 
-_collection_dim_cache: Optional[int] = None
-
 
 def _collection_dimension() -> Optional[int]:
-    """读取集合被 pin 住的向量维度（结果缓存一次，避免每次都查库）。
-
-    用途：写入/查询前把 Ali embedding 的维度对齐到集合，
-    否则 text-embedding-v3 默认 128 维会与历史 768 维数据冲突，Chroma 直接拒绝写入。
-
-    取值顺序（★ 顺序是关键，0.9.1 修复的 bug 就出在这里）：
-      ① `col._model.dimension`：Chroma 1.x 会把集合维度 pin 在集合元数据里，
-         **即使集合被删空也依然保留 768**。
-         旧实现只读「第一条向量的长度」，文件全部删除后读不到 → 回落到
-         `ALI_EMBED_DIMENSION`(128) → 上传时报
-         "Collection expecting embedding with dimension of 768, got 128"。
-      ② 第一条向量的长度：兼容不暴露 `_model` 的旧版 chromadb；
-      ③ None：由调用方回落到 `ALI_EMBED_DIMENSION`（仅全新集合时才是对的）。
-    """
-    global _collection_dim_cache
-    if _collection_dim_cache is not None:
-        return _collection_dim_cache
-    dim: Optional[int] = None
-    try:
-        col = _get_collection()
-        if col is not None:
-            # ① 集合 pin 住的维度（删空后依然有效，优先用它）
-            pinned = getattr(getattr(col, "_model", None), "dimension", None)
-            if isinstance(pinned, int) and pinned > 0:
-                dim = pinned
-            # ② 退化方案：读第一条向量的长度
-            if dim is None:
-                data = col.get(include=["embeddings"], limit=1)
-                emb = (data or {}).get("embeddings")
-                if emb is not None and len(emb) and emb[0] is not None:
-                    dim = len(emb[0])
-    except Exception:  # noqa: BLE001 查不到就按配置走
-        dim = None
-    _collection_dim_cache = dim
-    return _collection_dim_cache
+    """集合被 pin 住的向量维度（实现与取值顺序见 `VectorStore.collection_dimension`）。"""
+    return _STORE.collection_dimension()
 
 
 def get_embedding(text: str) -> Optional[List[float]]:
@@ -288,260 +247,13 @@ def delete_by_file(file_id: int) -> bool:
 
 
 def _expand_to_parents(hits: List[Dict]) -> List[Dict]:
-    """子块命中 → 回填父块（"小块命中、大块生成"）。
-
-    - 命中子块的 metadata 里有 parent_chunk_id，据此从 docstore 取回父块原文
-    - 取回成功：把 text 换成父块（上下文更完整），并标记 context_level="parent"
-    - **降级**：父块缺失 / 取回异常时，直接返回子块，标记 context_level="child"，链路不中断
-    - 多个子块指向同一父块时按父块去重，保留得分最高的那个
-    """
-    expanded: List[Dict] = []
-    seen_parents: set = set()
-
-    for h in hits:
-        meta = h.get("metadata") or {}
-        parent_id = meta.get("parent_chunk_id")
-        parent = get_parent(parent_id)
-
-        if parent and parent.get("text"):
-            if parent_id in seen_parents:
-                continue  # 同一父块的多个子块只保留一次
-            seen_parents.add(parent_id)
-            expanded.append({
-                **h,
-                "text": parent["text"],           # 用父块原文替换子块，交给 LLM
-                "metadata": {**meta, "chunk_index": meta.get("chunk_index")},
-                "parent_chunk_id": parent_id,
-                "context_level": "parent",
-            })
-        else:
-            # 降级：docstore 没有该父块（旧数据 / 文件被清），直接返回子块
-            expanded.append({
-                **h,
-                "parent_chunk_id": parent_id,
-                "context_level": "child",
-            })
-
-    return expanded
+    """子块命中 → 回填父块（实现与降级规则见 `ParentExpander`）。"""
+    return _PARENT_EXPANDER.expand(hits)
 
 
-class HybridRetrieval:
-    """混合检索器：稠密向量（Chroma）+ 稀疏关键词（BM25）→ RRF 融合。
-
-    对应《混合检索》文档「代码三：封装成类」的结构：
-        dense_search()  ≈ bgeChou()   稠密路召回（本项目用 Chroma 自带 ANN 检索）
-        bm25_search()   ≈ bm25Xi()    稀疏路召回（rank_bm25 + jieba 中文分词）
-        rrf()           ≈ rrf()       倒数排名融合
-        search()        ≈ get_rrf()   对外统一入口
-    """
-
-    def __init__(self, collection, k: int = 60, top_k: int = 5, candidate_n: int = 20):
-        self.collection = collection
-        self.k = k                    # RRF 常数，固定 60
-        self.top_k = top_k            # 最终返回条数
-        self.candidate_n = candidate_n  # 每一路各自召回的候选数量
-        self._corpus: Optional[list] = None      # [(chunk_id, text, metadata)]
-        self._bm25 = None                        # BM25Okapi 索引（按语料缓存）
-        self._corpus_count = -1                  # 语料快照对应的 collection.count()
-
-    # ========== 1. 语料 & BM25 索引 ==========
-
-    def _load_corpus(self) -> list:
-        """从 Chroma 取出全部文本构建 BM25 语料（按 count 变化做失效判断）。
-
-        说明：BM25 需要"分词后的文本序列"，必须拿到原文；
-        当前知识库规模（千级 chunk）全量取回可接受，
-        若后续到十万级可改为「BM25 索引持久化 + 增量更新」。
-        """
-        count = self.collection.count()
-        if self._corpus is not None and count == self._corpus_count:
-            return self._corpus
-
-        data = self.collection.get(include=["documents", "metadatas"])
-        ids = data.get("ids") or []
-        docs = data.get("documents") or []
-        metas = data.get("metadatas") or []
-        self._corpus = [
-            {"id": i, "text": d or "", "metadata": m or {}}
-            for i, d, m in zip(ids, docs, metas)
-        ]
-        self._corpus_count = count
-        self._bm25 = self._build_bm25([c["text"] for c in self._corpus])
-        return self._corpus
-
-    @staticmethod
-    def _build_bm25(documents: List[str]):
-        """构建 BM25Okapi 稀疏索引（中文用 jieba 分词）。"""
-        try:
-            from rank_bm25 import BM25Okapi
-            import jieba
-
-            tokenized = [list(jieba.cut(doc)) for doc in documents]
-            return BM25Okapi(tokenized) if tokenized else None
-        except Exception:  # noqa: BLE001  bm25 / jieba 缺失时关闭稀疏路
-            return None
-
-    # ========== 2. 稠密向量检索（Chroma 自带 ANN） ==========
-
-    def dense_search(self, query: str) -> List[Dict]:
-        """稠密路：Chroma 向量检索，返回 [{index, distance}]（按相似度降序）。"""
-        vec = get_embedding(query)
-        if vec is None:
-            return []
-        try:
-            res = self.collection.query(
-                query_embeddings=[vec],
-                n_results=min(self.candidate_n, max(1, self.collection.count())),
-                include=["documents", "metadatas", "distances"],
-            )
-        except Exception:  # noqa: BLE001
-            return []
-
-        corpus = self._load_corpus()
-        id_to_idx = {c["id"]: i for i, c in enumerate(corpus)}
-        hits = []
-        for cid, dist in zip((res.get("ids") or [[]])[0], (res.get("distances") or [[]])[0]):
-            if cid in id_to_idx:
-                hits.append({"index": id_to_idx[cid], "distance": dist})
-        return hits  # Chroma 已按距离升序返回，即相似度降序
-
-    # ========== 3. 稀疏关键词检索（BM25） ==========
-
-    def bm25_search(self, query: str) -> List[Dict]:
-        """稀疏路：BM25 关键词检索，返回 [{index, score}]（按得分降序）。"""
-        corpus = self._load_corpus()
-        if not corpus or self._bm25 is None:
-            return []
-        try:
-            import jieba
-
-            scores = self._bm25.get_scores(list(jieba.cut(query)))
-        except Exception:  # noqa: BLE001
-            return []
-
-        ranked = sorted(range(len(corpus)), key=lambda i: scores[i], reverse=True)
-        hits = [
-            {"index": i, "score": float(scores[i])}
-            for i in ranked[: self.candidate_n]
-            if scores[i] > 0
-        ]
-        if hits:
-            return hits
-
-        # 小语料兜底：rank_bm25 的 IDF 公式为 log((N-df+0.5)/(df+0.5))，
-        # 语料很小时 N≈df，IDF 会变成 0 甚至负数，导致所有分数 <= 0。
-        # 这时退化为「查询词命中计数」的稀疏打分，保证稀疏路仍然有效。
-        return self._token_overlap_search(query, corpus)
-
-    @staticmethod
-    def _token_overlap_search(query: str, corpus: list) -> List[Dict]:
-        """稀疏路兜底：按「查询词在文档中出现的次数」打分（BM25 分数全 ≤ 0 时使用）。"""
-        try:
-            import jieba
-
-            tokens = [t for t in jieba.cut(query) if len(t) >= 2]
-        except Exception:  # noqa: BLE001
-            tokens = [query]
-        tokens = tokens or [query]
-
-        scored = []
-        for i, c in enumerate(corpus):
-            score = sum(c["text"].count(t) for t in tokens)
-            if score:
-                scored.append({"index": i, "score": float(score)})
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored
-
-    # ========== 4. RRF 融合 ==========
-
-    def rrf(self, dense_ranking: List[Dict], bm25_ranking: List[Dict]):
-        """倒数排名融合（Reciprocal Rank Fusion）。
-
-        公式：score(doc) = Σ 1 / (k + rank_i)
-          - k = 60：常数，用来"压平"前几名的分数差。
-            没有 k 时 rank=1 得 1.0、rank=2 得 0.5，第一名权重过大；
-            加了 60 之后 rank=1 → 1/61、rank=2 → 1/62，差距被平滑，
-            让"两路都还行"的文档能压过"一路第一、另一路垫底"的文档。
-          - rank_i：该文档在第 i 路检索结果里的名次（从 1 开始）
-          - 用排名而不是分数：稠密距离与 BM25 得分量纲不同，无法直接加权平均，
-            换成排名后无需归一化即可融合。
-
-        示例（文档 A：稠密第 2、BM25 第 5）：
-            score = 1/(60+2) + 1/(60+5) = 0.01613 + 0.01538 = 0.03151
-        示例（文档 B：稠密第 1、BM25 第 20）：
-            score = 1/(60+1) + 1/(60+20) = 0.01639 + 0.01250 = 0.02889
-        → A > B：单路第一但另一路很差的 B 会被拉低。
-        """
-        # 第 1 步：把两路结果转成 {文档下标: 名次}（名次从 1 开始）
-        dense_ranks = {h["index"]: rank for rank, h in enumerate(dense_ranking, start=1)}
-        bm25_ranks = {h["index"]: rank for rank, h in enumerate(bm25_ranking, start=1)}
-
-        # 第 2 步：候选池 = 两路召回的并集（去重）
-        candidate_ids = list(dict.fromkeys([h["index"] for h in dense_ranking] + [h["index"] for h in bm25_ranking]))
-
-        # 第 3 步：逐文档累加 1/(k+rank)
-        rrf_scores: Dict[int, float] = {}
-        for idx in candidate_ids:
-            score = 0.0
-            if idx in dense_ranks:
-                score += 1.0 / (self.k + dense_ranks[idx])   # 稠密路贡献
-            if idx in bm25_ranks:
-                score += 1.0 / (self.k + bm25_ranks[idx])    # 稀疏路贡献
-            rrf_scores[idx] = score
-
-        # 第 4 步：按 RRF 分数降序，得到最终排名
-        final_ranking = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        return final_ranking, dense_ranks, bm25_ranks
-
-    # ========== 5. 对外入口 ==========
-
-    def search(self, query: str, top_k: int | None = None) -> List[Dict]:
-        """混合检索主流程：两路召回 → RRF 融合 → Top-K。"""
-        top_k = top_k or self.top_k
-        corpus = self._load_corpus()
-        if not corpus:
-            return []
-
-        dense_hits = self.dense_search(query)
-        bm25_hits = self.bm25_search(query)
-
-        # 单路失效时自动退化：只有稠密 → 纯向量检索；只有 BM25 → 关键词检索
-        if not dense_hits and not bm25_hits:
-            return []
-        if not bm25_hits:
-            return [self._to_hit(corpus, h["index"], h.get("distance"), dense_rank=i + 1)
-                    for i, h in enumerate(dense_hits[:top_k])]
-        if not dense_hits:
-            return [self._to_hit(corpus, h["index"], None, bm25_rank=i + 1)
-                    for i, h in enumerate(bm25_hits[:top_k])]
-
-        final_ranking, dense_ranks, bm25_ranks = self.rrf(dense_hits, bm25_hits)
-
-        dist_map = {h["index"]: h.get("distance") for h in dense_hits}
-        return [
-            self._to_hit(
-                corpus,
-                idx,
-                dist_map.get(idx),
-                rrf_score=score,
-                dense_rank=dense_ranks.get(idx),
-                bm25_rank=bm25_ranks.get(idx),
-            )
-            for idx, score in final_ranking[:top_k]
-        ]
-
-    @staticmethod
-    def _to_hit(corpus: list, index: int, distance, rrf_score=None, dense_rank=None, bm25_rank=None) -> Dict:
-        c = corpus[index]
-        return {
-            "text": c["text"],
-            "metadata": c["metadata"],
-            "distance": distance,
-            # 便于排查与对比（纯向量检索时后三项为 None）
-            "rrf_score": rrf_score,
-            "dense_rank": dense_rank,
-            "bm25_rank": bm25_rank,
-        }
+# 0.18.0：混合检索实现搬到 `retrieval/hybrid.py`，此处保留旧类名做别名，
+# 因此 `HybridRetrieval(col).search(...)`、`retriever.dense_search(...)` 等调用不受影响。
+HybridRetrieval = HybridRetriever
 
 
 def decompose_query(query: str, max_queries: int = 0) -> List[str]:
@@ -686,7 +398,13 @@ def build_multi_recall(docs: Optional[List[Dict]] = None, embeddings: Optional[L
       - hybrid：把「混合检索」当作一个复合通道（weight=1.0）
     docs 为空时自动从 Chroma 载入子块语料。
     """
-    from app.services.rag.retrieval import BM25Channel, DenseChannel, HybridSearch, MultiRecall
+    # 0.18.0：从新模块直接导入（`retrieval.py` 已降为 re-export 兼容层）
+    from app.services.rag.retrieval.bm25 import BM25Channel
+    from app.services.rag.retrieval.dense import DenseChannel
+    from app.services.rag.retrieval.hybrid import HybridSearch
+    from app.services.rag.retrieval.multi_recall import MultiRecallRetriever
+
+    MultiRecall = MultiRecallRetriever
 
     if docs is None:
         docs, embeddings = _load_corpus_docs()
@@ -867,7 +585,7 @@ def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dic
     preprocess_info: Dict = {"enabled": False, "source": "raw", "queries": [query]}
     if settings.MULTI_QUERY_ENABLED:
         try:
-            from app.services.rag.query_rewrite import QueryPreprocessor
+            from app.services.rag.preprocess.preprocessor import QueryPreprocessor
 
             preprocessor = QueryPreprocessor(
                 use_rewrite=settings.QUERY_REWRITE_ENABLED,
@@ -958,24 +676,8 @@ def _hit_from_channel(hit: Dict) -> Dict:
 
 
 def _keyword_fallback(query: str, top_k: int) -> List[Dict]:
-    """无向量能力时的兜底：对库内文档做关键词打分。"""
-    col = _get_collection()
-    if col is None:
-        return []
-    try:
-        data = col.get(include=["documents", "metadatas"])
-    except Exception:  # noqa: BLE001
-        return []
-    docs = data.get("documents") or []
-    metas = data.get("metadatas") or []
-    keys = [k for k in re.split(r"[\s，。？！、,.;!?]+", query) if len(k) >= 2]
-    scored = []
-    for doc, meta in zip(docs, metas):
-        score = sum(doc.count(k) for k in keys)
-        if score:
-            scored.append({"text": doc, "metadata": meta or {}, "distance": float(-score)})
-    scored.sort(key=lambda x: x["distance"])
-    return scored[:top_k]
+    """无向量能力时的兜底：对库内文档做关键词打分（实现见 `KeywordFallbackRetriever`）。"""
+    return _KEYWORD_FALLBACK.retrieve(query, top_k)
 
 
 # ---------------- 0.4.0：Query 路由 + 防幻觉 Prompt ----------------
@@ -1418,49 +1120,11 @@ def search_with_graph(query: str, top_k: int = 5) -> HybridResult:
     return result
 
 
-def answer_with_graph(query: str, top_k: int = 5) -> Dict:
-    """双通道问答主流程：融合检索 → GRAPH_FUSION_PROMPT → 生成。
+# 0.18.0：此处原有一份 `answer_with_graph` 的旧实现，
+# 但它被文件末尾的同名定义覆盖（Python 后定义生效），属于**永不执行的死代码**，已删除。
+# 生效实现在文件末尾（`answer_with_graph(question, top_k)`）。
 
-    返回 dict 直接给路由层（含 graph_hit / vector_hit / fusion_strategy / graph_cypher，
-    便于前端调试与评估模块统计图谱命中率）。
-    """
-    hybrid = search_with_graph(query, top_k=top_k)
 
-    # 两路都没命中：不走 LLM 生成，直接给保守话术，省一次网络往返
-    if not hybrid.graph_hit and not hybrid.vector_hit:
-        return {
-            "answer": "根据现有资料未查询到具体信息，建议查阅学校官方招生简章。",
-            "source": "graph+vector:empty",
-            "sources": [],
-            "graph_hit": False,
-            "vector_hit": False,
-            "fusion_strategy": hybrid.fusion_strategy,
-            "graph_cypher": "",
-            "graph_error": hybrid.graph_error,
-        }
-
-    prompt = GRAPH_FUSION_PROMPT.format(
-        priority_hint=hybrid.priority_hint,
-        graph_context=hybrid.graph_context or "（无）",
-        vector_context=hybrid.vector_context or "（无）",
-        question=query,
-    )
-    from app.services.llm.ai_service import ask
-
-    answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=400, timeout=60)
-    if not answer:
-        raise RuntimeError("大模型响应超时")
-
-    return {
-        "answer": answer,
-        "source": "graph+vector",
-        "sources": hybrid.sources,
-        "graph_hit": hybrid.graph_hit,
-        "vector_hit": hybrid.vector_hit,
-        "fusion_strategy": hybrid.fusion_strategy,
-        "graph_cypher": hybrid.graph_cypher,
-        "graph_error": hybrid.graph_error,
-    }
 
 
 # ============================================================
