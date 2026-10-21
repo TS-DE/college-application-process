@@ -78,6 +78,11 @@ class Settings:
     # 冲稳保位次缓冲：|学校最低位次 - 考生位次| <= BUFFER 视为“稳”
     # 河南考生基数大（物理类本科批约 39 万人），默认 5000。
     RANK_BUFFER: int = int(_env("RANK_BUFFER", "5000"))
+    # 0.19.1：冲稳保候选池的单档上限。
+    # 原来固定 50 条，对 2 万位宽的窗口太少——偏好省份（如福建）的院校往往排在第 50 条之后，
+    # 被 SQL 直接截掉，用户在方案里一条都看不到。上限提高后仍由 Python 侧截断到
+    # 最终展示条数（PLAN_DRAFT_PER_TIER），不影响页面长度。
+    TIER_CANDIDATE_LIMIT: int = int(_env("TIER_CANDIDATE_LIMIT", "120"))
     # “冲”向下、“保”向上的最大搜索倍数（相对 buffer），避免给出完全不切实际的结果
     RANK_SPAN_FACTOR: int = int(_env("RANK_SPAN_FACTOR", "8"))
     # 每档默认返回条数

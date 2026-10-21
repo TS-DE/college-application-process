@@ -122,9 +122,10 @@ def test_missing_preference_note() -> None:
         per_tier={"chong": 3, "wen": 3, "bao": 3},
     )
     note = built["note"]
-    check("note 写明「候选池中没有位于福建的院校」",
-          "候选池中没有位于福建的院校" in note, note)
-    check("note 给出放宽建议", "放宽" in note, note)
+    # 0.19.1 文案修正：必须点明「位次区间」，否则会被误读成「全国都没有福建院校」
+    check("note 写明「在你的位次区间内暂未找到位于福建的院校」",
+          "在你的位次区间内暂未找到位于福建的院校" in note, note)
+    check("note 给出放宽建议", "放宽位次范围" in note, note)
 
 
 def test_round_limit() -> None:

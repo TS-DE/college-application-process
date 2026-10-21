@@ -468,8 +468,16 @@ def recommend(
 # 全国总表名模板
 _NATIONAL_MAJOR_TABLE = "major_admission_{year}_all"
 
-# 单个档位最多返回条数（内存保护）
+# 单个档位最多返回条数的**兜底最小值**（0.19.0 起实际用 settings.TIER_CANDIDATE_LIMIT）
+#
+# 0.19.1：原来这里硬编码 50 且直接当 LIMIT 用，导致 2 万位宽的窗口只取走最前面一小段。
+# 真实数据（河南/物理类/2025/位次 43000）：
+#   稳窗口 [33000, 53000] 共 1524 条，其中福建 12 条（39518 / 41663 / 43771 …），
+#   旧实现 ORDER BY min_rank ASC LIMIT 50 只取到 33000~33500，福建一条都进不来。
 _TIER_LIMIT = 50
+
+#: 去重键：同一院校同一专业组同一专业视为同一条（0.19.1 偏好二次查询合并用）
+_DEDUPE_KEYS = ("university_code", "major_group", "major_code")
 
 # 冲 / 稳 / 保 的位次窗口宽度（相对考生位次的 buffer 倍数）
 _TIER_SPAN = {"chong": 3.0, "wen": 1.0, "bao": 3.0}
@@ -592,17 +600,105 @@ def _to_national_item(row: Dict, rank: int, tier: str, buffer: int) -> Dict:
     return item
 
 
+def _candidate_limit() -> int:
+    """单档候选池上限：取配置值，但不得低于兜底值 50（0.19.1）。"""
+    try:
+        cfg = int(getattr(settings, "TIER_CANDIDATE_LIMIT", _TIER_LIMIT) or _TIER_LIMIT)
+    except (TypeError, ValueError):
+        cfg = _TIER_LIMIT
+    return max(_TIER_LIMIT, cfg)
+
+
+def _tier_order_sql(tier: str) -> str:
+    """档位的 SQL 排序方向 —— 按「与考生位次的距离」，不是单纯按位次大小（0.19.1）。
+
+    · 冲：窗口 [rank-3b, rank-b]，考生最够得着的是**窗口上端**（位次最大处）→ DESC
+    · 稳：窗口 [rank-b, rank+b]，离考生位次越近越稳          → ABS(min_rank - :rank) ASC
+    · 保：窗口 [rank+b, rank+3b]，最贴近考生的是窗口下端      → ASC
+
+    旧实现三档统一 `ORDER BY min_rank ASC`，冲档取到最难的 50 条、
+    稳档取到 rank-b 附近（全部偏冲），这就是「稳档系统性偏难」的根因。
+    """
+    if tier == "chong":
+        return "ORDER BY `min_rank` DESC "
+    if tier == "wen":
+        return "ORDER BY ABS(`min_rank` - :rank) ASC "
+    return "ORDER BY `min_rank` ASC "
+
+
+def _select_sql(tbl: str) -> str:
+    """三档共用的 SELECT 前缀（列名与过滤条件）。"""
+    return (
+        f"SELECT university_code, university_name, major_group, major_name, major_code, "
+        f"subject_req, school_province, school_nature, is_985, is_211, "
+        f"min_score, min_rank, batch, year, major_note "
+        f"FROM `{tbl}` "
+        f"WHERE `province` = :prov AND `category` = :cat AND `year` = :yr "
+        f"AND `min_rank` IS NOT NULL AND `min_rank` BETWEEN :min_r AND :max_r "
+    )
+
+
+def _dedupe_merge(*groups: List[Dict]) -> List[Dict]:
+    """按 (院校, 专业组, 专业) 去重合并，靠前的分组优先（0.19.1）。"""
+    merged: List[Dict] = []
+    seen = set()
+    for group in groups:
+        for row in group:
+            key = tuple(row.get(k) for k in _DEDUPE_KEYS)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(row))
+    return merged
+
+
+def _fetch_tier_rows(
+    db, tbl: str, tier: str, prov: str, cat: str, year: int, rank: int,
+    min_r: int, max_r: int, limit: int, prefer: List[str],
+) -> List[Dict]:
+    """取一个档位的候选行：先偏好的省份，再其余；偏好命中的排在前面。"""
+    order = _tier_order_sql(tier)
+    select_sql = _select_sql(tbl)
+    params = {
+        "prov": prov, "cat": cat, "yr": int(year),
+        "min_r": min_r, "max_r": max_r, "lim": limit,
+    }
+    if ":rank" in order:
+        params["rank"] = int(rank)
+
+    # ① 全窗口（无偏好过滤）
+    rows = list(db.execute(text(select_sql + order + "LIMIT :lim"), params).mappings().all())
+
+    # ② 偏好省份单独查一次，保证「想去福建」的院校在截断前就进池
+    prefer_rows: List[Dict] = []
+    if prefer:
+        placeholders = ", ".join(f":pp{i}" for i in range(len(prefer)))
+        pref_sql = select_sql + f"AND `school_province` IN ({placeholders}) " + order + "LIMIT :lim"
+        pref_params = dict(params)
+        pref_params.update({f"pp{i}": p for i, p in enumerate(prefer)})
+        prefer_rows = list(db.execute(text(pref_sql), pref_params).mappings().all())
+
+    return _dedupe_merge(prefer_rows, rows)
+
+
 def calculate_tiers(
-    student_rank: int, province: str, category: str, year: int = 2025
+    student_rank: int,
+    province: str,
+    category: str,
+    year: int = 2025,
+    prefer_provinces: Optional[List[str]] = None,
 ) -> Dict[str, List[Dict]]:
     """按位次计算冲 / 稳 / 保三档志愿（全国总表版）。
 
-    :param student_rank: 考生位次（由 rank_service.score_to_rank 得到）
-    :param province:      省份，中文名或拼音均可
-    :param category:      科类，如 "物理类" / "综合" / "理科"
-    :param year:          数据年份，默认 2025
-    :return: {"chong": [...], "wen": [...], "bao": [...]}，每个档位最多 50 条；
-             任何异常都返回三档全空 + logger.warning，不抛异常。
+    :param student_rank:     考生位次（由 rank_service.score_to_rank 得到）
+    :param province:         省份，中文名或拼音均可
+    :param category:         科类，如 "物理类" / "综合" / "理科"
+    :param year:             数据年份，默认 2025
+    :param prefer_provinces: 用户偏好省份（0.19.1）。非空时每个档位**额外**执行一条
+                             `school_province IN (...)` 查询，命中项在截断前排到最前，
+                             保证偏好省份不会因为「先截断 50 条再过滤」而被丢掉。
+    :return: {"chong": [...], "wen": [...], "bao": [...]}，每档不超过
+             `settings.TIER_CANDIDATE_LIMIT`（下限 50）；异常返回三档全空，不抛异常。
     """
     empty = {"chong": [], "wen": [], "bao": []}
     prov = normalize_province(province)
@@ -619,45 +715,40 @@ def calculate_tiers(
         return empty
 
     buffer = _tier_buffer(prov)
+    limit = _candidate_limit()
+    prefer = [normalize_province(p) or str(p).strip() for p in (prefer_provinces or [])]
+    prefer = [p for p in prefer if p]
     out: Dict[str, List[Dict]] = {"chong": [], "wen": [], "bao": []}
 
     for tier in ("chong", "wen", "bao"):
         min_r, max_r = _tier_window(tier, rank, buffer)
         if min_r > max_r:
             continue
-        sql = (
-            f"SELECT university_code, university_name, major_group, major_name, major_code, "
-            f"subject_req, school_province, school_nature, is_985, is_211, "
-            f"min_score, min_rank, batch, year, major_note "
-            f"FROM `{tbl}` "
-            f"WHERE `province` = :prov AND `category` = :cat AND `year` = :yr "
-            f"AND `min_rank` IS NOT NULL AND `min_rank` BETWEEN :min_r AND :max_r "
-            f"ORDER BY `min_rank` ASC LIMIT :lim"
-        )
         try:
             with SessionLocal() as db:
-                rows = db.execute(text(sql), {
-                    "prov": prov, "cat": cat, "yr": int(year),
-                    "min_r": min_r, "max_r": max_r, "lim": _TIER_LIMIT,
-                }).mappings().all()
+                rows = _fetch_tier_rows(
+                    db, tbl, tier, prov, cat, int(year), rank, min_r, max_r, limit, prefer,
+                )
         except Exception as exc:  # noqa: BLE001 单档失败不影响其他档
             logger.warning("[TIER] %s 档查询失败 %s/%s/%s：%s %s",
                            tier, prov, cat, year, exc.__class__.__name__, str(exc)[:150])
             continue
 
-        items = [_to_national_item(dict(r), rank, tier, buffer) for r in rows]
-        # 档内排序：冲看谁更接近考生位次；稳看位次差绝对值；保看谁更保险
+        # 先按「取哪些」截断（偏好已排在最前），再排展示顺序，两者互不干扰
+        chosen = rows[:limit]
+        items = [_to_national_item(row, rank, tier, buffer) for row in chosen]
         if tier == "chong":
             items.sort(key=lambda x: -(x["min_rank"] or 0))
         elif tier == "wen":
             items.sort(key=lambda x: abs(x["rank_diff"] or 0))
         else:
             items.sort(key=lambda x: (x["min_rank"] or 0))
-        out[tier] = items[:_TIER_LIMIT]
+        out[tier] = items
 
     logger.info(
-        "[TIER] 全国引擎 rank=%s %s/%s buffer=%s → 冲%d 稳%d 保%d",
-        rank, prov, cat, buffer, len(out["chong"]), len(out["wen"]), len(out["bao"]),
+        "[TIER] 全国引擎 rank=%s %s/%s buffer=%s limit=%s 偏好=%s → 冲%d 稳%d 保%d",
+        rank, prov, cat, buffer, limit, prefer or "-",
+        len(out["chong"]), len(out["wen"]), len(out["bao"]),
     )
     return out
 

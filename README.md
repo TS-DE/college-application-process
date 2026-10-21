@@ -1100,6 +1100,33 @@ graph TD
 （前端会收到 404，需重新生成）。生产环境换 `SqliteSaver` 只需改
 `build_plan_graph(checkpointer=...)` 一处。
 
+#### 4.11.1 候选池是怎么来的（0.19.1）
+
+> 以前排查「为什么没有福建院校」时，第一反应总以为是数据缺失。**其实数据一直在**，
+> 是候选池的取数方式把人家截掉了。这里把链路写清楚，避免下次再误判。
+
+```
+考生位次 rank
+  ↓ 窗口（_tier_window，宽度 = buffer × _TIER_SPAN）
+  冲 [rank-3b, rank-b]   稳 [rank-b, rank+b]   保 [rank+b, rank+3b]      b = 5000（河南等大省 ×2 = 10000）
+  ↓ 排序（_tier_order_sql，按「与考生位次的距离」）
+  冲 min_rank DESC       稳 ABS(min_rank-rank) ASC      保 min_rank ASC
+  ↓ 偏好（可选，0.19.1）
+  额外一条 school_province IN (...) 查询，命中项排在前面，与主查询去重合并
+  ↓ 截断
+  LIMIT TIER_CANDIDATE_LIMIT（默认 120，决定「取哪些」）
+  ↓ 展示排序（Python，决定「怎么排」，不影响取哪些）
+  冲 按位次降序 / 稳 按 |rank_diff| 升序 / 保 按位次升序
+  ↓ 展示条数
+  PLAN_DRAFT_PER_TIER / per_tier（默认 8）
+```
+
+**为什么要分「取哪些」和「怎么排」两步**：偏好命中项必须先进池，否则它连被排序的
+机会都没有；而展示顺序又要按档位语义来（稳档要按接近程度），两者混在一起就会互相打架。
+
+真实数据参考（河南 / 物理类 / 2025 / 位次 45887）：
+冲窗口 1252 条（福建 0）、稳窗口 1524 条（福建 12）、保窗口 964 条（福建 14）。
+
 ### 4.12 主链十一：聊天记录会话级缓存（0.16.0）
 
 入口：AI 助手页（`/ai-chat`）→ 切到「志愿填报」或刷新页面后回来，记录仍在。
@@ -1300,6 +1327,8 @@ PLAN_FINAL_PER_TIER=8   # 终稿每档条数
 PLAN_MAX_REVIEW_ROUNDS=5                    # 最多几版方案（达到后自动结束，仍可定稿）
 PLAN_CHECKPOINTER=sqlite                    # sqlite=跨重启恢复；memory=进程内（重启即丢）
 PLAN_CHECKPOINT_DB=data/plan_checkpoints.db # sqlite 落盘位置（相对 backend/）
+# 0.19.1 候选池
+TIER_CANDIDATE_LIMIT=120                    # 单档候选池上限（下限 50）；最终展示条数仍由 PLAN_DRAFT_PER_TIER 截断
 
 # 0.17.1 多轮上下文（历史只用于消解指代，不参与事实判定）
 CHAT_HISTORY_MAX_TURNS=4    # 最多带几轮历史（一轮≈1问1答）
