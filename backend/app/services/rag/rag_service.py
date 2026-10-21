@@ -1120,49 +1120,11 @@ def search_with_graph(query: str, top_k: int = 5) -> HybridResult:
     return result
 
 
-def answer_with_graph(query: str, top_k: int = 5) -> Dict:
-    """双通道问答主流程：融合检索 → GRAPH_FUSION_PROMPT → 生成。
+# 0.18.0：此处原有一份 `answer_with_graph` 的旧实现，
+# 但它被文件末尾的同名定义覆盖（Python 后定义生效），属于**永不执行的死代码**，已删除。
+# 生效实现在文件末尾（`answer_with_graph(question, top_k)`）。
 
-    返回 dict 直接给路由层（含 graph_hit / vector_hit / fusion_strategy / graph_cypher，
-    便于前端调试与评估模块统计图谱命中率）。
-    """
-    hybrid = search_with_graph(query, top_k=top_k)
 
-    # 两路都没命中：不走 LLM 生成，直接给保守话术，省一次网络往返
-    if not hybrid.graph_hit and not hybrid.vector_hit:
-        return {
-            "answer": "根据现有资料未查询到具体信息，建议查阅学校官方招生简章。",
-            "source": "graph+vector:empty",
-            "sources": [],
-            "graph_hit": False,
-            "vector_hit": False,
-            "fusion_strategy": hybrid.fusion_strategy,
-            "graph_cypher": "",
-            "graph_error": hybrid.graph_error,
-        }
-
-    prompt = GRAPH_FUSION_PROMPT.format(
-        priority_hint=hybrid.priority_hint,
-        graph_context=hybrid.graph_context or "（无）",
-        vector_context=hybrid.vector_context or "（无）",
-        question=query,
-    )
-    from app.services.llm.ai_service import ask
-
-    answer = ask(prompt, temperature=0.1, top_p=0.3, num_predict=400, timeout=60)
-    if not answer:
-        raise RuntimeError("大模型响应超时")
-
-    return {
-        "answer": answer,
-        "source": "graph+vector",
-        "sources": hybrid.sources,
-        "graph_hit": hybrid.graph_hit,
-        "vector_hit": hybrid.vector_hit,
-        "fusion_strategy": hybrid.fusion_strategy,
-        "graph_cypher": hybrid.graph_cypher,
-        "graph_error": hybrid.graph_error,
-    }
 
 
 # ============================================================
