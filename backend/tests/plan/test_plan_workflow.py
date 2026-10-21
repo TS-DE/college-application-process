@@ -236,13 +236,23 @@ def test_hitl_flow() -> None:
     provs = {i["school_province"] for i in out["final_plan"]["wen"]}
     assert "北京" not in {i["school_province"] for v in out["final_plan"].values() for i in v}
     assert "吉林" not in provs
-    print(f"  ③ resume → 终稿 {sum(len(v) for v in out['final_plan'].values())} 条，"
-          f"稳档地区={sorted(provs)}")
+    print(f"  ③ resume → 第 {out['review_round']} 版 "
+          f"{sum(len(v) for v in out['final_plan'].values())} 条，稳档地区={sorted(provs)}")
 
     st2 = wf.get_state(tid, 101)
-    assert st2["awaiting_feedback"] is False
+    # 0.19.0 语义变化：resume 之后图**回到 human_review 再中断一次**，
+    # 因此 awaiting_feedback 仍为 True（旧的「一次性向导」在此处才是 False）。
+    assert st2["awaiting_feedback"] is True, "多轮模式下应继续等待下一轮意见"
     assert st2["stage"] == "final_ready"
-    print("  ④ 完成后 awaiting_feedback=False，stage=final_ready")
+    assert st2["review_round"] == 2
+    print("  ④ resume 后回到 human_review（awaiting_feedback=True，第 2 轮）")
+
+    # 定稿：action=accept 才真正结束
+    done = wf.resume(tid, 101, {"feedback": "", "action": "accept"})
+    assert done["awaiting_feedback"] is False, "accept 后不应再等待"
+    st3 = wf.get_state(tid, 101)
+    assert st3["awaiting_feedback"] is False
+    print("  ⑤ action=accept → 图结束（awaiting_feedback=False）")
 
     # 越权
     try:
