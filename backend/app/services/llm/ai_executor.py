@@ -1,18 +1,31 @@
-"""AI 执行基础设施：专用线程池、超时、在途计数、画像读取。
+"""AI 执行基础设施：专用线程池、超时、在途名额。
 
-0.17.0 从 `routers/ai.py` 原样搬出。这些能力被 `/chat` 与 `/counselor` 两个**入口**共用，
-留在某个 router 里会导致「入口层互相 import」，所以下沉到服务层。
-函数名与函数体均未改动。
+0.17.0 从 `routers/ai.py` 原样搬出；0.17.1 修正名额归还时机。
+
+## 名词：什么叫「在途名额」
+**名额 = 线程占用（任务已提交、且线程尚未结束），不是「请求是否还在等」。**
+
+0.17.0 及以前，`_release_inflight()` 放在 `_run_ai` 的最外层 `finally`：
+`asyncio.wait_for` 一旦超时，请求侧立刻归还名额，但**线程还在跑**
+（Python 无法强杀线程）—— 于是计数显示空闲、池子其实已满，
+新请求照样被放进来，过载保护形同虚设。
+
+0.17.1 起，名额由**工作线程自己在 `finally` 里归还**：
+线程真正结束才腾出槽位，与「线程占用」语义一致。
+另加僵尸槽位回收（`AI_SLOT_MAX_HOLD_SECONDS`），防止线程永久挂死导致名额泄漏。
+
+## 依赖方向
+本模块只依赖 `config` 与 `fastapi.HTTPException`，不 import 任何 `api/` 或业务服务，
+保证它可以被任意层级安全复用。
 """
 import asyncio
 import functools
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
 
 from app.config import settings
 
@@ -32,13 +45,26 @@ _AI_EXECUTOR = ThreadPoolExecutor(
 )
 
 
-def _timed_call(recorder: Dict[str, Any], fn, args: tuple) -> Any:
-    """在线程内记录「真正开始执行」的时刻，用于算排队时间。"""
+def _worker(
+    recorder: Dict[str, Any],
+    release_token: Optional[float],
+    fn,
+    args: tuple,
+) -> Any:
+    """在工作线程内执行任务，**线程结束时才归还名额**（0.17.1 核心修正）。
+
+    与 0.17.0 的 `_timed_call` 相比只多了一件事：`finally` 里归还名额。
+    但这一件事决定了过载计数的正确性 —— 请求侧超时后线程仍在占用池子，
+    只有线程自己走完才能腾出槽位。
+    """
     recorder["started_at"] = time.perf_counter()
-    return fn(*args)
+    try:
+        return fn(*args)
+    finally:
+        _release_inflight(release_token)
 
 
-# ============================================================ 在途计数（0.15.1 过载保护）
+# ============================================================ 在途名额（0.15.1 引入，0.17.1 修正语义）
 #
 # ## 为什么线程池还不够
 # `ThreadPoolExecutor` 的**队列是无界的**：池子（8 线程）占满后，
@@ -47,35 +73,69 @@ def _timed_call(recorder: Dict[str, Any], fn, args: tuple) -> Any:
 #
 # 上限 = `AI_THREADPOOL_SIZE × AI_MAX_INFLIGHT_FACTOR`（默认 8×2=16），
 # 含义是「跑着一批 + 等一批」；再多就说明确实过载，立刻 503 更诚实。
+#
+# 用**列表**而不是计数器：每个槽位记录 `acquired_at`，
+# 才能识别「持有时间过长的僵尸槽位」并强制回收。
 _INFLIGHT_LOCK = threading.Lock()
-_inflight_count = 0
+_inflight_slots: List[float] = []
 
 
 def _inflight_limit() -> int:
     return max(1, settings.AI_THREADPOOL_SIZE * settings.AI_MAX_INFLIGHT_FACTOR)
 
 
-def _try_acquire_inflight() -> bool:
-    """尝试占用一个在途名额；超过上限返回 False。"""
-    global _inflight_count
-    with _INFLIGHT_LOCK:
-        if _inflight_count >= _inflight_limit():
-            return False
-        _inflight_count += 1
-        return True
+def _reap_stale_slots_locked() -> int:
+    """回收僵尸槽位（**必须在持锁时调用**）。
+
+    线程若因死循环 / 阻塞 IO 永久挂死，`_worker` 的 finally 永远不会执行，
+    名额就再也收不回来。这里按「持有时间 > AI_SLOT_MAX_HOLD_SECONDS」兜底回收。
+    """
+    if not _inflight_slots:
+        return 0
+    now = time.monotonic()
+    max_hold = settings.AI_SLOT_MAX_HOLD_SECONDS
+    stale = [t for t in _inflight_slots if now - t > max_hold]
+    if not stale:
+        return 0
+    for t in stale:
+        _inflight_slots.remove(t)
+    print(
+        f"[AI] 槽位超时回收 {len(stale)} 个（持有 > {max_hold:.0f}s，"
+        f"剩余 {len(_inflight_slots)}/{_inflight_limit()}）",
+        flush=True,
+    )
+    return len(stale)
 
 
-def _release_inflight() -> None:
-    """释放名额（`max(0, …)` 防御性下限，避免任何路径把计数压成负数）。"""
-    global _inflight_count
+def _try_acquire_inflight() -> Optional[float]:
+    """尝试占用一个名额；成功返回 token（用于精确归还），失败返回 None。"""
     with _INFLIGHT_LOCK:
-        _inflight_count = max(0, _inflight_count - 1)
+        _reap_stale_slots_locked()
+        if len(_inflight_slots) >= _inflight_limit():
+            return None
+        token = time.monotonic()
+        _inflight_slots.append(token)
+        return token
+
+
+def _release_inflight(token: Optional[float] = None) -> None:
+    """归还名额。
+
+    :param token: `_try_acquire_inflight` 返回的令牌；按令牌移除可避免误删他人槽位。
+                  传 None（或令牌已不在列表中）时退化为移除最早的一个，保证计数单调正确。
+    """
+    with _INFLIGHT_LOCK:
+        if token is not None and token in _inflight_slots:
+            _inflight_slots.remove(token)
+        elif _inflight_slots:
+            _inflight_slots.pop(0)
 
 
 def _current_inflight() -> int:
-    """当前在途数（供日志与测试读取）。"""
+    """当前在途名额数（供日志与测试读取；读取时先做一次僵尸回收）。"""
     with _INFLIGHT_LOCK:
-        return _inflight_count
+        _reap_stale_slots_locked()
+        return len(_inflight_slots)
 
 
 def _reject_if_overloaded(label: str) -> None:
@@ -112,7 +172,8 @@ async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
 
     :raises HTTPException: 503（过载）
     """
-    if not _try_acquire_inflight():
+    token = _try_acquire_inflight()
+    if token is None:
         print(
             f"[AI] 过载拒绝 {label}：在途 {_current_inflight()}/{_inflight_limit()}"
             f"（池大小 {settings.AI_THREADPOOL_SIZE} × 系数 {settings.AI_MAX_INFLIGHT_FACTOR}）",
@@ -120,56 +181,53 @@ async def _run_ai(fn, *args, timeout: float, label: str = "ai") -> Any:
         )
         raise HTTPException(status_code=503, detail="AI 服务繁忙，请稍后重试")
 
-    try:
-        loop = asyncio.get_running_loop()
-        recorder: Dict[str, Any] = {"started_at": 0.0}
-        submitted_at = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    recorder: Dict[str, Any] = {"started_at": 0.0}
+    submitted_at = time.perf_counter()
 
+    try:
         future = loop.run_in_executor(
-            _AI_EXECUTOR, functools.partial(_timed_call, recorder, fn, args)
+            _AI_EXECUTOR, functools.partial(_worker, recorder, token, fn, args)
         )
-        try:
-            return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            waited = time.perf_counter() - submitted_at
-            print(
-                f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
-                f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
-                flush=True,
-            )
-            raise
-        finally:
-            if recorder["started_at"]:
-                queue_wait = recorder["started_at"] - submitted_at
-                if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
-                    print(
-                        f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
-                        f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
-                        f"池大小 {settings.AI_THREADPOOL_SIZE}）",
-                        flush=True,
-                    )
-    finally:
-        # ★ 必须放在最外层 finally：超时、异常、正常返回都要归零，
-        #   否则一次失败就永久吃掉一个名额，最终整个 AI 服务被 503 锁死。
-        _release_inflight()
+    except Exception:
+        # 执行器已关闭 / 提交失败：线程不会启动，_worker 的 finally 也不会执行，
+        # 必须在这里补还名额，否则每次失败都漏一个槽位。
+        _release_inflight(token)
+        raise
 
-
-def _load_profile_summary(db: Session, user_id: int) -> str:
-    """读取用户画像总结（供 Prompt 注入）。
-
-    单独抽成函数是为了让异常处理集中在一处：
-    画像只是「锦上添花」，任何失败都必须静默降级为空串，绝不能让问答 500。
-    """
     try:
-        from app.services.profile import ProfileRepository, ProfileService
-
-        return ProfileService(ProfileRepository(db)).get_summary_for_prompt(user_id)
-    except Exception as exc:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).info(
-            "[PROFILE] 读取画像失败，按无画像处理：%s", exc.__class__.__name__
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        waited = time.perf_counter() - submitted_at
+        print(
+            f"[AI] {label} 超时 {timeout:.0f}s（已等待 {waited:.2f}s，"
+            f"排队 {recorder['started_at'] - submitted_at if recorder['started_at'] else -1:.2f}s）",
+            flush=True,
         )
-        return ""
+        raise
+    finally:
+        if recorder["started_at"]:
+            queue_wait = recorder["started_at"] - submitted_at
+            if queue_wait > settings.AI_QUEUE_WAIT_WARN_SECONDS:
+                print(
+                    f"[AI] 线程池排队告警 {label} 等待 {queue_wait:.2f}s"
+                    f"（阈值 {settings.AI_QUEUE_WAIT_WARN_SECONDS:.0f}s，"
+                    f"池大小 {settings.AI_THREADPOOL_SIZE}）",
+                    flush=True,
+                )
+        # 名额归还**不在这里**（已交给 _worker 的 finally）。
+        # 唯一例外：线程从未启动 —— 此时 _worker 不会执行，必须补还。
+        #
+        # 判据用 `recorder["started_at"]` 而不是 `future.cancelled()`：
+        # wait_for 超时会把 asyncio 包装的 future 标成 CANCELLED，
+        # 但底层线程可能早已在跑（concurrent.futures 无法中断运行中的任务），
+        # 用 cancelled() 判断会把「已在跑」误判成「没启动」，导致名额提前归还 ——
+        # 这正是 0.17.0 的老问题换了个位置复现。
+        if not recorder["started_at"]:
+            _release_inflight(token)
+
+
+# 0.17.1：`_load_profile_summary` 已迁至 `services/chat/chat_orchestrator.py`。
+# 本模块保持「纯执行器」定位：只管线程池、超时与在途名额，不参与对话上下文准备。
 
 
