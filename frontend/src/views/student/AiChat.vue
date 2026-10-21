@@ -184,13 +184,21 @@ async function send() {
   // 0.16.0：用户消息先入 store（立即持久化），刷新也不会丢
   chatStore.push({ role: 'user', text: q })
   chatStore.setDraft('')
+
+  // 0.17.1：带上「本次提问之前的最近 4 条」，让后端能理解「那学费呢」里的「那」。
+  // 必须排除刚 push 进去的这条，否则同一句话会被当成上文重复喂进去。
+  const history = chatStore.messages
+    .slice(0, -1)
+    .slice(-4)
+    .map((m) => ({ role: m.role, text: m.text }))
+
   startThinking()
   await scrollBottom()
 
   try {
     // 0.13.0：后端默认走本地 Agent（模型自主决定调用哪个工具），
     // 前端不再传 use_rag —— 用户不需要知道 RAG 是什么。
-    const res = await chat({ question: q })
+    const res = await chat({ question: q, history })
     chatStore.push({
       role: 'ai',
       text: res.answer,

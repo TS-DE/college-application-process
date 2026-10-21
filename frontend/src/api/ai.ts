@@ -7,6 +7,12 @@ export interface ChatPayload {
   top_k?: number
   /** 0.9.0：是否叠加知识图谱双通道 */
   use_graph?: boolean
+  /**
+   * 0.17.1：最近几轮对话（仅用于消解「那 / 这个」等指代）。
+   * 后端会做角色白名单与长度截断，且只把它当「上文」、不当事实依据。
+   * 不传时行为与 0.17.0 完全一致。
+   */
+  history?: Array<{ role: 'user' | 'ai'; text: string }>
 }
 
 export interface ChatResult {
@@ -23,6 +29,8 @@ export interface ChatResult {
   mysql_error?: string
   /** 0.12.0：本次回答是否注入了用户画像 */
   profile_injected?: boolean
+  /** 0.17.1：本次回答是否真的带上了多轮上文（历史为空 / 被清洗掉时为 false） */
+  history_used?: boolean
   /** 0.13.0：本地 Agent 执行轨迹（用了哪些工具、耗时多少） */
   tool_trace?: Array<{
     name: string
