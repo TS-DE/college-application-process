@@ -585,7 +585,7 @@ def search(query: str, top_k: int = 5, use_multi_route: bool = True) -> List[Dic
     preprocess_info: Dict = {"enabled": False, "source": "raw", "queries": [query]}
     if settings.MULTI_QUERY_ENABLED:
         try:
-            from app.services.rag.query_rewrite import QueryPreprocessor
+            from app.services.rag.preprocess.preprocessor import QueryPreprocessor
 
             preprocessor = QueryPreprocessor(
                 use_rewrite=settings.QUERY_REWRITE_ENABLED,
