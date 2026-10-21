@@ -65,3 +65,7 @@ langgraph>=1.0
 # 且 bcrypt 5.x 对 >72 字节密码直接抛 ValueError，会让注册/登录 500。
 # 锁在 4.0.1：与 passlib 1.7.4 兼容的最后一个版本。
 bcrypt==4.0.1
+
+# ---------------- 0.19.0 人机回环持久化 ----------------
+# SqliteSaver：HITL 会话落盘，服务重启后仍能恢复（缺它自动回落 MemorySaver）
+langgraph-checkpoint-sqlite>=3.0
