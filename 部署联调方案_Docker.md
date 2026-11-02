@@ -105,7 +105,7 @@ graph LR
 数据库 `gaokao` 除了建表脚本，还需要**录取业务数据**（推荐功能的查询源，也是知识图谱的数据源）。
 
 - **数据源**：HuggingFace 各省高校开源数据，本地存放于 `gaokao_data/data/2025/<省份>/`（共 31 省，每省 5 个文件：`major-admission.csv` / `score-range.csv` / `enrollment-plan.csv` / `school-admission.csv` / `meta.json`）；
-- **导入脚本**（开发方实际使用，位于 `temp_导入开源数据/` 目录）：
+- **导入脚本**（已随仓库提供，位于 `deploy/scripts/` 目录；**第 6 行连接串需按目标 MySQL 修改**）：
   - `kan_gaokao_test.py`：各省 `major-admission.csv` 合并 → 表 `major_admission_2025_all`（首省 replace 建表，后续 append 追加）；
   - `kan_gaokao_test2.py`：`score-range.csv` → 表 `score_range_2025_all`；`enrollment-plan.csv` → 表 `enrollment_plan_2025_all`；
   - 连接串写死为 `root:123456@localhost:3306/gaokao`（培训环境统一账号），脚本需在**能直连目标 MySQL 的机器**上运行；

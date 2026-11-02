@@ -50,3 +50,7 @@ deps/
 Microsoft/
 pip/
 deploy/.env.docker
+# 0.19.1+：pip --target 装的库副本（与 conda 环境重复，27MB，不入库）
+libs/
+# 0.19.1+：临时导入脚本原目录（已迁入 deploy/scripts/，原目录不入库）
+temp_导入开源数据/
