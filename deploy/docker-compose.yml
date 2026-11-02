@@ -55,6 +55,22 @@ services:
       - ../backend/data:/app/backend/data
       - ../backend/reports:/app/backend/reports
 
+  # ---------------- 可选：Nginx 前置（前后端分离部署形态） ----------------
+  # 何时启用：协作方要求「前端必须是独立服务」时。
+  # 默认单体托管（backend 直接提供页面）不需要本服务。
+  # 启用步骤：取消注释 → docker compose up -d frontend → 访问 http://<主机IP>/
+  # frontend:
+  #   image: nginx:1.27-alpine
+  #   container_name: gaokao-frontend
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - backend
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ../frontend/dist:/usr/share/nginx/html:ro
+  #     - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
   # ---------------- 可选：知识图谱 Neo4j ----------------
   # 启用步骤：取消注释 → 设置 .env.docker 中 NEO4J_PASSWORD → 由开发方执行 graph_builder 建库
   # neo4j:

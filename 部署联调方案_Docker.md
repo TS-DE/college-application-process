@@ -2,8 +2,9 @@
 
 | 项目 | 内容 |
 |---|---|
-| 文档版本 | v1.0 |
+| 文档版本 | v1.1 |
 | 编制日期 | 2026-11-02 |
+| 修订说明 | v1.1：补充前后端分离说明与可选 Nginx 方案；数据源改为 2025 全国 31 省并补 HuggingFace 链接；新增密钥交付规则；导入脚本路径更正为 `deploy/scripts/` |
 | 开发方 | 培训学校 · AI 应用开发方向 |
 | 协作方 | 培训学校 · 运维方向 |
 | 联调目标 | 将「高考志愿填报系统」部署至协作方 Docker 环境，跑通 前端 → 后端 → 数据库 → RAG/AI 全链路 |
@@ -33,7 +34,7 @@
 
 ## 二、项目概述
 
-**一句话**：基于 FastAPI + Vue3 的「河南 2024-2025 录取数据冲稳保推荐 + RAG 知识库」系统，问答链路采用 基础 RAG / 进阶 RAG / Self-RAG / Corrective RAG 等策略，并内置 LangGraph 人机协同（HITL）志愿规划与知识图谱双通道。
+**一句话**：基于 FastAPI + Vue3 的「全国 31 省 2025 录取数据冲稳保推荐 + RAG 知识库」系统，问答链路采用 基础 RAG / 进阶 RAG / Self-RAG / Corrective RAG 等策略，并内置 LangGraph 人机协同（HITL）志愿规划与知识图谱双通道。
 
 ### 2.1 技术栈
 
@@ -73,6 +74,18 @@ graph LR
 | Neo4j | 可选 | 自动降级为「向量 + MySQL」两路，启动日志红字警告 |
 | 前端 dist | 必选（页面访问） | 后端返回 404「前端未构建」 |
 
+### 2.3 前后端分离说明（运维必读）
+
+本项目**代码层面是前后端分离**（`frontend/` Vue3+TS 与 `backend/` FastAPI 两套独立工程，通过 REST/JSON 通信）；
+但**默认部署形态是单体托管**：前端 `npm run build` 产出静态文件 `frontend/dist`，由后端 FastAPI 直接托管（SPA 回退）。
+
+| 形态 | 组成 | 说明 |
+|---|---|---|
+| **默认（单体托管）** | 1 个 backend 容器 | 8000 端口同时提供页面与 API，**无需 Nginx**，联调最省事 |
+| **可选（Nginx 前置）** | nginx 容器 + backend 容器 | Nginx 托管 `dist` 静态文件并把 `/api` 反代到 backend，符合常见前后端分离规范；前端代码无需改动（API 走相对路径 `/api`） |
+
+> 若协作方规范要求"必须有独立前端服务"，启用 `deploy/nginx/nginx.conf` + compose 中注释掉的 `frontend` 服务即可（见 6.6 节）。
+
 ---
 
 ## 三、部署模式
@@ -98,13 +111,28 @@ graph LR
 | 4 | 初始化 SQL | `deploy/sql/*.sql`（建表脚本） | MySQL 容器首次启动自动执行 |
 | 5 | **业务数据包**（★ 联调前置确认项） | `gaokao` 库数据 | 见 5.1 节说明 |
 | 6 | 知识库预置数据 | `backend/chroma_db/`（向量库 22 MB）+ `backend/knowledge_files/`（知识源文件 41 MB） | 若未随包提供，则需在联调环境重新上传并向量化 |
-| 7 | 云端模型密钥 | `Ali_API_KEY` | **敏感项**，建议由开发方在联调现场直接配置，不写入文档/聊天记录 |
+| 7 | 云端模型密钥 | `Ali_API_KEY` | **敏感项**，不随代码包/压缩包交付、不通过聊天工具传递；联调现场由开发方直接写入 `.env.docker`（见 4.2） |
 
-### 5.1 业务数据初始化（已确认）
+### 4.2 密钥交付方式（重要）
+
+`Ali_API_KEY` 是阿里云百炼的计费凭据，**不能放进仓库、压缩包或聊天记录**。交付规则：
+
+1. 仓库与 `.env.docker.example` 中该字段**始终为空**，仅作占位；
+2. 联调现场由开发方在部署机执行 `vi deploy/.env.docker` 手工填入，填完执行
+   `git status` 确认该文件未被暂存（`.gitignore` 已忽略 `deploy/.env.docker`）；
+3. 给运维的数据压缩包**只能包含** `gaokao_data/`、`backend/chroma_db/`、`backend/knowledge_files/`，
+   **严禁包含** `backend/.env`、`deploy/.env.docker`；
+4. 建议联调期间使用**限额临时 Key**，联调结束后在阿里云控制台停用。
+
+> 排查用：启动日志中若出现 `Ali_API_KEY：sk-ws-***-X` 这类**脱敏输出**属正常（项目 `mask()` 函数只打印前后各几位）。
+
+### 4.1 业务数据初始化（已确认）
 
 数据库 `gaokao` 除了建表脚本，还需要**录取业务数据**（推荐功能的查询源，也是知识图谱的数据源）。
 
-- **数据源**：HuggingFace 各省高校开源数据，本地存放于 `gaokao_data/data/2025/<省份>/`（共 31 省，每省 5 个文件：`major-admission.csv` / `score-range.csv` / `enrollment-plan.csv` / `school-admission.csv` / `meta.json`）；
+- **数据源**：HuggingFace 开源数据集 [Gaokao-Compass-11M](https://huggingface.co/datasets/choucsan/Gaokao-Compass-11M)；
+  **本项目只使用 2025 年数据**，本地已下载并存放于 `gaokao_data/data/2025/<省份>/`（共 31 省，每省 5 个文件：`major-admission.csv` / `score-range.csv` / `enrollment-plan.csv` / `school-admission.csv` / `meta.json`）；
+  > 2024 年数据已从项目中移除，**不需要下载**。
 - **导入脚本**（已随仓库提供，位于 `deploy/scripts/` 目录；**第 6 行连接串需按目标 MySQL 修改**）：
   - `kan_gaokao_test.py`：各省 `major-admission.csv` 合并 → 表 `major_admission_2025_all`（首省 replace 建表，后续 append 追加）；
   - `kan_gaokao_test2.py`：`score-range.csv` → 表 `score_range_2025_all`；`enrollment-plan.csv` → 表 `enrollment_plan_2025_all`；
@@ -252,6 +280,18 @@ docker compose ps
 
 ### 6.6 启用可选组件
 
+**Nginx（前后端分离形态）**：
+
+```bash
+# 协作方要求「前端必须是独立服务」时启用：
+#   1) docker-compose.yml 中取消 frontend 服务注释
+#   2) docker compose up -d frontend
+#   3) 访问 http://<主机IP>/ （80 端口）
+# 配置文件：deploy/nginx/nginx.conf（静态托管 dist + /api 反代 backend:8000 + SPA 回退）
+```
+
+> 前端代码无需改动：API 使用相对路径 `/api`，同源访问无 CORS 问题。启用后 8000 端口仍可直接访问（调试用）。
+
 **Neo4j（知识图谱）**：
 
 ```yaml
@@ -284,7 +324,7 @@ docker compose ps
 | 2 | 前端页面 | 浏览器访问 `http://<主机IP>:8000` | 页面正常渲染，无白屏 |
 | 3 | 登录/注册 | 页面注册学生账号并登录 | 成功，无 500 |
 | 4 | 推荐接口 | 页面输入位次（如 50000）生成推荐 | 返回冲/稳/保三档院校列表 |
-| 5 | 问答基础链路 | 页面提问「河南大学 2024 年理科最低录取位次是多少」 | 有回答且带引用/资料出处 |
+| 5 | 问答基础链路 | 页面提问「河南大学 2025 年物理类最低录取位次是多少」 | 有回答且带引用/资料出处 |
 
 ### P1：增强链路
 
