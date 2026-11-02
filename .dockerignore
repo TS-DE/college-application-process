@@ -1,0 +1,49 @@
+# ============================================================
+# .dockerignore（构建上下文排除清单）
+# 构建命令：docker build -t gaokao-backend:latest -f deploy/Dockerfile .
+# 目的：排除密钥、本地数据与无关目录，控制镜像体积
+# ============================================================
+
+# 版本控制
+.git
+.gitignore
+
+# ★ 环境与密钥（严禁进入镜像）
+backend/.env
+backend/app/.env
+backend/app/.env.bak.*
+deploy/.env.docker
+deploy/.env.docker.example
+
+# 本地运行数据（运行期通过 docker-compose 目录挂载提供，不进镜像）
+backend/chroma_db
+backend/knowledge_files
+backend/data
+backend/reports
+backend/__pycache__
+gaokao_data
+data
+temp_导入开源数据
+rag_eval_out
+rag_eval_dataset.json
+rag_eval_embedding_cache.json
+
+# 前端源码与依赖（镜像只拷贝 frontend/dist 构建产物）
+frontend/node_modules
+frontend/src
+frontend/public
+frontend/tests
+frontend/_legacy
+
+# Python 缓存
+venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# 其他本机目录
+Microsoft
+pip
+
+# 离线依赖包目录（仅本地验证备用；镜像采用在线安装，不 COPY 该目录）
+deps

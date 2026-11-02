@@ -43,3 +43,10 @@ backend/tests/_baseline/
 
 # 0.19.0：LangGraph sqlite checkpoint（运行时生成）
 backend/data/
+
+# 容器部署
+# 0.19.1+：本地 Docker 环境备份与离线依赖包（不入库）
+deps/
+Microsoft/
+pip/
+deploy/.env.docker

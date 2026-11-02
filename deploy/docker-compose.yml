@@ -1,0 +1,93 @@
+# ============================================================
+# 高考志愿填报系统 · 容器编排（模式 A：全容器化）
+# 用法：
+#   1) cp .env.docker.example .env.docker  并填写密钥/密码
+#   2) docker compose build
+#   3) docker compose up -d
+# 说明：
+#   - backend 通过 env_file 注入容器环境变量（config.py 中真实环境变量优先级最高）
+#   - chroma_db / knowledge_files / data / reports 以目录挂载提供（开发方预置或运行期生成）
+#   - neo4j / ollama 为可选服务，默认注释；启用后需同步改写 .env.docker 中连接地址
+# ============================================================
+name: gaokao
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: gaokao-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?请在 .env.docker 中设置 DB_PASSWORD}
+      MYSQL_DATABASE: gaokao
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d:ro   # 首次创建数据卷时自动执行建表 SQL
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: gaokao-backend:latest
+    container_name: gaokao-backend
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ../backend/chroma_db:/app/backend/chroma_db
+      - ../backend/knowledge_files:/app/backend/knowledge_files
+      - ../backend/data:/app/backend/data
+      - ../backend/reports:/app/backend/reports
+
+  # ---------------- 可选：知识图谱 Neo4j ----------------
+  # 启用步骤：取消注释 → 设置 .env.docker 中 NEO4J_PASSWORD → 由开发方执行 graph_builder 建库
+  # neo4j:
+  #   image: neo4j:5.26-community
+  #   container_name: gaokao-neo4j
+  #   restart: unless-stopped
+  #   environment:
+  #     NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-12345678}
+  #   ports:
+  #     - "7474:7474"
+  #     - "7687:7687"
+  #   volumes:
+  #     - neo4j-data:/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+  #     interval: 15s
+  #     timeout: 5s
+  #     retries: 10
+  #     start_period: 60s
+
+  # ---------------- 可选：本地大模型 Ollama ----------------
+  # 启用步骤：取消注释 → docker exec gaokao-ollama ollama pull qwen3:4b
+  #   → docker exec gaokao-ollama ollama pull nomic-embed-text
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: gaokao-ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+
+volumes:
+  mysql-data:
+  # neo4j-data:
+  # ollama-data:
